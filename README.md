@@ -910,6 +910,59 @@ const queryClient = new QueryClient({
 });
 ```
 
+## Configuration
+
+### Custom Logger Integration
+
+By default, pbtsdb logs debug messages to the console in development mode. You can integrate with your own logging service (Sentry, LogRocket, etc.) using `setLogger`:
+
+```typescript
+import { setLogger } from 'pocketbase-tanstack-db';
+
+// Example: Send errors to Sentry
+setLogger({
+    debug: (msg, context) => {
+        // Custom debug handling (e.g., only log in dev)
+        if (process.env.NODE_ENV === 'development') {
+            console.debug('[pbtsdb]', msg, context);
+        }
+    },
+    warn: (msg, context) => {
+        console.warn('[pbtsdb]', msg, context);
+        // Optional: Send to monitoring service
+        myMonitoringService.warn(msg, context);
+    },
+    error: (msg, context) => {
+        console.error('[pbtsdb]', msg, context);
+        // Send errors to error tracking service
+        Sentry.captureMessage(msg, {
+            level: 'error',
+            extra: context,
+        });
+    },
+});
+```
+
+**Disable logging completely:**
+
+```typescript
+import { setLogger } from 'pocketbase-tanstack-db';
+
+setLogger({
+    debug: () => {},
+    warn: () => {},
+    error: () => {},
+});
+```
+
+**Reset to default logger:**
+
+```typescript
+import { resetLogger } from 'pocketbase-tanstack-db';
+
+resetLogger();
+```
+
 ## License
 
 ISC

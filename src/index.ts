@@ -21,7 +21,10 @@ export {
 } from './provider';
 
 // Real-time subscription manager
-export { SubscriptionManager } from './subscription-manager';
+export { SubscriptionManager, SUBSCRIPTION_CONFIG } from './subscription-manager';
+
+// Logger configuration
+export { setLogger, resetLogger, type Logger } from './logger';
 
 // Type definitions
 export type {
@@ -40,6 +43,3 @@ export type {
     NonNullable,
     RelationAsCollection,
 } from './types';
-
-// Configuration constants
-export { SUBSCRIPTION_CONFIG } from './types';

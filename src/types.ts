@@ -1,6 +1,10 @@
 import type { Collection } from "@tanstack/db"
 import type { UnsubscribeFunc } from 'pocketbase';
 
+// ============================================================================
+// Schema Type Definitions
+// ============================================================================
+
 /**
  * Schema declaration for type-safe collection management.
  * Define your PocketBase collections with their record types and relations.
@@ -25,6 +29,10 @@ export interface SchemaDeclaration {
         };
     };
 }
+
+// ============================================================================
+// Subscription Types
+// ============================================================================
 
 /**
  * PocketBase real-time event structure.
@@ -82,6 +90,10 @@ export interface SubscribableCollection<T extends object = object> {
     waitForSubscription: (recordId?: string, timeoutMs?: number) => Promise<void>;
 }
 
+// ============================================================================
+// Collection Enhancement Types
+// ============================================================================
+
 /**
  * Join helper for type-safe TanStack DB joins.
  * Provides access to pre-configured relation collections.
@@ -119,6 +131,10 @@ export interface JoinHelper<
     relations: RelationsConfig<Schema, CollectionName>;
 }
 
+// ============================================================================
+// Schema Extraction Utilities
+// ============================================================================
+
 /**
  * Extracts the record type from a schema collection.
  * @internal
@@ -149,6 +165,10 @@ export type ExpandableFields<
 > = ExtractRelations<Schema, CollectionName> extends never
     ? never
     : keyof ExtractRelations<Schema, CollectionName> & string;
+
+// ============================================================================
+// Expand Type Utilities
+// ============================================================================
 
 /**
  * Parses comma-separated relation field names into a union type.
@@ -193,6 +213,10 @@ export type WithExpand<
         };
     }
     : ExtractRecordType<Schema, CollectionName>;
+
+// ============================================================================
+// Relation Type Utilities
+// ============================================================================
 
 /**
  * Removes undefined from a union type.
@@ -241,6 +265,10 @@ export type RelationsConfig<
         >;
     }>;
 
+// ============================================================================
+// Configuration Options
+// ============================================================================
+
 /**
  * Options for creating a collection with optional expand and relations.
  */
@@ -284,24 +312,3 @@ export interface CreateCollectionOptions<
      */
     expand?: Expand;
 }
-
-/**
- * Subscription configuration constants.
- * Controls reconnection behavior and timing.
- */
-export const SUBSCRIPTION_CONFIG = {
-    /** Maximum number of reconnection attempts before giving up */
-    MAX_RECONNECT_ATTEMPTS: 5,
-
-    /** Base delay in milliseconds for reconnection (uses exponential backoff) */
-    BASE_RECONNECT_DELAY_MS: 1000,
-
-    /** Interval in milliseconds for health checks */
-    HEALTH_CHECK_INTERVAL_MS: 60000,
-
-    /** Default timeout in milliseconds for waitForSubscription */
-    DEFAULT_WAIT_TIMEOUT_MS: 5000,
-
-    /** Delay in milliseconds before unsubscribing after last query unmounts (prevents thrashing) */
-    CLEANUP_DELAY_MS: 5000,
-} as const;

@@ -11,11 +11,19 @@ export type PocketBaseFilterString = string;
 export type PocketBaseSortString = string;
 
 /**
- * Formats a JavaScript value into PocketBase filter syntax
+ * Impossible filter condition used when no matches are possible.
+ * This is used for empty array filters.
+ */
+const IMPOSSIBLE_FILTER = 'id = ""';
+
+/**
+ * Formats a JavaScript value into PocketBase filter syntax.
+ * Handles strings, numbers, booleans, dates, and null values.
+ *
  * @param value - The value to format (string, number, boolean, Date, null)
  * @returns Formatted string suitable for PocketBase filters
  */
-function formatValue(value: unknown): string {
+function formatValueForPocketBase(value: unknown): string {
     if (value === null) return 'null';
     if (value === true) return 'true';
     if (value === false) return 'false';
@@ -59,23 +67,23 @@ export function convertToPocketBaseFilter(
         handlers: {
             eq: (field, value) => {
                 const fieldPath = field.join('.');
-                return `${fieldPath} = ${formatValue(value)}`;
+                return `${fieldPath} = ${formatValueForPocketBase(value)}`;
             },
             gt: (field, value) => {
                 const fieldPath = field.join('.');
-                return `${fieldPath} > ${formatValue(value)}`;
+                return `${fieldPath} > ${formatValueForPocketBase(value)}`;
             },
             gte: (field, value) => {
                 const fieldPath = field.join('.');
-                return `${fieldPath} >= ${formatValue(value)}`;
+                return `${fieldPath} >= ${formatValueForPocketBase(value)}`;
             },
             lt: (field, value) => {
                 const fieldPath = field.join('.');
-                return `${fieldPath} < ${formatValue(value)}`;
+                return `${fieldPath} < ${formatValueForPocketBase(value)}`;
             },
             lte: (field, value) => {
                 const fieldPath = field.join('.');
-                return `${fieldPath} <= ${formatValue(value)}`;
+                return `${fieldPath} <= ${formatValueForPocketBase(value)}`;
             },
             in: (field, values) => {
                 const fieldPath = field.join('.');
@@ -84,17 +92,17 @@ export function convertToPocketBaseFilter(
                 if (Array.isArray(values)) {
                     if (values.length === 0) {
                         // Empty array - no matches possible
-                        return 'id = ""'; // Always false condition
+                        return IMPOSSIBLE_FILTER;
                     }
                     // Use ?= operator for "any equals" semantics
-                    const conditions = values.map(v => `${fieldPath} ?= ${formatValue(v)}`);
+                    const conditions = values.map(v => `${fieldPath} ?= ${formatValueForPocketBase(v)}`);
                     return conditions.length === 1
                         ? conditions[0]
                         : `(${conditions.join(' || ')})`;
                 }
 
                 // Single value - just use equality
-                return `${fieldPath} = ${formatValue(values)}`;
+                return `${fieldPath} = ${formatValueForPocketBase(values)}`;
             },
             and: (...conditions) => {
                 // Filter out any empty conditions

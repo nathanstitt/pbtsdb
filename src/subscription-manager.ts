@@ -2,7 +2,25 @@ import PocketBase from 'pocketbase';
 import type { UnsubscribeFunc } from 'pocketbase';
 import type { Collection } from "@tanstack/db"
 import type { RealtimeEvent, SubscriptionState } from './types';
-import { SUBSCRIPTION_CONFIG } from './types';
+import { logger } from './logger';
+
+/**
+ * Subscription configuration constants.
+ * Controls reconnection behavior and timing.
+ */
+export const SUBSCRIPTION_CONFIG = {
+    /** Maximum number of reconnection attempts before giving up */
+    MAX_RECONNECT_ATTEMPTS: 5,
+
+    /** Base delay in milliseconds for reconnection (uses exponential backoff) */
+    BASE_RECONNECT_DELAY_MS: 1000,
+
+    /** Default timeout in milliseconds for waitForSubscription */
+    DEFAULT_WAIT_TIMEOUT_MS: 5000,
+
+    /** Delay in milliseconds before unsubscribing after last query unmounts (prevents thrashing) */
+    CLEANUP_DELAY_MS: 5000,
+} as const;
 
 /**
  * Type guard to check if a value has an 'id' field.
@@ -29,26 +47,13 @@ function createPendingSubscriptionState(recordId?: string): SubscriptionState {
 }
 
 /**
- * Simple debug logger for subscription events.
- * Can be extended to support different log levels or external logging services.
+ * Gets the subscription key for a given record ID.
+ * Returns '*' for collection-wide subscriptions, or the specific record ID.
  */
-const logger = {
-    debug: (msg: string, context?: object) => {
-        // Only log in development
-        if (process.env.NODE_ENV === 'development') {
-            // biome-ignore lint/suspicious/noConsoleLog: Debug logging is acceptable in development
-            console.log(`[SubscriptionManager] ${msg}`, context || '');
-        }
-    },
-    warn: (msg: string, context?: object) => {
-        // biome-ignore lint/suspicious/noConsoleLog: Warning logging is acceptable
-        console.warn(`[SubscriptionManager] ${msg}`, context || '');
-    },
-    error: (msg: string, context?: object) => {
-        // biome-ignore lint/suspicious/noConsoleLog: Error logging is acceptable
-        console.error(`[SubscriptionManager] ${msg}`, context || '');
-    },
-};
+function getSubscriptionKey(recordId?: string): string {
+    return recordId || '*';
+}
+
 
 /**
  * Manages real-time subscriptions to PocketBase collections.
@@ -67,6 +72,10 @@ export class SubscriptionManager {
 
     constructor(private pocketbase: PocketBase) {}
 
+    // ============================================================================
+    // Internal Helpers
+    // ============================================================================
+
     /**
      * Setup real-time subscription for a collection.
      * Returns an unsubscribe function.
@@ -76,7 +85,7 @@ export class SubscriptionManager {
         collection: Collection<T>,
         recordId?: string
     ): Promise<UnsubscribeFunc> {
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
 
         const eventHandler = (event: RealtimeEvent<T>) => {
             // Use direct writes to sync changes to TanStack DB
@@ -125,7 +134,7 @@ export class SubscriptionManager {
         const collectionSubs = this.subscriptions.get(collectionName);
         if (!collectionSubs) return;
 
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
         const state = collectionSubs.get(subscriptionKey);
         if (!state || state.isReconnecting) return;
 
@@ -173,6 +182,10 @@ export class SubscriptionManager {
         collectionSubs.delete(subscriptionKey);
     }
 
+    // ============================================================================
+    // Core Subscription Methods
+    // ============================================================================
+
     /**
      * Subscribe to real-time updates for a collection.
      * Returns a promise that resolves when the subscription is fully established.
@@ -195,7 +208,7 @@ export class SubscriptionManager {
 
         const collectionSubs = this.subscriptions.get(collectionName)!;
         const collectionPromises = this.subscriptionPromises.get(collectionName)!;
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
 
         // Don't subscribe if already subscribed
         if (collectionSubs.has(subscriptionKey)) {
@@ -225,20 +238,6 @@ export class SubscriptionManager {
                 if (state) {
                     state.unsubscribe = unsubscribe;
                 }
-
-                // Setup auto-reconnect health check
-                // Note: PocketBase doesn't expose disconnect events, so we monitor via
-                // periodic health checks or rely on error handling in subscription
-                const checkInterval = setInterval(() => {
-                    const state = collectionSubs.get(subscriptionKey);
-                    if (!state) {
-                        clearInterval(checkInterval);
-                        return;
-                    }
-
-                    // If subscription is still active, no action needed
-                    // In production, you might want to implement a heartbeat check
-                }, SUBSCRIPTION_CONFIG.HEALTH_CHECK_INTERVAL_MS);
             } catch (error) {
                 // Remove placeholder on error
                 collectionSubs.delete(subscriptionKey);
@@ -276,7 +275,7 @@ export class SubscriptionManager {
         const collectionSubs = this.subscriptions.get(collectionName);
         if (!collectionSubs) return;
 
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
         const state = collectionSubs.get(subscriptionKey);
 
         if (state) {
@@ -338,6 +337,10 @@ export class SubscriptionManager {
         this.subscriptionPromises.delete(collectionName);
     }
 
+    // ============================================================================
+    // State Queries
+    // ============================================================================
+
     /**
      * Check if subscribed to a collection.
      *
@@ -348,7 +351,7 @@ export class SubscriptionManager {
         const collectionSubs = this.subscriptions.get(collectionName);
         if (!collectionSubs) return false;
 
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
         return collectionSubs.has(subscriptionKey);
     }
 
@@ -364,7 +367,7 @@ export class SubscriptionManager {
         recordId?: string,
         timeoutMs: number = SUBSCRIPTION_CONFIG.DEFAULT_WAIT_TIMEOUT_MS
     ): Promise<void> {
-        const subscriptionKey = recordId || '*';
+        const subscriptionKey = getSubscriptionKey(recordId);
 
         // Check if already subscribed (no pending promise)
         const collectionSubs = this.subscriptions.get(collectionName);
@@ -398,6 +401,10 @@ export class SubscriptionManager {
 
         await Promise.race([promise, timeoutPromise]);
     }
+
+    // ============================================================================
+    // Lifecycle Management
+    // ============================================================================
 
     /**
      * Track subscriber addition for a collection.

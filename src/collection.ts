@@ -31,20 +31,6 @@ export {
 } from './provider';
 
 /**
- * Helper function to build PocketBase query options.
- * Centralizes query option construction for consistency and future extensibility.
- */
-function buildPocketBaseQueryOptions<E extends string | undefined>(
-    expand?: E
-): { expand?: string } {
-    const options: { expand?: string } = {};
-    if (expand) {
-        options.expand = expand;
-    }
-    return options;
-}
-
-/**
  * Factory for creating type-safe TanStack DB collections backed by PocketBase.
  * Integrates real-time subscriptions with automatic synchronization.
  */
@@ -53,6 +39,32 @@ export class CollectionFactory<Schema extends SchemaDeclaration, TMaxDepth exten
 
     constructor(public pocketbase: PocketBase, public queryClient: QueryClient) {
         this.subscriptionManager = new SubscriptionManager(pocketbase);
+    }
+
+    /**
+     * Setup automatic subscription lifecycle management.
+     * Hooks into TanStack DB's subscriber events to manage real-time subscriptions.
+     */
+    private setupSubscriptionLifecycle<T extends object>(
+        collectionName: string,
+        baseCollection: Collection<T>
+    ): void {
+        baseCollection.on('subscribers:change', (event) => {
+            const newCount = event.subscriberCount;
+            const previousCount = event.previousSubscriberCount;
+
+            // Subscriber added
+            if (newCount > previousCount) {
+                // Fire and forget - subscription handled asynchronously
+                this.subscriptionManager.addSubscriber(collectionName, baseCollection).catch(() => {
+                    // Silently handle subscription errors - reconnection will be attempted
+                });
+            }
+            // Subscriber removed
+            else if (newCount < previousCount) {
+                this.subscriptionManager.removeSubscriber(collectionName);
+            }
+        });
     }
 
     /**
@@ -157,8 +169,11 @@ export class CollectionFactory<Schema extends SchemaDeclaration, TMaxDepth exten
                 queryKey: [collection],
                 // No syncMode - use default behavior which auto-loads data
                 queryFn: async () => {
-                    // Build query options using helper
-                    const queryOptions = buildPocketBaseQueryOptions(options?.expand);
+                    // Build query options - conditionally add expand if provided
+                    const queryOptions: { expand?: string } = {};
+                    if (options?.expand) {
+                        queryOptions.expand = options.expand;
+                    }
 
                     // Execute query against PocketBase - fetch all data
                     const result = await this.pocketbase
@@ -193,24 +208,8 @@ export class CollectionFactory<Schema extends SchemaDeclaration, TMaxDepth exten
             relations: options?.relations || {} as RelationsConfig<Schema, C>
         });
 
-        // Hook into TanStack DB's subscriber lifecycle events
-        // Subscribe when first query becomes active, unsubscribe when last query unmounts
-        baseCollection.on('subscribers:change', (event) => {
-            const newCount = event.subscriberCount;
-            const previousCount = event.previousSubscriberCount;
-
-            // Subscriber added
-            if (newCount > previousCount) {
-                // Fire and forget - subscription handled asynchronously
-                this.subscriptionManager.addSubscriber(collection, baseCollection).catch(() => {
-                    // Silently handle subscription errors - reconnection will be attempted
-                });
-            }
-            // Subscriber removed
-            else if (newCount < previousCount) {
-                this.subscriptionManager.removeSubscriber(collection);
-            }
-        });
+        // Setup automatic subscription lifecycle management
+        this.setupSubscriptionLifecycle(collection, baseCollection);
 
         return subscribableCollection as Collection<RecordType> & SubscribableCollection<RecordType> & JoinHelper<Schema, C, RecordType>;
     }
