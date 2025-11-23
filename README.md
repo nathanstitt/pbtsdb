@@ -8,6 +8,7 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
 - 🎯 **Full TypeScript type safety** for queries and relations
 - ⚡ **Reactive collections** with TanStack DB
 - 🔄 **Automatic caching** via TanStack Query
+- ✨ **Optimistic mutations** with insert/update/delete support
 - 🎨 **React hooks** for easy component integration
 - 🔗 **Type-safe joins** and relation expansion
 
@@ -25,6 +26,7 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
   - [Filtering and Sorting](#filtering-and-sorting)
   - [Relations and Joins](#relations-and-joins)
   - [Real-time Updates](#real-time-updates)
+  - [Mutations](#mutations)
 - [TypeScript](#typescript)
 - [Best Practices](#best-practices)
 
@@ -233,6 +235,10 @@ create<CollectionName>(
 **Options:**
 - `expand?: string` - Relations to expand (e.g., `'author,metadata'`)
 - `relations?: Record<string, Collection>` - Collections for manual joins
+- `startSync?: boolean` - Start syncing immediately (default: `false`, lazy)
+- `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
+- `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
+- `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable
 
 **Examples:**
 
@@ -398,6 +404,29 @@ await collection.waitForSubscription(); // Wait for collection-wide
 await collection.waitForSubscription('record_id'); // Wait for specific record
 await collection.waitForSubscription(undefined, 5000); // With timeout
 ```
+
+### Utility Functions
+
+#### newRecordId()
+
+Generate a PocketBase-compatible record ID (15-character alphanumeric string).
+
+```typescript
+import { newRecordId } from 'pocketbase-tanstack-db';
+
+const id = newRecordId(); // "a1b2c3d4e5f6g7h"
+
+// Use when creating records
+const newBook = {
+    id: newRecordId(),
+    title: 'New Book',
+    // ... other fields
+};
+
+booksCollection.insert(newBook);
+```
+
+**Returns:** `string` - 15-character lowercase alphanumeric ID
 
 ## Usage Examples
 
@@ -702,6 +731,227 @@ const newBook = await pb.collection('books').create({ /* ... */ });
 await waitFor(() => {
     expect(data?.some(b => b.id === newBook.id)).toBe(true);
 });
+```
+
+### Mutations
+
+Collections support insert, update, and delete operations with automatic PocketBase synchronization and optimistic updates.
+
+#### Insert Records
+
+```typescript
+import { newRecordId } from 'pocketbase-tanstack-db';
+
+const { data } = useLiveQuery((q) =>
+    q.from({ books: booksCollection })
+);
+
+// Insert a new book
+const newBook: Book = {
+    id: newRecordId(), // Generate PocketBase-compatible ID
+    title: 'The Great Gatsby',
+    author: 'author_id_123',
+    genre: 'Fiction',
+    published_date: '1925-04-10',
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+};
+
+const transaction = booksCollection.insert(newBook);
+
+// Transaction states: 'pending' → 'persisting' → 'completed'
+console.log(transaction.state); // 'pending' or 'persisting'
+
+// Wait for persistence
+await transaction.isPersisted.promise;
+console.log(transaction.state); // 'completed'
+
+// Optimistic update: newBook appears in UI immediately
+// Real sync: newBook saved to PocketBase
+```
+
+#### Update Records
+
+```typescript
+// Update a book's title
+const transaction = booksCollection.update('book_id_123', (draft) => {
+    draft.title = 'Updated Title';
+    draft.genre = 'Science Fiction';
+});
+
+// Optimistic update: Changes appear immediately in UI
+// Real sync: Changes saved to PocketBase
+
+await transaction.isPersisted.promise;
+```
+
+#### Non-Optimistic Updates
+
+By default, mutations are optimistic (UI updates immediately). Disable for server-first updates:
+
+```typescript
+// Update config goes BEFORE the callback
+const transaction = booksCollection.update(
+    'book_id_123',
+    { optimistic: false }, // ← Config parameter
+    (draft) => {
+        draft.title = 'Server-First Update';
+    }
+);
+
+// UI won't update until server confirms
+await transaction.isPersisted.promise;
+// Now UI updates with server response
+```
+
+#### Delete Records
+
+```typescript
+const transaction = booksCollection.delete('book_id_123');
+
+// Optimistic update: Record removed from UI immediately
+// Real sync: Record deleted from PocketBase
+
+await transaction.isPersisted.promise;
+```
+
+#### Batch Mutations
+
+Batch multiple mutations together for better performance:
+
+```typescript
+booksCollection.utils.writeBatch(() => {
+    // Multiple mutations in one batch
+    booksCollection.update('book_1', (draft) => {
+        draft.title = 'Updated Title 1';
+    });
+
+    booksCollection.update('book_2', (draft) => {
+        draft.title = 'Updated Title 2';
+    });
+
+    booksCollection.update('book_3', (draft) => {
+        draft.genre = 'Mystery';
+    });
+});
+
+// All mutations:
+// - Execute optimistically together
+// - Merge updates to the same record
+// - Sync to PocketBase in a single transaction
+```
+
+#### Mutation Merging
+
+Multiple updates to the same record within a batch are automatically merged:
+
+```typescript
+booksCollection.utils.writeBatch(() => {
+    booksCollection.update('book_1', (draft) => {
+        draft.title = 'First Update';
+    });
+
+    booksCollection.update('book_1', (draft) => {
+        draft.title = 'Final Title'; // Overwrites previous
+    });
+
+    booksCollection.update('book_1', (draft) => {
+        draft.genre = 'Mystery'; // Merged with title update
+    });
+});
+
+// Result: Only ONE mutation sent to PocketBase with:
+// { title: 'Final Title', genre: 'Mystery' }
+```
+
+#### Transaction States
+
+Mutations return a `Transaction` object with state tracking:
+
+```typescript
+const tx = booksCollection.insert(newBook);
+
+// States: 'pending' | 'persisting' | 'completed' | 'error'
+console.log(tx.state);
+
+// Wait for completion
+await tx.isPersisted.promise;
+
+if (tx.state === 'completed') {
+    console.log('Mutation succeeded!');
+}
+```
+
+#### Custom Mutation Handlers
+
+Override default behavior for insert/update/delete operations:
+
+```typescript
+const booksCollection = factory.create('books', {
+    // Custom insert handler
+    onInsert: async ({ transaction }) => {
+        for (const mutation of transaction.mutations) {
+            await customInsertLogic(mutation.modified);
+        }
+        await queryClient.invalidateQueries({ queryKey: ['books'] });
+    },
+
+    // Custom update handler
+    onUpdate: async ({ transaction }) => {
+        for (const mutation of transaction.mutations) {
+            const recordId = (mutation.original as { id: string }).id;
+            await customUpdateLogic(recordId, mutation.changes);
+        }
+        await queryClient.invalidateQueries({ queryKey: ['books'] });
+    },
+
+    // Custom delete handler
+    onDelete: async ({ transaction }) => {
+        for (const mutation of transaction.mutations) {
+            const recordId = (mutation.original as { id: string }).id;
+            await customDeleteLogic(recordId);
+        }
+        await queryClient.invalidateQueries({ queryKey: ['books'] });
+    },
+});
+```
+
+#### Disable Mutations (Read-Only Collections)
+
+Set mutation handlers to `false` to disable specific operations:
+
+```typescript
+const booksCollection = factory.create('books', {
+    onInsert: false, // Inserts will throw an error
+    onUpdate: false, // Updates will throw an error
+    onDelete: false, // Deletes will throw an error
+});
+
+// This will throw an error:
+booksCollection.insert(newBook); // ❌ Error: Inserts disabled
+```
+
+#### Mutations with Expand
+
+Mutations work seamlessly with expanded relations:
+
+```typescript
+const booksCollection = factory.create('books', {
+    expand: 'author' as const
+});
+
+// Insert includes expanded relation
+const newBook = {
+    id: newRecordId(),
+    title: 'New Book',
+    author: 'author_id_123',
+    // ... other fields
+};
+
+booksCollection.insert(newBook);
+
+// After sync, the collection will re-fetch with expand
+// so the new book will have book.expand.author populated
 ```
 
 ## TypeScript

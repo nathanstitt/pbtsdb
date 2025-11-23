@@ -509,6 +509,9 @@ describe('Collection - Real-time Subscriptions', () => {
         // Unmount the hook - subscription should be scheduled for cleanup
         unmount()
 
+        // Remove the query to prevent invariant violation warnings
+        queryClient.removeQueries({ queryKey: ['books'] })
+
         // After cleanup delay (5 seconds), subscription should be removed
         await new Promise(resolve => setTimeout(resolve, 6000))
 
@@ -564,6 +567,9 @@ describe('Collection - Real-time Subscriptions', () => {
         // Unmount to trigger cleanup
         unmount()
 
+        // Remove the query to prevent invariant violation warnings
+        queryClient.removeQueries({ queryKey: ['books'] })
+
         // Wait for cleanup delay (5s) plus buffer
         await new Promise(resolve => setTimeout(resolve, 6000))
 
@@ -611,6 +617,10 @@ describe('Collection - Real-time Subscriptions', () => {
 
         // Cleanup
         unmount()
+
+        // Remove the query to prevent invariant violation warnings
+        queryClient.removeQueries({ queryKey: ['books'] })
+
         await new Promise(resolve => setTimeout(resolve, 6000))
         expect(booksCollection.isSubscribed()).toBe(false)
     }, 15000)

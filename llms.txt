@@ -1,6 +1,6 @@
 # pbtsdb
 
-> Type-safe PocketBase integration with TanStack Query and TanStack DB for React applications. Provides reactive collections with automatic real-time subscriptions, full TypeScript type safety, and minimal boilerplate.
+> Type-safe PocketBase integration with TanStack Query and TanStack DB for React applications. Provides reactive collections with automatic real-time subscriptions, optimistic mutations, full TypeScript type safety, and minimal boilerplate.
 
 This library connects PocketBase (backend-as-a-service) to TanStack's reactive database tools. Use it when building React applications that need real-time data synchronization with PocketBase while maintaining strict type safety.
 
@@ -51,6 +51,58 @@ Tests use real PocketBase instance (not mocked). Server infrastructure is fully 
 - [AGENTS.md](AGENTS.md): Complete development guide with architecture, patterns, and testing
 - [README.md](README.md): User-facing API reference with examples
 - [test/schema.ts](test/schema.ts): Reference schema implementation
+
+## Mutations
+
+Collections support insert, update, and delete with automatic PocketBase sync:
+
+```typescript
+import { newRecordId } from 'pocketbase-tanstack-db';
+
+// Insert with optimistic update (UI updates immediately)
+const tx = collection.insert({
+    id: newRecordId(), // Generate PocketBase-compatible ID
+    title: 'New Book',
+    // ... other fields
+});
+
+// Update with optimistic update
+collection.update('record_id', (draft) => {
+    draft.title = 'Updated Title';
+});
+
+// Update with config (non-optimistic - waits for server)
+collection.update('record_id', { optimistic: false }, (draft) => {
+    draft.title = 'Server-First Update';
+});
+
+// Delete with optimistic update
+collection.delete('record_id');
+
+// Batch mutations - merges multiple updates to same record
+collection.utils.writeBatch(() => {
+    collection.update('id1', (draft) => { draft.field1 = 'value1' });
+    collection.update('id1', (draft) => { draft.field2 = 'value2' }); // Merged!
+    collection.update('id2', (draft) => { draft.field = 'value' });
+});
+
+// Wait for persistence
+await tx.isPersisted.promise; // States: pending → persisting → completed
+
+// Custom handlers or disable mutations
+const collection = factory.create('books', {
+    onInsert: async ({ transaction }) => { /* custom logic */ },
+    onUpdate: false, // Disable updates (throws error if called)
+    onDelete: false, // Disable deletes
+});
+```
+
+**Key Points:**
+- Mutations are optimistic by default (UI updates immediately)
+- Auto-syncs to PocketBase in background
+- Batch mutations merge updates to same record
+- Transaction states: pending → persisting → completed
+- Use `newRecordId()` to generate PocketBase-compatible IDs
 
 ## Common Patterns
 

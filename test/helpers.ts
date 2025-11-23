@@ -2,8 +2,10 @@ import { QueryClient } from '@tanstack/react-query'
 import PocketBase from 'pocketbase'
 import type { Collection } from '@tanstack/db'
 import 'dotenv/config'
-import { CollectionFactory } from '../src/collection'
+import { CollectionFactory, newRecordId } from '../src'
 import type { Schema } from './schema'
+
+export { newRecordId }
 
 if (!process.env.TESTING_PB_ADDR) {
     throw new Error('TESTING_PB_ADDR environment variable is not set')
@@ -19,7 +21,7 @@ export function createTestQueryClient(): QueryClient {
         defaultOptions: {
             queries: {
                 retry: false,
-                gcTime: Infinity, // Don't garbage collect queries during tests
+                gcTime: 30000,
             },
         },
     })
@@ -43,7 +45,7 @@ export function clearAuth(): void {
 }
 
 /**
- * Get a unique timestamp-based slug for test data
+ * Get a unique timestamp-based slug for test data (non-ID fields like ISBN)
  */
 export function getTestSlug(prefix = 'test'): string {
     const timestamp = Date.now().toString().slice(-8)

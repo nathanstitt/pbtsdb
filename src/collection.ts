@@ -177,6 +177,33 @@ export class CollectionFactory<Schema extends SchemaDeclaration, TMaxDepth exten
                 queryClient: this.queryClient,
                 getKey: (item: RecordType) => (item as { id: string }).id,
                 startSync: options?.startSync ?? false,
+                onInsert: options?.onInsert === false ? undefined : options?.onInsert ?? (async ({ transaction }) => {
+                    await Promise.all(
+                        transaction.mutations.map(async (mutation) => {
+                            const { id, created, updated, collectionId, collectionName, ...data } = mutation.modified as Record<string, unknown>;
+                            await this.pocketbase.collection(collection).create(data);
+                        })
+                    );
+                    await this.queryClient.invalidateQueries({ queryKey: [collection] });
+                }),
+                onUpdate: options?.onUpdate === false ? undefined : options?.onUpdate ?? (async ({ transaction }) => {
+                    await Promise.all(
+                        transaction.mutations.map(async (mutation) => {
+                            const recordWithId = mutation.original as { id: string };
+                            await this.pocketbase.collection(collection).update(recordWithId.id, mutation.changes);
+                        })
+                    );
+                    await this.queryClient.invalidateQueries({ queryKey: [collection] });
+                }),
+                onDelete: options?.onDelete === false ? undefined : options?.onDelete ?? (async ({ transaction }) => {
+                    await Promise.all(
+                        transaction.mutations.map(async (mutation) => {
+                            const recordWithId = mutation.original as { id: string };
+                            await this.pocketbase.collection(collection).delete(recordWithId.id);
+                        })
+                    );
+                    await this.queryClient.invalidateQueries({ queryKey: [collection] });
+                }),
             })
         );
 

@@ -16,11 +16,14 @@ export {
     useStores,
     type CollectionsMap,
     type CollectionsProviderProps,
+    type CollectionsRegistry,
 } from './provider';
 
 export { SubscriptionManager, SUBSCRIPTION_CONFIG } from './subscription-manager';
 
 export { setLogger, resetLogger, type Logger } from './logger';
+
+export { newRecordId } from './util';
 
 export type {
     SchemaDeclaration,

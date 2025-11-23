@@ -2,12 +2,22 @@ import React, { type ReactNode } from 'react';
 import { renderHook, waitFor } from '@testing-library/react';
 import { useLiveQuery } from '@tanstack/react-db';
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest';
-
+import { eq } from '@tanstack/db'
 import type { QueryClient } from '@tanstack/react-query';
 
 import { CollectionsProvider, useStore, useStores } from '../src/provider';
 import type { Books, Authors, BookMetadata } from './schema';
-import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createCollectionFactory } from './helpers';
+import type { Collection } from '@tanstack/db';
+import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createCollectionFactory, getTestAuthorId } from './helpers';
+
+declare module '../src/provider' {
+    interface CollectionsRegistry {
+        books: Collection<Books>;
+        authors: Collection<Authors>;
+        metadata: Collection<BookMetadata>;
+        myCustomBooksKey: Collection<Books>;
+    }
+}
 
 describe('CollectionsProvider and Hooks', () => {
     let queryClient: QueryClient;
@@ -51,7 +61,7 @@ describe('CollectionsProvider and Hooks', () => {
             }).toThrow('Collection "nonexistent" not found in CollectionsProvider');
         });
 
-        it('should return collection from provider', () => {
+        it('should return collection from provider with automatic type inference', () => {
             const factory = createCollectionFactory(queryClient);
             const booksCollection = factory.create('books');
 
@@ -63,7 +73,7 @@ describe('CollectionsProvider and Hooks', () => {
                 <CollectionsProvider collections={stores}>{children}</CollectionsProvider>
             );
 
-            const { result } = renderHook(() => useStore<Books>('books'), { wrapper });
+            const { result } = renderHook(() => useStore('books'), { wrapper });
 
             expect(result.current).toBe(booksCollection);
         });
@@ -79,11 +89,13 @@ describe('CollectionsProvider and Hooks', () => {
             const wrapper = ({ children }: { children: ReactNode }) => (
                 <CollectionsProvider collections={stores}>{children}</CollectionsProvider>
             );
-
+            const authorId = await getTestAuthorId()
             const { result } = renderHook(
                 () => {
-                    const collection = useStore<Books>('books');
-                    return useLiveQuery((q) => q.from({ books: collection }));
+                    const collection = useStore('books');
+                    return useLiveQuery((q) => q.from({ books: collection })
+                        .where(({ books }) => eq(books.author,  authorId))
+                    );
                 },
                 { wrapper }
             );
@@ -98,6 +110,8 @@ describe('CollectionsProvider and Hooks', () => {
 
             expect(result.current.data).toBeDefined();
             expect(Array.isArray(result.current.data)).toBe(true);
+            expect(result.current.data.length).toBeGreaterThanOrEqual(1)
+            expect(result.current.data[0].author).toBeTypeOf('string')
         }, 15000);
     });
 
@@ -123,7 +137,7 @@ describe('CollectionsProvider and Hooks', () => {
             }).toThrow('Collection "nonexistent" not found in CollectionsProvider');
         });
 
-        it('should return array of collections in correct order', () => {
+        it('should return array of collections in correct order with automatic type inference', () => {
             const factory = createCollectionFactory(queryClient);
             const booksCollection = factory.create('books');
             const authorsCollection = factory.create('authors');
@@ -140,9 +154,7 @@ describe('CollectionsProvider and Hooks', () => {
             );
 
             const { result } = renderHook(
-                () => useStores<[Books, Authors, BookMetadata]>(
-                    ['books', 'authors', 'metadata']
-                ),
+                () => useStores(['books', 'authors', 'metadata'] as const),
                 { wrapper }
             );
 
@@ -168,7 +180,7 @@ describe('CollectionsProvider and Hooks', () => {
 
             const { result } = renderHook(
                 () => {
-                    const [books] = useStores<[Books]>(['books']);
+                    const [books] = useStores(['books'] as const);
                     return useLiveQuery((q) => q.from({ books }));
                 },
                 { wrapper }
@@ -202,11 +214,11 @@ describe('CollectionsProvider and Hooks', () => {
                 <CollectionsProvider collections={stores}>{children}</CollectionsProvider>
             );
 
-            const { result } = renderHook(() => useStore<Books>('books'), { wrapper });
+            const { result } = renderHook(() => useStore('books'), { wrapper });
 
             expect(result.current).toBe(booksCollection);
 
-            const { result: result2 } = renderHook(() => useStore<Authors>('authors'), {
+            const { result: result2 } = renderHook(() => useStore('authors'), {
                 wrapper,
             });
 
@@ -225,9 +237,10 @@ describe('CollectionsProvider and Hooks', () => {
                 <CollectionsProvider collections={stores}>{children}</CollectionsProvider>
             );
 
-            const { result } = renderHook(() => useStore<Books>('myCustomBooksKey'), { wrapper });
+            const { result } = renderHook(() => useStore('myCustomBooksKey'), { wrapper });
 
             expect(result.current).toBe(booksCollection);
         });
     });
+
 });

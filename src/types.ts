@@ -1,4 +1,4 @@
-import type { Collection } from "@tanstack/db"
+import type { Collection, InsertMutationFn, UpdateMutationFn, DeleteMutationFn } from "@tanstack/db"
 import type { UnsubscribeFunc } from 'pocketbase';
 
 // ============================================================================
@@ -330,4 +330,102 @@ export interface CreateCollectionOptions<
      * ```
      */
     startSync?: boolean;
+
+    /**
+     * Custom handler for insert mutations.
+     *
+     * **Default behavior (not provided):** Automatically creates records in PocketBase,
+     * excluding auto-generated fields (id, created, updated, collectionId, collectionName).
+     *
+     * **Custom handler:** Provide your own handler to customize insert behavior.
+     *
+     * **Disable:** Set to `false` to disable insert mutations entirely (will throw error if insert is called).
+     *
+     * @example
+     * ```ts
+     * // Use default automatic handler (recommended)
+     * const collection = factory.create('books');
+     *
+     * // Custom handler
+     * const collection = factory.create('books', {
+     *     onInsert: async ({ transaction }) => {
+     *         for (const mutation of transaction.mutations) {
+     *             await customInsertLogic(mutation.modified);
+     *         }
+     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *     }
+     * });
+     *
+     * // Disable inserts (read-only collection)
+     * const collection = factory.create('books', {
+     *     onInsert: false
+     * });
+     * ```
+     */
+    onInsert?: InsertMutationFn<WithExpand<Schema, CollectionName, Expand>> | false;
+
+    /**
+     * Custom handler for update mutations.
+     *
+     * **Default behavior (not provided):** Automatically updates records in PocketBase
+     * with the changed fields.
+     *
+     * **Custom handler:** Provide your own handler to customize update behavior.
+     *
+     * **Disable:** Set to `false` to disable update mutations entirely (will throw error if update is called).
+     *
+     * @example
+     * ```ts
+     * // Use default automatic handler (recommended)
+     * const collection = factory.create('books');
+     *
+     * // Custom handler
+     * const collection = factory.create('books', {
+     *     onUpdate: async ({ transaction }) => {
+     *         for (const mutation of transaction.mutations) {
+     *             await customUpdateLogic(mutation.original.id, mutation.changes);
+     *         }
+     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *     }
+     * });
+     *
+     * // Disable updates (read-only collection)
+     * const collection = factory.create('books', {
+     *     onUpdate: false
+     * });
+     * ```
+     */
+    onUpdate?: UpdateMutationFn<WithExpand<Schema, CollectionName, Expand>> | false;
+
+    /**
+     * Custom handler for delete mutations.
+     *
+     * **Default behavior (not provided):** Automatically deletes records from PocketBase.
+     *
+     * **Custom handler:** Provide your own handler to customize delete behavior.
+     *
+     * **Disable:** Set to `false` to disable delete mutations entirely (will throw error if delete is called).
+     *
+     * @example
+     * ```ts
+     * // Use default automatic handler (recommended)
+     * const collection = factory.create('books');
+     *
+     * // Custom handler
+     * const collection = factory.create('books', {
+     *     onDelete: async ({ transaction }) => {
+     *         for (const mutation of transaction.mutations) {
+     *             await customDeleteLogic(mutation.original.id);
+     *         }
+     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *     }
+     * });
+     *
+     * // Disable deletes (read-only collection)
+     * const collection = factory.create('books', {
+     *     onDelete: false
+     * });
+     * ```
+     */
+    onDelete?: DeleteMutationFn<WithExpand<Schema, CollectionName, Expand>> | false;
 }

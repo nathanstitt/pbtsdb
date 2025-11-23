@@ -19,6 +19,29 @@ import type { SchemaDeclaration } from './types';
 export type CollectionsMap = Record<string, Collection<any>>;
 
 /**
+ * Registry interface for declaring your application's collections.
+ * Augment this interface in your app to enable automatic type inference in hooks.
+ *
+ * @example
+ * ```ts
+ * // In your app (e.g., hooks.ts or collections.ts)
+ * declare module 'pbtsdb' {
+ *     interface CollectionsRegistry {
+ *         books: Collection<Books>;
+ *         authors: Collection<Authors>;
+ *         customers: Collection<Customers>;
+ *     }
+ * }
+ *
+ * // Now hooks have automatic type inference
+ * function MyComponent() {
+ *     const books = useStore('books'); // Type is Collection<Books>
+ * }
+ * ```
+ */
+export interface CollectionsRegistry extends CollectionsMap {}
+
+/**
  * Context for providing collections to React components.
  * @internal
  */
@@ -68,19 +91,26 @@ export function CollectionsProvider({ collections, children }: CollectionsProvid
  * Hook to access a single collection from the provider.
  * Returns the Collection instance for the specified key.
  *
- * @template T - The record type for the collection
+ * Type inference is automatic when you augment the CollectionsRegistry interface.
+ *
  * @param key - The collection key as defined in the provider
- * @returns The Collection instance
+ * @returns The Collection instance with inferred type
  * @throws Error if used outside of CollectionsProvider or if key doesn't exist
  *
  * @example
  * ```tsx
- * function JobsList() {
- *     const jobsCollection = useStore<JobsRecord>('jobs');
+ * // Augment the registry first (in hooks.ts or collections.ts)
+ * declare module 'pbtsdb' {
+ *     interface CollectionsRegistry {
+ *         jobs: Collection<Jobs>;
+ *     }
+ * }
  *
- *     const { data } = useLiveQuery((q) =>
- *         q.from({ jobs: jobsCollection })
- *     );
+ * // Then use with automatic type inference
+ * function JobsList() {
+ *     const jobs = useStore('jobs'); // ✅ Type is Collection<Jobs>
+ *
+ *     const { data } = useLiveQuery((q) => q.from({ jobs }));
  *
  *     return (
  *         <ul>
@@ -90,7 +120,9 @@ export function CollectionsProvider({ collections, children }: CollectionsProvid
  * }
  * ```
  */
-export function useStore<T extends object = object>(key: string): Collection<T> {
+export function useStore<K extends keyof CollectionsRegistry>(
+    key: K
+): CollectionsRegistry[K] {
     const context = useContext(CollectionsContext);
 
     if (!context) {
@@ -98,32 +130,41 @@ export function useStore<T extends object = object>(key: string): Collection<T> 
     }
 
     if (!(key in context)) {
-        throw new Error(`Collection "${key}" not found in CollectionsProvider`);
+        throw new Error(`Collection "${String(key)}" not found in CollectionsProvider`);
     }
 
-    return context[key] as Collection<T>;
+    return context[key as string] as CollectionsRegistry[K];
 }
 
 /**
  * Hook to access multiple collections from the provider.
  * Returns an array of Collection instances matching the order of the keys array.
  *
- * @template T - Tuple type of record types for each collection
+ * Type inference is automatic when you augment the CollectionsRegistry interface.
+ *
  * @param keys - Array of collection keys as defined in the provider
- * @returns Array of Collection instances in the same order as keys
+ * @returns Array of Collection instances in the same order as keys with inferred types
  * @throws Error if used outside of CollectionsProvider or if any key doesn't exist
  *
  * @example
  * ```tsx
+ * // Augment the registry first (in hooks.ts or collections.ts)
+ * declare module 'pbtsdb' {
+ *     interface CollectionsRegistry {
+ *         jobs: Collection<Jobs>;
+ *         customers: Collection<Customers>;
+ *     }
+ * }
+ *
+ * // Then use with automatic type inference
  * function JobsWithCustomers() {
- *     const [jobsCollection, customersCollection] = useStores<
- *         [JobsRecord, CustomersRecord]
- *     >(['jobs', 'customers']);
+ *     const [jobs, customers] = useStores(['jobs', 'customers']);
+ *     // ✅ Types are [Collection<Jobs>, Collection<Customers>]
  *
  *     const { data } = useLiveQuery((q) =>
- *         q.from({ job: jobsCollection })
+ *         q.from({ job: jobs })
  *          .join(
- *              { customer: customersCollection },
+ *              { customer: customers },
  *              ({ job, customer }) => eq(job.customer, customer.id),
  *              'left'
  *          )
@@ -133,9 +174,9 @@ export function useStore<T extends object = object>(key: string): Collection<T> 
  * }
  * ```
  */
-export function useStores<T extends readonly object[]>(
-    keys: readonly string[]
-): { [K in keyof T]: Collection<T[K]> } {
+export function useStores<K extends readonly (keyof CollectionsRegistry)[]>(
+    keys: K
+): { [I in keyof K]: K[I] extends keyof CollectionsRegistry ? CollectionsRegistry[K[I]] : never } {
     const context = useContext(CollectionsContext);
 
     if (!context) {
@@ -144,10 +185,13 @@ export function useStores<T extends readonly object[]>(
 
     const collections = keys.map((key) => {
         if (!(key in context)) {
-            throw new Error(`Collection "${key}" not found in CollectionsProvider`);
+            throw new Error(`Collection "${String(key)}" not found in CollectionsProvider`);
         }
-        return context[key];
+        return context[key as string];
     });
 
-    return collections as { [K in keyof T]: Collection<T[K]> };
+    return collections as {
+        [I in keyof K]: K[I] extends keyof CollectionsRegistry ? CollectionsRegistry[K[I]] : never;
+    };
 }
+
