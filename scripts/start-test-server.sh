@@ -16,7 +16,7 @@ if [ -z "$TEST_USER_EMAIL" ] || [ -z "$TEST_USER_PW" ]; then
 fi
 
 # Set default testing PocketBase address if not set
-TESTING_PB_ADDR=${TESTING_PB_ADDR:-http://127.0.0.1:8811}
+TESTING_PB_ADDR=${TESTING_PB_ADDR:-http://127.0.0.1:8210}
 
 # Extract host and port from TESTING_PB_ADDR
 PB_HOST=$(echo $TESTING_PB_ADDR | sed -E 's|https?://([^:]+):([0-9]+)|\1|')
