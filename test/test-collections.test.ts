@@ -65,8 +65,8 @@ describe('Test Collections - Relationship Testing', () => {
             const book = books[0];
 
             expect(book.expand?.author).toBeDefined();
-            expect(book.expand.author).toHaveProperty('name');
-            expect(book.expand.author).toHaveProperty('email');
+            expect(book.expand?.author).toHaveProperty('name');
+            expect(book.expand?.author).toHaveProperty('email');
         });
     });
 
@@ -94,8 +94,8 @@ describe('Test Collections - Relationship Testing', () => {
             const item = metadata[0];
 
             expect(item.expand?.book).toBeDefined();
-            expect(item.expand.book).toHaveProperty('title');
-            expect(item.expand.book).toHaveProperty('isbn');
+            expect(item.expand?.book).toHaveProperty('title');
+            expect(item.expand?.book).toHaveProperty('isbn');
         });
     });
 
@@ -141,9 +141,9 @@ describe('Test Collections - Relationship Testing', () => {
             const bookTag = bookTags[0];
 
             expect(bookTag.expand?.book).toBeDefined();
-            expect(bookTag.expand.book).toHaveProperty('title');
+            expect(bookTag.expand?.book).toHaveProperty('title');
             expect(bookTag.expand?.tag).toBeDefined();
-            expect(bookTag.expand.tag).toHaveProperty('name');
+            expect(bookTag.expand?.tag).toHaveProperty('name');
         });
 
         it('should verify many-to-many relationship integrity', async () => {

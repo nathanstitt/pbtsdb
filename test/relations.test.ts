@@ -92,7 +92,7 @@ describe('Collection - Relations', () => {
         const factory = createCollectionFactory(queryClient)
         // Type the expand as a literal to get proper type inference
         const booksCollection = factory.create('books', {
-            expand: 'author,metadata' as const  // Type-safe: only valid relation fields allowed
+            expand: 'author' as const  // Type-safe: only valid relation fields allowed
         })
 
         const { result } = renderHook(() =>
@@ -121,12 +121,6 @@ describe('Collection - Relations', () => {
             if (firstBook.expand.author) {
                 const authorName: string = firstBook.expand.author.name
                 expect(authorName).toBeTypeOf('string')
-            }
-
-            if (firstBook.expand.metadata) {
-                const metadataYear: number | undefined = firstBook.expand.metadata.year
-                // Type inference works correctly
-                expect(metadataYear).toBeDefined()
             }
         }
 

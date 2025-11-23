@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from
 import type { QueryClient } from '@tanstack/react-query';
 
 import { CollectionsProvider, useStore, useStores } from '../src/provider';
-import type { BooksRecord, AuthorsRecord, MetadataRecord } from './schema';
+import type { BooksRecord, AuthorsRecord, BookMetadataRecord } from './schema';
 import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createCollectionFactory } from './helpers';
 
 describe('CollectionsProvider and Hooks', () => {
@@ -140,7 +140,7 @@ describe('CollectionsProvider and Hooks', () => {
             );
 
             const { result } = renderHook(
-                () => useStores<[BooksRecord, AuthorsRecord, MetadataRecord]>(
+                () => useStores<[BooksRecord, AuthorsRecord, BookMetadataRecord]>(
                     ['books', 'authors', 'metadata']
                 ),
                 { wrapper }

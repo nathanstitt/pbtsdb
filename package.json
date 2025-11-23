@@ -1,12 +1,46 @@
 {
   "name": "pocketbase-tanstack-db",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "Type-safe PocketBase integration with TanStack Query and TanStack DB",
-  "license": "ISC",
-  "author": "",
-  "type": "commonjs",
-  "main": "index.js",
+  "keywords": [
+    "pocketbase",
+    "tanstack",
+    "tanstack-query",
+    "tanstack-db",
+    "database",
+    "react",
+    "typescript",
+    "real-time",
+    "subscriptions",
+    "backend-as-a-service"
+  ],
+  "license": "MIT",
+  "author": "Nathan Stitt <nathan@stitt.org>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nathanstitt/pbtsdb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nathanstitt/pbtsdb/issues"
+  },
+  "homepage": "https://github.com/nathanstitt/pbtsdb#readme",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "npm run checks && npm test && npm run build",
     "db:reset": "rm -rf ./pb_data && pocketbase migrate up",
     "checks": "run-p typecheck lint",
     "lint": "biome check .",
@@ -18,18 +52,15 @@
     "test:server:start": "./scripts/start-test-server.sh",
     "test:server:migrate": "pocketbase migrate --dir ./pb_data"
   },
-  "dependencies": {
-  },
   "peerDependencies": {
-    "pocketbase": ">=0.21.0",
     "@tanstack/query-db-collection": ">=1.0.0",
     "@tanstack/react-db": ">=0.1.0",
     "@tanstack/react-query": ">=5.0.0",
+    "pocketbase": ">=0.21.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },
   "devDependencies": {
-    "pocketbase": ">=0.21.0",
     "@tanstack/query-db-collection": ">=1.0.0",
     "@tanstack/react-db": ">=0.1.0",
     "@tanstack/react-query": ">=5.0.0",
@@ -41,9 +72,11 @@
     "eventsource": ">=2.0.0",
     "jsdom": ">=20.0.0",
     "npm-run-all": ">=4.0.0",
+    "pocketbase": ">=0.21.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0",
     "start-server-and-test": ">=2.0.0",
+    "tsup": "^8.5.1",
     "tsx": ">=4.0.0",
     "typescript": ">=5.0.0",
     "vitest": ">=1.0.0"
