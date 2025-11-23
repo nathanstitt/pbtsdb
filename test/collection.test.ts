@@ -584,4 +584,362 @@ describe('PBCollection - Real PocketBase Integration', () => {
             })
         })
     })
+
+    describe('Real-time Subscriptions', () => {
+        it('should automatically subscribe to collection on creation', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Check that collection is subscribed (synchronously tracked)
+            expect(jobsCollection.isSubscribed()).toBe(true)
+        })
+
+        it('should receive real-time create events', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Set up the live query first
+            const { result } = renderHook(() =>
+                useLiveQuery((q) =>
+                    q.from({ jobs: jobsCollection })
+                )
+            )
+
+            // Wait for initial data load
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false)
+                },
+                { timeout: 5000 }
+            )
+
+            const initialCount = result.current.data.length
+
+            // Create a new job via PocketBase
+            const timestamp = Date.now().toString().slice(-8) // Last 8 digits
+            const newJob = await pb.collection('jobs').create({
+                name: `Test Job ${timestamp}`,
+                status: 'PENDING',
+                slug: `test-${timestamp}`, // 3-15 chars, lowercase alphanumeric with hyphens
+                org: pb.authStore.model?.org
+            })
+
+            // Wait for the real-time update to propagate
+            await waitFor(
+                () => {
+                    expect(result.current.data.length).toBe(initialCount + 1)
+                },
+                { timeout: 5000 }
+            )
+
+            // Verify the new job appears in the collection
+            const createdJob = result.current.data.find(j => j.id === newJob.id)
+            expect(createdJob).toBeDefined()
+            expect(createdJob?.name).toBe(newJob.name)
+
+            // Cleanup: delete the test job
+            await pb.collection('jobs').delete(newJob.id)
+        }, 15000)
+
+        it('should receive real-time update events', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Create a test job
+            const timestamp = Date.now().toString().slice(-8)
+            const testJob = await pb.collection('jobs').create({
+                name: `Update Test ${timestamp}`,
+                status: 'PENDING',
+                slug: `upd-${timestamp}`,
+                org: pb.authStore.model?.org
+            })
+
+            // Set up the live query
+            const { result } = renderHook(() =>
+                useLiveQuery((q) =>
+                    q.from({ jobs: jobsCollection })
+                        .where(({ jobs }) => eq(jobs.id, testJob.id))
+                )
+            )
+
+            // Wait for initial data
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false)
+                    expect(result.current.data.length).toBeGreaterThan(0)
+                },
+                { timeout: 5000 }
+            )
+
+            const originalName = result.current.data[0].name
+
+            // Update the job
+            const updateTimestamp = Date.now().toString().slice(-8)
+            const updatedName = `Updated ${updateTimestamp}`
+            await pb.collection('jobs').update(testJob.id, {
+                name: updatedName
+            })
+
+            // Wait for the real-time update to propagate
+            await waitFor(
+                () => {
+                    const job = result.current.data[0]
+                    return job?.name === updatedName
+                },
+                { timeout: 5000 }
+            )
+
+            expect(result.current.data[0].name).toBe(updatedName)
+            expect(result.current.data[0].name).not.toBe(originalName)
+
+            // Cleanup
+            await pb.collection('jobs').delete(testJob.id)
+        }, 15000)
+
+        it('should receive real-time delete events', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Create a test job
+            const timestamp = Date.now().toString().slice(-8)
+            const testJob = await pb.collection('jobs').create({
+                name: `Delete Test ${timestamp}`,
+                status: 'PENDING',
+                slug: `del-${timestamp}`,
+                org: pb.authStore.model?.org
+            })
+
+            // Set up the live query
+            const { result } = renderHook(() =>
+                useLiveQuery((q) =>
+                    q.from({ jobs: jobsCollection })
+                )
+            )
+
+            // Wait for initial data including our test job
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false)
+                    const hasJob = result.current.data.some(j => j.id === testJob.id)
+                    return hasJob
+                },
+                { timeout: 5000 }
+            )
+
+            const countWithJob = result.current.data.length
+
+            // Delete the job
+            await pb.collection('jobs').delete(testJob.id)
+
+            // Wait for the real-time delete to propagate
+            await waitFor(
+                () => {
+                    const stillHasJob = result.current.data.some(j => j.id === testJob.id)
+                    return !stillHasJob
+                },
+                { timeout: 5000 }
+            )
+
+            // Verify the job is gone
+            expect(result.current.data.some(j => j.id === testJob.id)).toBe(false)
+            expect(result.current.data.length).toBe(countWithJob - 1)
+        }, 15000)
+
+        it('should support subscribing to specific records', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Create a test job
+            const timestamp = Date.now().toString().slice(-8)
+            const testJob = await pb.collection('jobs').create({
+                name: `Specific ${timestamp}`,
+                status: 'PENDING',
+                slug: `spc-${timestamp}`,
+                org: pb.authStore.model?.org
+            })
+
+            // Subscribe to specific record
+            jobsCollection.subscribe(testJob.id)
+
+            // Check subscription status
+            expect(jobsCollection.isSubscribed(testJob.id)).toBe(true)
+
+            // Set up live query
+            const { result } = renderHook(() =>
+                useLiveQuery((q) =>
+                    q.from({ jobs: jobsCollection })
+                        .where(({ jobs }) => eq(jobs.id, testJob.id))
+                )
+            )
+
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false)
+                },
+                { timeout: 5000 }
+            )
+
+            // Update the specific record
+            const updateTimestamp = Date.now().toString().slice(-8)
+            const updatedName = `Updated ${updateTimestamp}`
+            await pb.collection('jobs').update(testJob.id, {
+                name: updatedName
+            })
+
+            // Wait for update
+            await waitFor(
+                () => {
+                    return result.current.data[0]?.name === updatedName
+                },
+                { timeout: 5000 }
+            )
+
+            expect(result.current.data[0].name).toBe(updatedName)
+
+            // Cleanup
+            jobsCollection.unsubscribe(testJob.id)
+            await pb.collection('jobs').delete(testJob.id)
+        }, 15000)
+
+        it('should support unsubscribe functionality', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Initially subscribed
+            expect(jobsCollection.isSubscribed()).toBe(true)
+
+            // Unsubscribe from collection-wide
+            jobsCollection.unsubscribe()
+
+            // Check it's unsubscribed
+            expect(jobsCollection.isSubscribed()).toBe(false)
+
+            // Re-subscribe
+            jobsCollection.subscribe()
+            expect(jobsCollection.isSubscribed()).toBe(true)
+
+            // Cleanup
+            jobsCollection.unsubscribeAll()
+        })
+
+        it('should unsubscribe from all subscriptions', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Create test jobs
+            const timestamp1 = Date.now().toString().slice(-8)
+            const job1 = await pb.collection('jobs').create({
+                name: `Unsub1 ${timestamp1}`,
+                status: 'PENDING',
+                slug: `un1-${timestamp1}`,
+                org: pb.authStore.model?.org
+            })
+
+            await new Promise(resolve => setTimeout(resolve, 100)) // Ensure different timestamp
+            const timestamp2 = Date.now().toString().slice(-8)
+            const job2 = await pb.collection('jobs').create({
+                name: `Unsub2 ${timestamp2}`,
+                status: 'PENDING',
+                slug: `un2-${timestamp2}`,
+                org: pb.authStore.model?.org
+            })
+
+            // Subscribe to specific records
+            jobsCollection.subscribe(job1.id)
+            jobsCollection.subscribe(job2.id)
+
+            expect(jobsCollection.isSubscribed()).toBe(true) // collection-wide
+            expect(jobsCollection.isSubscribed(job1.id)).toBe(true)
+            expect(jobsCollection.isSubscribed(job2.id)).toBe(true)
+
+            // Unsubscribe from all
+            jobsCollection.unsubscribeAll()
+
+            expect(jobsCollection.isSubscribed()).toBe(false)
+            expect(jobsCollection.isSubscribed(job1.id)).toBe(false)
+            expect(jobsCollection.isSubscribed(job2.id)).toBe(false)
+
+            // Cleanup
+            await pb.collection('jobs').delete(job1.id)
+            await pb.collection('jobs').delete(job2.id)
+        }, 15000)
+
+        it('should handle multiple simultaneous updates with writeBatch', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Set up live query
+            const { result } = renderHook(() =>
+                useLiveQuery((q) =>
+                    q.from({ jobs: jobsCollection })
+                )
+            )
+
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false)
+                },
+                { timeout: 5000 }
+            )
+
+            const initialCount = result.current.data.length
+
+            // Create multiple jobs rapidly
+            const baseTimestamp = Date.now().toString().slice(-8)
+            const jobs = await Promise.all([
+                pb.collection('jobs').create({
+                    name: `Batch1 ${baseTimestamp}`,
+                    status: 'PENDING',
+                    slug: `bt1-${baseTimestamp}`,
+                    org: pb.authStore.model?.org
+                }),
+                pb.collection('jobs').create({
+                    name: `Batch2 ${baseTimestamp}`,
+                    status: 'PENDING',
+                    slug: `bt2-${baseTimestamp}`,
+                    org: pb.authStore.model?.org
+                }),
+                pb.collection('jobs').create({
+                    name: `Batch3 ${baseTimestamp}`,
+                    status: 'PENDING',
+                    slug: `bt3-${baseTimestamp}`,
+                    org: pb.authStore.model?.org
+                })
+            ])
+
+            // Wait for all updates to propagate
+            await waitFor(
+                () => {
+                    return result.current.data.length >= initialCount + 3
+                },
+                { timeout: 10000 }
+            )
+
+            // Verify all jobs are present
+            for (const job of jobs) {
+                const foundJob = result.current.data.find(j => j.id === job.id)
+                expect(foundJob).toBeDefined()
+            }
+
+            // Cleanup
+            await Promise.all(jobs.map(job => pb.collection('jobs').delete(job.id)))
+        }, 20000)
+
+        it('should not create duplicate subscriptions', async () => {
+            const collections = new CollectionFactory<Schema>(pb, queryClient)
+            const jobsCollection = collections.create('jobs')
+
+            // Already subscribed automatically
+            expect(jobsCollection.isSubscribed()).toBe(true)
+
+            // Try to subscribe again
+            jobsCollection.subscribe()
+
+            // Should still be subscribed (not errored)
+            expect(jobsCollection.isSubscribed()).toBe(true)
+
+            // Cleanup
+            jobsCollection.unsubscribeAll()
+        })
+    })
 })
