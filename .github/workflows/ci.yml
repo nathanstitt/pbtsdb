@@ -40,18 +40,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Cache PocketBase
+        id: cache-pocketbase
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/pocketbase
+          key: pocketbase-v0.26.3-linux-amd64
+
       - name: Install PocketBase
+        if: steps.cache-pocketbase.outputs.cache-hit != 'true'
         run: |
           wget https://github.com/pocketbase/pocketbase/releases/download/v0.26.3/pocketbase_0.26.3_linux_amd64.zip
-          unzip pocketbase_0.26.3_linux_amd64.zip
+          unzip pocketbase_0.26.3_linux_amd64.zip pocketbase
           chmod +x pocketbase
-          sudo mv pocketbase /usr/local/bin/
+          mkdir -p ~/.local/bin
+          mv pocketbase ~/.local/bin/
 
-      - name: Create test environment
+      - name: Add PocketBase to PATH
         run: |
-          echo "TESTING_PB_ADDR=http://127.0.0.1:8210" >> .env
-          echo "TEST_USER_EMAIL=test@example.com" >> .env
-          echo "TEST_USER_PW=testpassword123" >> .env
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          chmod +x ~/.local/bin/pocketbase
+
+      - name: configure test environment vars
+        run: cp .env.sample .env
 
       - name: Run tests
         run: npm test
