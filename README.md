@@ -319,20 +319,18 @@ function BooksList() {
 }
 ```
 
-#### useStores()
+#### useStore() with multiple keys
 
-Access multiple collections at once.
+Access multiple collections at once using variadic arguments.
 
 ```typescript
-const [col1, col2] = useStores<[Type1, Type2]>(keys: string[])
+const [col1, col2] = useStore('key1', 'key2')
 ```
 
 **Example:**
 ```typescript
 function BooksWithAuthors() {
-    const [booksCollection, authorsCollection] = useStores<[Book, Author]>(
-        ['books', 'authors']
-    );
+    const [booksCollection, authorsCollection] = useStore('books', 'authors');
 
     const { data } = useLiveQuery((q) =>
         q.from({ book: booksCollection })
@@ -1107,11 +1105,11 @@ const collections = {
 ### 3. Type Your Hooks
 
 ```typescript
-// ✅ Explicit typing
-const booksCollection = useStore<Book>('books');
+// ✅ Single collection
+const booksCollection = useStore('books');
 
-// ✅ Tuple typing for multiple collections
-const [books, authors] = useStores<[Book, Author]>(['books', 'authors']);
+// ✅ Multiple collections with variadic arguments
+const [books, authors] = useStore('books', 'authors');
 ```
 
 ### 4. Handle Loading and Error States

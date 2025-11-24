@@ -30,13 +30,71 @@ const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
 // Subscriptions start/stop automatically with component lifecycle
 ```
 
+## React Integration
+
+### CollectionsProvider (Optional)
+
+Share collections across components using React Context:
+
+```typescript
+// App setup
+const factory = new CollectionFactory<Schema>(pb, queryClient);
+const collections = {
+    books: factory.create('books'),
+    authors: factory.create('authors'),
+};
+
+function App() {
+    return (
+        <CollectionsProvider collections={collections}>
+            <YourApp />
+        </CollectionsProvider>
+    );
+}
+
+// In components
+function BooksList() {
+    const books = useStore('books'); // Single collection
+    const { data } = useLiveQuery((q) => q.from({ books }));
+}
+
+function BooksWithAuthors() {
+    const [books, authors] = useStore('books', 'authors'); // Multiple collections
+    const { data } = useLiveQuery((q) =>
+        q.from({ book: books })
+            .join({ author: authors }, ({ book, author }) => eq(book.author, author.id))
+    );
+}
+```
+
+**useStore() API:**
+- Single key: `useStore('books')` → returns `Collection<Books>`
+- Multiple keys: `useStore('books', 'authors')` → returns `[Collection<Books>, Collection<Authors>]`
+- Fully type-safe with automatic inference when using CollectionsRegistry augmentation
+
+**Type Safety Setup:**
+```typescript
+// Augment CollectionsRegistry for automatic type inference
+declare module 'pbtsdb' {
+    interface CollectionsRegistry {
+        books: Collection<Books>;
+        authors: Collection<Authors>;
+    }
+}
+
+// Now useStore has full type inference
+const books = useStore('books'); // Type: Collection<Books>
+const [books, authors] = useStore('books', 'authors'); // Tuple types preserved
+```
+
 ## Key Concepts
 
 - **CollectionFactory**: Create ONE factory per app, use it to create multiple collections
 - **Collections are lazy**: No network activity until first query
 - **Subscriptions are automatic**: Start when component mounts, stop 5s after unmount
 - **Type-safe expand**: Use `as const` on expand strings for full TypeScript inference
-- **Schema structure**: Use `type` and `relations` properties (not `Row`/`Relations`)
+- **Schema structure**: Use `type` and `relations` properties (lowercase, not `Row`/`Relations`)
+- **Package name**: Import from `pbtsdb` (not `pocketbase-tanstack-db`)
 
 ## Testing
 
@@ -57,7 +115,7 @@ Tests use real PocketBase instance (not mocked). Server infrastructure is fully 
 Collections support insert, update, and delete with automatic PocketBase sync:
 
 ```typescript
-import { newRecordId } from 'pocketbase-tanstack-db';
+import { newRecordId } from 'pbtsdb';
 
 // Insert with optimistic update (UI updates immediately)
 const tx = collection.insert({

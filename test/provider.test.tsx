@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from
 import { eq } from '@tanstack/db'
 import type { QueryClient } from '@tanstack/react-query';
 
-import { CollectionsProvider, useStore, useStores } from '../src/provider';
+import { CollectionsProvider, useStore } from '../src/provider';
 import type { Books, Authors, BookMetadata } from './schema';
 import type { Collection } from '@tanstack/db';
 import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createCollectionFactory, getTestAuthorId } from './helpers';
@@ -57,6 +57,7 @@ describe('CollectionsProvider and Hooks', () => {
             );
 
             expect(() => {
+                // @ts-expect-error - 'nonexistent' is not in CollectionsRegistry
                 renderHook(() => useStore('nonexistent'), { wrapper });
             }).toThrow('Collection "nonexistent" not found in CollectionsProvider');
         });
@@ -115,11 +116,11 @@ describe('CollectionsProvider and Hooks', () => {
         }, 15000);
     });
 
-    describe('useStores', () => {
+    describe('useStore with multiple keys', () => {
         it('should throw error when used outside provider', () => {
             expect(() => {
-                renderHook(() => useStores(['books', 'authors']));
-            }).toThrow('useStores must be used within a CollectionsProvider');
+                renderHook(() => useStore('books', 'authors'));
+            }).toThrow('useStore must be used within a CollectionsProvider');
         });
 
         it('should throw error when any collection key does not exist', () => {
@@ -133,7 +134,8 @@ describe('CollectionsProvider and Hooks', () => {
             );
 
             expect(() => {
-                renderHook(() => useStores(['books', 'nonexistent']), { wrapper });
+                // @ts-expect-error - 'nonexistent' is not in CollectionsRegistry
+                renderHook(() => useStore('books', 'nonexistent'), { wrapper });
             }).toThrow('Collection "nonexistent" not found in CollectionsProvider');
         });
 
@@ -154,7 +156,7 @@ describe('CollectionsProvider and Hooks', () => {
             );
 
             const { result } = renderHook(
-                () => useStores(['books', 'authors', 'metadata'] as const),
+                () => useStore('books', 'authors', 'metadata'),
                 { wrapper }
             );
 
@@ -180,7 +182,7 @@ describe('CollectionsProvider and Hooks', () => {
 
             const { result } = renderHook(
                 () => {
-                    const [books] = useStores(['books'] as const);
+                    const books = useStore('books');
                     return useLiveQuery((q) => q.from({ books }));
                 },
                 { wrapper }

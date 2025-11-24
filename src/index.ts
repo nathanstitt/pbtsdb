@@ -13,7 +13,6 @@ export { CollectionFactory } from './collection';
 export {
     CollectionsProvider,
     useStore,
-    useStores,
     type CollectionsMap,
     type CollectionsProviderProps,
     type CollectionsRegistry,

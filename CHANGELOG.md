@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - Full TypeScript support with strict type checking
 - Real-time subscription management with automatic reconnection
 - `SubscriptionManager` for handling PocketBase real-time updates
-- React integration with `CollectionsProvider`, `useStore`, and `useStores` hooks
+- React integration with `CollectionsProvider`, `useStore` hook
 - Type-safe relation expansion with `expand` option
 - Manual join support with `relations` configuration
 - Comprehensive type definitions for schema declarations

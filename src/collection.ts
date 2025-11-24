@@ -23,7 +23,6 @@ export type {
 export {
     CollectionsProvider,
     useStore,
-    useStores,
     type CollectionsMap,
     type CollectionsProviderProps,
 } from './provider';

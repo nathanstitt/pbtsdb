@@ -793,6 +793,12 @@ TanStack DB collections are reactive:
 ### ⚠️ Comments (LLM-Specific Guidance)
 **CRITICAL for AI Assistants:** Code should be self-documenting. Reserve comments for critical or hard-to-understand situations only, and keep them brief. Explain WHY, not WHAT. Avoid obvious comments like section headers or restating what code does. Prefer clear variable/function names over explanatory comments.
 
+### ⚠️ Documentation
+- **Update llms.txt after significant changes** - When adding new features, changing APIs, or modifying core patterns, update `llms.txt` to reflect these changes
+- **Keep llms.txt concise** - Focus on essential patterns, new APIs, and critical concepts
+- **Update examples** - Ensure code examples in llms.txt match current API and best practices
+- **Significant changes include:** New hooks, changed function signatures, new patterns, API breaking changes, or major feature additions
+
 ## Common Tasks
 
 ### Adding a New Collection
