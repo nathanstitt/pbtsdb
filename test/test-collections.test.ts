@@ -99,68 +99,7 @@ describe('Test Collections - Relationship Testing', () => {
         });
     });
 
-    describe.skip('Tags Collection (Many-to-Many via Junction)', () => {
-        it('should fetch tags from the database', async () => {
-            const tags = await pb.collection('tags').getFullList();
-            expect(tags).toBeDefined();
-            expect(Array.isArray(tags)).toBe(true);
-            expect(tags.length).toBeGreaterThan(0);
-        });
-
-        it('should have proper tag fields', async () => {
-            const tags = await pb.collection('tags').getFullList();
-            const tag = tags[0];
-
-            expect(tag).toHaveProperty('name');
-            expect(tag).toHaveProperty('color');
-        });
-    });
-
-    describe.skip('Book Tags Junction Collection (Many-to-Many)', () => {
-        it('should fetch book-tag relationships', async () => {
-            const bookTags = await pb.collection('book_tags').getFullList();
-            expect(bookTags).toBeDefined();
-            expect(Array.isArray(bookTags)).toBe(true);
-            expect(bookTags.length).toBeGreaterThan(0);
-        });
-
-        it('should have both book and tag relations', async () => {
-            const bookTags = await pb.collection('book_tags').getFullList();
-            const bookTag = bookTags[0];
-
-            expect(bookTag).toHaveProperty('book');
-            expect(bookTag).toHaveProperty('tag');
-            expect(typeof bookTag.book).toBe('string');
-            expect(typeof bookTag.tag).toBe('string');
-        });
-
-        it('should expand both book and tag relations', async () => {
-            const bookTags = await pb.collection('book_tags').getFullList({
-                expand: 'book,tag'
-            });
-            const bookTag = bookTags[0];
-
-            expect(bookTag.expand?.book).toBeDefined();
-            expect(bookTag.expand?.book).toHaveProperty('title');
-            expect(bookTag.expand?.tag).toBeDefined();
-            expect(bookTag.expand?.tag).toHaveProperty('name');
-        });
-
-        it('should verify many-to-many relationship integrity', async () => {
-            const bookTags = await pb.collection('book_tags').getFullList();
-
-            // Check that same book can have multiple tags
-            const bookGrouped = bookTags.reduce((acc, bt) => {
-                acc[bt.book] = (acc[bt.book] || 0) + 1;
-                return acc;
-            }, {} as Record<string, number>);
-
-            const booksWithMultipleTags = Object.values(bookGrouped).filter((count) => count > 1);
-            expect(booksWithMultipleTags.length).toBeGreaterThan(0);
-        });
-    });
-
-    describe('Complex Relationship Queries', () => {
+     describe('Complex Relationship Queries', () => {
         it('should fetch books with all relations expanded', async () => {
             const books = await pb.collection('books').getFullList({
                 expand: 'author'

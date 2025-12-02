@@ -48,24 +48,6 @@ describe('PocketBase Query Converter', () => {
         expect(convertToPocketBaseFilter(undefined)).toBeUndefined()
     })
 
-    // Note: orderBy conversion is tested in integration tests (server-side-filtering.test.ts)
-    // because convertToPocketBaseSort requires the actual IR.OrderBy format from TanStack DB,
-    // which cannot be easily mocked in unit tests.
-    it.skip('should convert descending sort to PocketBase format', () => {
-        // These mocks don't match the actual IR.OrderBy structure - use integration tests instead
-        const orderByExpr = [{ field: ['created'], direction: 'desc' }] as unknown as IR.OrderBy
-
-        const sort = convertToPocketBaseSort(orderByExpr)
-        expect(sort).toBe('-created')
-    })
-
-    it.skip('should convert ascending sort to PocketBase format', () => {
-        const orderByExpr = [{ field: ['created'], direction: 'asc' }] as unknown as IR.OrderBy
-
-        const sort = convertToPocketBaseSort(orderByExpr)
-        expect(sort).toBe('created')
-    })
-
     it('should return undefined for null/undefined sort input', () => {
         expect(convertToPocketBaseSort(null)).toBeUndefined()
         expect(convertToPocketBaseSort(undefined)).toBeUndefined()
