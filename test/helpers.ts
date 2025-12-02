@@ -16,6 +16,7 @@ export { newRecordId }
 export interface TestLogger extends Logger {
     messages: {
         debug: Array<{ msg: string; context?: object }>;
+        info: Array<{ msg: string; context?: object }>;
         warn: Array<{ msg: string; context?: object }>;
         error: Array<{ msg: string; context?: object }>;
     };
@@ -29,6 +30,7 @@ export interface TestLogger extends Logger {
 export function createTestLogger(): TestLogger {
     const messages: TestLogger['messages'] = {
         debug: [],
+        info: [],
         warn: [],
         error: [],
     };
@@ -38,6 +40,9 @@ export function createTestLogger(): TestLogger {
         debug: (msg: string, context?: object) => {
             messages.debug.push({ msg, context });
         },
+        info: (msg: string, context?: object) => {
+            messages.info.push({ msg, context });
+        },
         warn: (msg: string, context?: object) => {
             messages.warn.push({ msg, context });
         },
@@ -46,6 +51,7 @@ export function createTestLogger(): TestLogger {
         },
         clear: () => {
             messages.debug = [];
+            messages.info = [];
             messages.warn = [];
             messages.error = [];
         },

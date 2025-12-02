@@ -11,6 +11,13 @@ export interface Logger {
     debug: (msg: string, context?: object) => void;
 
     /**
+     * Log info-level messages.
+     * @param msg - The message to log
+     * @param context - Optional context object with additional information
+     */
+    info: (msg: string, context?: object) => void;
+
+    /**
      * Log warning-level messages.
      * @param msg - The message to log
      * @param context - Optional context object with additional information
@@ -37,6 +44,10 @@ const defaultLogger: Logger = {
             console.log(`[pbtsdb] ${msg}`, context || '');
         }
     },
+    info: (msg: string, context?: object) => {
+        // biome-ignore lint/suspicious/noConsoleLog: Info logging is acceptable
+        console.info(`[pbtsdb] ${msg}`, context || '');
+    },
     warn: (msg: string, context?: object) => {
         // biome-ignore lint/suspicious/noConsoleLog: Warning logging is acceptable
         console.warn(`[pbtsdb] ${msg}`, context || '');
@@ -57,6 +68,7 @@ let currentLogger: Logger = defaultLogger;
  */
 export const logger: Logger = {
     debug: (msg: string, context?: object) => currentLogger.debug(msg, context),
+    info: (msg: string, context?: object) => currentLogger.info(msg, context),
     warn: (msg: string, context?: object) => currentLogger.warn(msg, context),
     error: (msg: string, context?: object) => currentLogger.error(msg, context),
 };

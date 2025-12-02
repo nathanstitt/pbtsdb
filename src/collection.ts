@@ -187,7 +187,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
             onInsert: options?.onInsert === false ? undefined : options?.onInsert ?? (async ({ transaction }) => {
                 await Promise.all(
                     transaction.mutations.map(async (mutation) => {
-                        const { id, created, updated, collectionId, collectionName: _, ...data } = mutation.modified as unknown as Record<string, unknown>;
+                        const { created, updated, collectionId, collectionName: _, ...data } = mutation.modified as unknown as Record<string, unknown>;
                         await pb.collection(collectionName).create(data);
                     })
                 );
