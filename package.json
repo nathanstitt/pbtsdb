@@ -1,6 +1,6 @@
 {
   "name": "pbtsdb",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Type-safe PocketBase integration with TanStack Query and TanStack DB",
   "keywords": [
     "pocketbase",
@@ -61,24 +61,24 @@
     "react-dom": ">=18.0.0"
   },
   "devDependencies": {
-    "@tanstack/query-db-collection": ">=1.0.0",
-    "@tanstack/react-db": ">=0.1.0",
-    "@tanstack/react-query": ">=5.0.0",
-    "@testing-library/react": ">=14.0.0",
-    "@types/node": ">=18.0.0",
-    "@types/react": ">=18.0.0",
-    "biome": ">=0.3.0",
-    "dotenv": ">=16.0.0",
-    "eventsource": ">=2.0.0",
-    "jsdom": ">=20.0.0",
-    "npm-run-all": ">=4.0.0",
-    "pocketbase": ">=0.21.0",
-    "react": ">=18.0.0",
-    "react-dom": ">=18.0.0",
-    "start-server-and-test": ">=2.0.0",
+    "@tanstack/query-db-collection": ">=1.0.5",
+    "@tanstack/react-db": ">=0.1.53",
+    "@tanstack/react-query": ">=5.90.11",
+    "@testing-library/react": ">=16.3.0",
+    "@types/node": ">=24.10.1",
+    "@types/react": ">=19.2.7",
+    "biome": ">=0.3.3",
+    "dotenv": ">=17.2.3",
+    "eventsource": ">=4.1.0",
+    "jsdom": ">=27.2.0",
+    "npm-run-all": ">=4.1.5",
+    "pocketbase": ">=0.26.3",
+    "react": ">=19.2.0",
+    "react-dom": ">=19.2.0",
+    "start-server-and-test": ">=2.1.3",
     "tsup": "^8.5.1",
-    "tsx": ">=4.0.0",
-    "typescript": ">=5.0.0",
-    "vitest": ">=1.0.0"
+    "tsx": ">=4.21.0",
+    "typescript": ">=5.9.3",
+    "vitest": ">=4.0.14"
   }
 }
