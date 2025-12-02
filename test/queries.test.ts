@@ -41,7 +41,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should have the filtered genre
@@ -64,7 +63,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should have created date after pastDate
@@ -89,7 +87,7 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
+
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should have created date >= threshold
@@ -112,7 +110,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should have created date before futureDate
@@ -134,7 +131,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should have created date <= futureDate
@@ -163,7 +159,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
 
         // All results should match both conditions
         result.current.data.forEach(book => {
@@ -195,7 +190,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // All results should match at least one condition
@@ -215,7 +209,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThanOrEqual(1)
 
         // Verify descending order if we have multiple results
@@ -250,7 +243,6 @@ describe('Collection - Query Operators', () => {
         )
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
 
         // All results should match the complex condition
         result.current.data.forEach(book => {

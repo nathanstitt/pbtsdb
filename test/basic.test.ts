@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
@@ -42,7 +42,7 @@ describe('Collection - Basic Operations', () => {
     it('should fetch book by isbn using tanstack db collection', async () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
 
-        const { result } = renderHook(() =>
+        const { result, unmount } = renderHook(() =>
             useLiveQuery((q) =>
                 q.from({ books: booksCollection })
             )
@@ -54,13 +54,15 @@ describe('Collection - Basic Operations', () => {
         const book = result.current.data[0]
         const bookTitle: string = book.title
         expect(bookTitle).toBeTypeOf('string')
+
+        unmount()
     })
 
     it('should fetch a single book using findOne with where clause', async () => {
         const booksCollection = createBooksCollection(queryClient)
 
         // First, get all books to find one we can query
-        const { result: listResult } = renderHook(() =>
+        const { result: listResult, unmount: unmountList } = renderHook(() =>
             useLiveQuery((q) =>
                 q.from({ books: booksCollection })
             )
@@ -73,7 +75,7 @@ describe('Collection - Basic Operations', () => {
         const targetIsbn = targetBook.isbn
 
         // Now use findOne to fetch the same book by ISBN
-        const { result: findOneResult } = renderHook(() =>
+        const { result: findOneResult, unmount: unmountFindOne } = renderHook(() =>
             useLiveQuery((q) =>
                 q.from({ books: booksCollection })
                     .where(({ books }) => eq(books.isbn, targetIsbn))
@@ -84,11 +86,13 @@ describe('Collection - Basic Operations', () => {
         await waitForLoadFinish(findOneResult)
 
         // Verify findOne returns a single object, not an array
-        expect(findOneResult.current.data).toBeDefined()
         expect(findOneResult.current.data).not.toBeInstanceOf(Array)
         expect(findOneResult.current.data?.id).toBe(targetBook.id)
         expect(findOneResult.current.data?.isbn).toBe(targetIsbn)
         expect(findOneResult.current.data?.title).toBe(targetBook.title)
+
+        unmountFindOne()
+        unmountList()
     }, 15000)
 
     it('should return undefined when findOne matches no records', async () => {
@@ -97,7 +101,7 @@ describe('Collection - Basic Operations', () => {
         // Query for a book with an ISBN that doesn't exist
         const nonExistentIsbn = `nonexistent-${Date.now()}`
 
-        const { result } = renderHook(() =>
+        const { result, unmount } = renderHook(() =>
             useLiveQuery((q) =>
                 q.from({ books: booksCollection })
                     .where(({ books }) => eq(books.isbn, nonExistentIsbn))
@@ -105,10 +109,14 @@ describe('Collection - Basic Operations', () => {
             )
         )
 
-        await waitForLoadFinish(result)
+        await waitFor(() => {
+            expect(result.current.isLoading).toBe(false)
+        })
 
         // Verify findOne returns undefined when no match
         expect(result.current.data).toBeUndefined()
+
+        unmount()
     }, 15000)
 
 })

@@ -110,7 +110,6 @@ describe('createReactProvider', () => {
             );
 
             await waitForLoadFinish(result, 10000);
-            expect(result.current.data).toBeDefined();
             expect(Array.isArray(result.current.data)).toBe(true);
             expect(result.current.data.length).toBeGreaterThanOrEqual(1)
             expect(result.current.data[0].author).toBeTypeOf('string')
@@ -186,7 +185,6 @@ describe('createReactProvider', () => {
             );
 
             await waitForLoadFinish(result, 10000);
-            expect(result.current.data).toBeDefined();
             expect(Array.isArray(result.current.data)).toBe(true);
         }, 15000);
     });

@@ -2,7 +2,6 @@ import { QueryClient } from '@tanstack/react-query'
 import { waitFor } from '@testing-library/react'
 import { expect } from 'vitest'
 import PocketBase from 'pocketbase'
-import type { Collection } from '@tanstack/db'
 import 'dotenv/config'
 import { createCollection, newRecordId, setLogger, resetLogger, type Logger } from '../src'
 import type { Schema } from './schema'
@@ -76,6 +75,7 @@ if (!process.env.TESTING_PB_ADDR) {
 }
 
 export const pb = new PocketBase(process.env.TESTING_PB_ADDR!)
+pb.autoCancellation(false)
 
 /**
  * Create a fresh QueryClient for testing with appropriate settings
@@ -179,16 +179,18 @@ export async function getTestAuthorId(): Promise<string> {
 
 /**
  * Wait for a live query result to finish loading.
+ * Works with both array results (from .from()) and single object results (from .findOne()).
  * @param result - The result object from renderHook containing { current: { isLoading: boolean } }
  * @param timeout - Optional timeout in ms (default: 5000)
  */
 export async function waitForLoadFinish(
-    result: { current: { isLoading: boolean } },
+    result: { current: { isLoading: boolean; data?: unknown } },
     timeout = 5000
 ): Promise<void> {
     await waitFor(
         () => {
             expect(result.current.isLoading).toBe(false)
+            expect(result.current.data).toBeDefined()
         },
         { timeout }
     )
