@@ -110,6 +110,61 @@ describe('Collection - Mutations', () => {
         await pb.collection('books').update(existingBook.id, { page_count: originalPageCount })
     }, 15000)
 
+    it('should update liveQuery data when a record is inserted', async () => {
+        const factory = createCollectionFactory(queryClient)
+        const collection = factory.create('books', {
+            syncMode: 'on-demand',
+            omitOnInsert: ['created', 'updated'] as const,
+        })
+
+        const { result, unmount } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })))
+
+        await waitForLoadFinish(result)
+        const initialCount = result.current.data.length
+
+        const authorId = await getTestAuthorId()
+        const newBook = {
+            id: newRecordId(),
+            title: `LiveQuery Update Test ${Date.now().toString().slice(-8)}`,
+            genre: 'Fiction' as const,
+            isbn: getTestSlug('lqu'),
+            author: authorId,
+            published_date: '',
+            page_count: 0,
+        }
+
+        const tx = collection.insert(newBook)
+        await tx.isPersisted.promise
+
+        // Verify liveQuery data updated to include the new record
+        await waitFor(
+            () => {
+                expect(result.current.data.length).toBe(initialCount + 1)
+                const insertedBook = result.current.data.find((b) => b.id === newBook.id)
+                expect(insertedBook).toBeDefined()
+                expect(insertedBook?.title).toBe(newBook.title)
+            },
+            { timeout: 5000 }
+        )
+
+        unmount()
+
+        const { result: reread  } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })))
+        await waitFor(
+            () => {
+                const insertedBook = reread.current.data.find((b) => b.id === newBook.id)
+                expect(insertedBook).toBeDefined()
+            }
+        )
+
+        // Cleanup
+        try {
+            await pb.collection('books').delete(newBook.id)
+        } catch (_error) {
+            // Ignore cleanup errors
+        }
+    }, 15000)
+
     it('should handle insert and delete in same batch (optimistic cancellation)', async () => {
         const factory = createCollectionFactory(queryClient)
         const collection = factory.create('books', {
