@@ -52,4 +52,30 @@ describe('PocketBase Query Converter', () => {
         expect(convertToPocketBaseSort(null)).toBeUndefined()
         expect(convertToPocketBaseSort(undefined)).toBeUndefined()
     })
+
+    it('should deduplicate query values', () => {
+        // Using type assertion to construct raw IR for testing
+        const where = {
+            name: 'in',
+            args: [
+                {
+                    path: ['id'],
+                    type: 'ref',
+                },
+                {
+                    value: [
+                        'x0xz23mbkpouksb',
+                        'x0xz23mbkpouksb',
+                        'x0xz23mbkpouksb',
+                    ],
+                    type: 'val',
+                },
+            ],
+            type: 'func',
+        } as IR.BasicExpression<boolean>
+
+        const filter = convertToPocketBaseFilter(where)
+        // After deduplication, only one unique value remains
+        expect(filter).toBe('id = "x0xz23mbkpouksb"')
+    })
 })

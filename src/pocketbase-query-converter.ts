@@ -1,9 +1,9 @@
 import { parseWhereExpression, parseOrderByExpression, type FieldPath, type ParsedOrderBy } from '@tanstack/db';
 import type { IR } from '@tanstack/db';
 
-type BasicExpression<T = any> = IR.BasicExpression<T>;
+type BasicExpression<T = unknown> = IR.BasicExpression<T>;
 
-function escapeValue(value: any): string {
+function escapeValue(value: unknown): string {
     if (value === null) {
         return 'null';
     }
@@ -38,19 +38,19 @@ export function convertToPocketBaseFilter(
 
     const result = parseWhereExpression(where, {
         handlers: {
-            eq: (field: FieldPath, value: any) => {
+            eq: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} = ${escapeValue(value)}`;
             },
-            gt: (field: FieldPath, value: any) => {
+            gt: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} > ${escapeValue(value)}`;
             },
-            gte: (field: FieldPath, value: any) => {
+            gte: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} >= ${escapeValue(value)}`;
             },
-            lt: (field: FieldPath, value: any) => {
+            lt: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} < ${escapeValue(value)}`;
             },
-            lte: (field: FieldPath, value: any) => {
+            lte: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} <= ${escapeValue(value)}`;
             },
             and: (...conditions: string[]) => {
@@ -66,14 +66,14 @@ export function convertToPocketBaseFilter(
             not: (condition: string) => {
                 return `!(${condition})`;
             },
-            in: (field: FieldPath, values: any[]) => {
-                if (!Array.isArray(values)) {
-                    values = [values];
-                }
-                const conditions = values.map(v => `${fieldPathToString(field)} = ${escapeValue(v)}`);
+            in: (field: FieldPath, values: unknown) => {
+                const valueArray = Array.isArray(values) ? values : [values];
+                const uniqueValues = [...new Set(valueArray)];
+                const fieldStr = fieldPathToString(field);
+                const conditions = uniqueValues.map((v) => `${fieldStr} = ${escapeValue(v)}`);
                 return conditions.length > 1 ? `(${conditions.join(' || ')})` : conditions[0];
             },
-            like: (field: FieldPath, value: any) => {
+            like: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} ~ ${escapeValue(value)}`;
             },
             isNull: (field: FieldPath) => {
@@ -83,7 +83,7 @@ export function convertToPocketBaseFilter(
                 return `${fieldPathToString(field)} = null`;
             },
         },
-        onUnknownOperator: (operator: string, args: any[]) => {
+        onUnknownOperator: (operator: string, args: unknown[]) => {
             throw new Error(
                 `Unsupported operator '${operator}' for PocketBase filter conversion. ` +
                     `Supported operators: eq, gt, gte, lt, lte, in, like, and, or, not, isNull, isUndefined`
