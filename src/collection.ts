@@ -134,15 +134,21 @@ export function createCollection<Schema extends SchemaDeclaration>(
             const limit = loadOptions?.limit;
 
             let items: RecordType[];
-            if (!filter && !sort && !limit && !expandString) {
-                items = await pb.collection(collectionName).getFullList() as unknown as RecordType[];
-            } else {
-                const result = await pb.collection(collectionName).getList(1, limit || 500, {
+            if (limit) {
+                // Use getList when limit is specified to avoid fetching all records
+                const result = await pb.collection(collectionName).getList(1, limit, {
                     filter,
                     sort,
                     expand: expandString,
                 });
                 items = result.items as unknown as RecordType[];
+            } else {
+                // Use getFullList to fetch all records with automatic pagination
+                items = await pb.collection(collectionName).getFullList({
+                    filter,
+                    sort,
+                    expand: expandString,
+                }) as unknown as RecordType[];
             }
 
             if (expandStores) {

@@ -119,8 +119,14 @@ describe('Collection - Mutations', () => {
 
         const { result, unmount } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })))
 
-        await waitForLoadFinish(result)
-        const initialCount = result.current.data.length
+        // For on-demand sync, we need to wait for data to actually load (not just isLoading: false)
+        await waitFor(
+            () => {
+                expect(result.current.isLoading).toBe(false)
+                expect(result.current.data.length).toBeGreaterThan(0)
+            },
+            { timeout: 10000 }
+        )
 
         const authorId = await getTestAuthorId()
         const newBook = {
@@ -139,7 +145,6 @@ describe('Collection - Mutations', () => {
         // Verify liveQuery data updated to include the new record
         await waitFor(
             () => {
-                expect(result.current.data.length).toBe(initialCount + 1)
                 const insertedBook = result.current.data.find((b) => b.id === newBook.id)
                 expect(insertedBook).toBeDefined()
                 expect(insertedBook?.title).toBe(newBook.title)

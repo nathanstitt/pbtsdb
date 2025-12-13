@@ -26,16 +26,16 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         vi.restoreAllMocks()
     })
 
-    it('should pass filter to PocketBase getList when .where() is present', async () => {
+    it('should pass filter to PocketBase getFullList when .where() is present', async () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
 
         // Get a valid genre to filter by
-        const allBooks = await pb.collection('books').getList(1, 10)
-        expect(allBooks.items.length).toBeGreaterThan(0)
-        const testGenre = allBooks.items[0].genre
+        const allBooks = await pb.collection('books').getFullList()
+        expect(allBooks.length).toBeGreaterThan(0)
+        const testGenre = allBooks[0].genre
 
-        // Spy on PocketBase getList to verify it's called with filter options
-        const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
+        // Spy on PocketBase getFullList to verify it's called with filter options
+        const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
 
         const { result } = renderHook(() =>
             useLiveQuery((q) =>
@@ -52,23 +52,21 @@ describe('Server-Side Filtering (on-demand mode)', () => {
             { timeout: 10000 }
         )
 
-        // Verify getList was called with filter parameter (server-side filtering)
-        expect(getListSpy).toHaveBeenCalled()
+        // Verify getFullList was called with filter parameter (server-side filtering)
+        expect(getFullListSpy).toHaveBeenCalled()
 
         // Find the call with filter
-        const calls = getListSpy.mock.calls
+        const calls = getFullListSpy.mock.calls
         const callWithFilter = calls.find(call => {
-            const options = call[2]
+            const options = call[0] as { filter?: string } | undefined
             return options && typeof options === 'object' && 'filter' in options && options.filter
         })
 
         expect(callWithFilter).toBeDefined()
 
         // Verify the filter parameter was passed correctly
-        const [page, perPage, options] = callWithFilter!
-        expect(page).toBe(1)
-        expect(perPage).toBe(500)  // Default limit
-        expect(options?.filter).toBe(`genre = "${testGenre}"`)
+        const [options] = callWithFilter!
+        expect((options as { filter?: string })?.filter).toBe(`genre = "${testGenre}"`)
 
         // All returned records must match the filter
         result.current.data.forEach(book => {
@@ -76,11 +74,10 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         })
     }, 15000)
 
-    it('should pass limit to PocketBase getList when .limit() is present', async () => {
+    // Note: TanStack DB does NOT pass limit to loadSubsetOptions - limiting is applied client-side.
+    // This test verifies that client-side limiting works correctly.
+    it('should apply limit client-side when .limit() is present', async () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
-
-        // Spy on PocketBase getList
-        const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
 
         const { result } = renderHook(() =>
             useLiveQuery((q) =>
@@ -98,21 +95,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
             { timeout: 10000 }
         )
 
-        // Verify getList was called
-        expect(getListSpy).toHaveBeenCalled()
-
-        // Find the call with limit=2 (perPage=2)
-        const calls = getListSpy.mock.calls
-        const callWithLimit = calls.find(call => call[1] === 2)
-
-        expect(callWithLimit).toBeDefined()
-
-        // Verify the limit parameter was passed correctly
-        const [page, perPage] = callWithLimit!
-        expect(page).toBe(1)
-        expect(perPage).toBe(2)  // limit passed as perPage
-
-        // Verify results respect the limit
+        // Verify results respect the limit (client-side limiting)
         expect(result.current.data.length).toBeLessThanOrEqual(2)
     }, 15000)
 
@@ -161,9 +144,9 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
 
         // Use a filter to trigger on-demand fetch
-        const allBooks = await pb.collection('books').getList(1, 10)
-        expect(allBooks.items.length).toBeGreaterThan(0)
-        const testGenre = allBooks.items[0].genre
+        const allBooks = await pb.collection('books').getFullList()
+        expect(allBooks.length).toBeGreaterThan(0)
+        const testGenre = allBooks[0].genre
 
         const { result } = renderHook(() =>
             useLiveQuery((q) =>
