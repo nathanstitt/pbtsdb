@@ -139,6 +139,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 const result = await pb.collection(collectionName).getList(1, limit, {
                     filter,
                     sort,
+                    skipTotal: true, // Optimize by skipping total count
                     expand: expandString,
                 });
                 items = result.items as unknown as RecordType[];
