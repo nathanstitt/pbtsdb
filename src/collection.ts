@@ -235,7 +235,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                         collection.utils.writeInsert(event.record);
                         break;
                     case 'update':
-                        collection.utils.writeUpdate(event.record);
+                        collection.utils.writeUpsert(event.record);
                         break;
                     case 'delete':
                         if (event.record && 'id' in event.record) {
