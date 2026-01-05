@@ -172,12 +172,15 @@ describe('Per-Collection Expand Feature', () => {
                 { wrapper: ({ children }) => <Provider>{children}</Provider> }
             );
 
-            await waitForLoadFinish(result, 10000);
-
-            const booksData = result.current.data;
-            expect(booksData).toBeDefined();
-            expect(booksData!.length).toBeGreaterThan(0);
-            expect(booksData![0].expand?.author).toBeDefined();
+            await waitFor(
+                () => {
+                    expect(result.current.isLoading).toBe(false);
+                    expect(result.current.data).toBeDefined();
+                    expect(result.current.data!.length).toBeGreaterThan(0);
+                    expect(result.current.data![0].expand?.author).toBeDefined();
+                },
+                { timeout: 10000 }
+            );
         }, 15000);
     });
 });

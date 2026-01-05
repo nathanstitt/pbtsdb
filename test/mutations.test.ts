@@ -180,11 +180,15 @@ describe("Collection - Mutations", () => {
 
         const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
 
-        await waitForLoadFinish(result);
-        // Wait for subscription and data to stabilize before capturing initialCount
+        // Wait for data to load and stabilize before capturing count
+        await waitFor(
+            () => {
+                expect(result.current.isLoading).toBe(false);
+                expect(result.current.data.length).toBeGreaterThan(0);
+            },
+            { timeout: 10000 }
+        );
         await waitForSubscription(collection);
-        // Allow any pending subscription events to settle
-        await new Promise((resolve) => setTimeout(resolve, 100));
         const initialCount = result.current.data.length;
 
         const authorId = await getTestAuthorId();

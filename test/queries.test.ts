@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { useLiveQuery } from '@tanstack/react-db'
 import { and, eq, gt, gte, lt, lte, or } from '@tanstack/db'
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
@@ -86,9 +86,13 @@ describe('Collection - Query Operators', () => {
             )
         )
 
-        await waitForLoadFinish(result)
-
-        expect(result.current.data.length).toBeGreaterThan(0)
+        await waitFor(
+            () => {
+                expect(result.current.isLoading).toBe(false)
+                expect(result.current.data.length).toBeGreaterThan(0)
+            },
+            { timeout: 10000 }
+        )
 
         // All results should have created date >= threshold
         result.current.data.forEach(book => {

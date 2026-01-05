@@ -144,7 +144,7 @@ describe('Collection - Real-time Subscriptions', () => {
 
         await waitForLoadFinish(result)
         await waitFor(
-            () => result.current.data.some(b => b.id === testBook.id),
+            () => expect(result.current.data.some(b => b.id === testBook.id)).toBe(true),
             { timeout: 5000 }
         )
         const countWithBook = result.current.data.length
@@ -154,15 +154,9 @@ describe('Collection - Real-time Subscriptions', () => {
 
         // Wait for the real-time delete to propagate
         await waitFor(
-            () => {
-                const stillHasBook = result.current.data.some(b => b.id === testBook.id)
-                return !stillHasBook
-            },
+            () => expect(result.current.data.some(b => b.id === testBook.id)).toBe(false),
             { timeout: 5000 }
         )
-
-        // Verify the book is gone
-        expect(result.current.data.some(b => b.id === testBook.id)).toBe(false)
     }, 15000)
 
     it('should handle multiple simultaneous updates with writeBatch', async () => {
