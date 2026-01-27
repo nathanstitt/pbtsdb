@@ -61,24 +61,24 @@
     "react-dom": ">=18.0.0"
   },
   "devDependencies": {
-    "@tanstack/query-db-collection": ">=1.0.5",
-    "@tanstack/react-db": ">=0.1.53",
-    "@tanstack/react-query": ">=5.90.11",
-    "@testing-library/react": ">=16.3.0",
-    "@types/node": ">=24.10.1",
-    "@types/react": ">=19.2.7",
+    "@tanstack/query-db-collection": ">=1.0.21",
+    "@tanstack/react-db": ">=0.1.68",
+    "@tanstack/react-query": ">=5.90.20",
+    "@testing-library/react": ">=16.3.2",
+    "@types/node": ">=25.0.10",
+    "@types/react": ">=19.2.10",
     "biome": ">=0.3.3",
     "dotenv": ">=17.2.3",
     "eventsource": ">=4.1.0",
-    "jsdom": ">=27.2.0",
+    "jsdom": ">=27.4.0",
     "npm-run-all": ">=4.1.5",
-    "pocketbase": ">=0.26.3",
-    "react": ">=19.2.0",
-    "react-dom": ">=19.2.0",
+    "pocketbase": ">=0.26.7",
+    "react": ">=19.2.4",
+    "react-dom": ">=19.2.4",
     "start-server-and-test": ">=2.1.3",
     "tsup": "^8.5.1",
     "tsx": ">=4.21.0",
     "typescript": ">=5.9.3",
-    "vitest": ">=4.0.14"
+    "vitest": ">=4.0.18"
   }
 }
