@@ -1,6 +1,6 @@
 {
   "name": "pbtsdb",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Type-safe PocketBase integration with TanStack Query and TanStack DB",
   "keywords": [
     "pocketbase",
