@@ -1,23 +1,23 @@
-import PocketBase from 'pocketbase';
-import type { RecordSubscription } from 'pocketbase';
-import { createCollection as createTanStackCollection, type Collection, type LoadSubsetOptions } from "@tanstack/react-db"
-import { queryCollectionOptions, type QueryCollectionUtils } from "@tanstack/query-db-collection"
-import { QueryClient } from '@tanstack/react-query'
-import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter';
+import PocketBase from "pocketbase";
+import type { RecordSubscription } from "pocketbase";
+import {
+    createCollection as createTanStackCollection,
+    type Collection,
+    type LoadSubsetOptions,
+} from "@tanstack/react-db";
+import { queryCollectionOptions, type QueryCollectionUtils } from "@tanstack/query-db-collection";
+import { QueryClient } from "@tanstack/react-query";
+import { convertToPocketBaseFilter, convertToPocketBaseSort } from "./pocketbase-query-converter";
 import type {
     SchemaDeclaration,
     CreateCollectionOptions,
     ExtractRecordType,
     ExpandTargetCollection,
     BaseRecord,
-} from './types';
-import { logger } from './logger';
+} from "./types";
+import { logger } from "./logger";
 
-export type {
-    SchemaDeclaration,
-    CreateCollectionOptions,
-    BaseRecord,
-} from './types';
+export type { SchemaDeclaration, CreateCollectionOptions, BaseRecord } from "./types";
 
 /**
  * Extended LoadSubsetOptions that includes PocketBase-specific expand parameter.
@@ -31,20 +31,18 @@ type ExtendedLoadSubsetOptions = LoadSubsetOptions & {
  * Compute the record type with expand property when expand option is configured.
  * @internal
  */
-type WithExpandFromConfig<
-    Schema extends SchemaDeclaration,
-    C extends keyof Schema,
-    Opts
-> = Opts extends { expand: infer E }
+type WithExpandFromConfig<Schema extends SchemaDeclaration, C extends keyof Schema, Opts> = Opts extends {
+    expand: infer E;
+}
     ? ExtractRecordType<Schema, C> & {
-        expand?: {
-            [K in keyof E]: K extends keyof import('./types').ExtractRelations<Schema, C>
-                ? import('./types').ExtractRelations<Schema, C>[K] extends Array<infer U>
-                    ? U[]
-                    : import('./types').ExtractRelations<Schema, C>[K]
-                : never;
-        };
-    }
+          expand?: {
+              [K in keyof E]: K extends keyof import("./types").ExtractRelations<Schema, C>
+                  ? import("./types").ExtractRelations<Schema, C>[K] extends Array<infer U>
+                      ? U[]
+                      : import("./types").ExtractRelations<Schema, C>[K]
+                  : never;
+          };
+      }
     : ExtractRecordType<Schema, C>;
 
 /**
@@ -67,7 +65,7 @@ interface CollectionSubscriptionHelpers {
 type InferCollectionType<
     Schema extends SchemaDeclaration,
     C extends keyof Schema,
-    Opts extends CreateCollectionOptions<Schema, C>
+    Opts extends CreateCollectionOptions<Schema, C>,
 > = Collection<
     WithExpandFromConfig<Schema, C, Opts>,
     string | number,
@@ -75,11 +73,13 @@ type InferCollectionType<
     QueryCollectionUtils<WithExpandFromConfig<Schema, C, Opts>, string | number, WithExpandFromConfig<Schema, C, Opts>>,
     // TSchema - we don't use StandardSchema validation
     never,
-    Opts extends { omitOnInsert: infer O extends readonly import('./types').OmittableFields<ExtractRecordType<Schema, C>>[] }
-        ? import('./types').ComputeInsertType<ExtractRecordType<Schema, C>, O>
+    Opts extends {
+        omitOnInsert: infer O extends readonly import("./types").OmittableFields<ExtractRecordType<Schema, C>>[];
+    }
+        ? import("./types").ComputeInsertType<ExtractRecordType<Schema, C>, O>
         : ExtractRecordType<Schema, C>
-> & CollectionSubscriptionHelpers;
-
+> &
+    CollectionSubscriptionHelpers;
 
 /**
  * Creates a type-safe TanStack DB collection backed by PocketBase.
@@ -113,20 +113,19 @@ type InferCollectionType<
  * // data[0].expand.author is typed and populated
  * ```
  */
-export function createCollection<Schema extends SchemaDeclaration>(
-    pb: PocketBase,
-    queryClient: QueryClient
-) {
+export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBase, queryClient: QueryClient) {
     return <
         C extends keyof Schema & string,
-        Opts extends CreateCollectionOptions<Schema, C> = CreateCollectionOptions<Schema, C>
+        Opts extends CreateCollectionOptions<Schema, C> = CreateCollectionOptions<Schema, C>,
     >(
         collectionName: C,
-        options?: Opts
+        options?: Opts,
     ): InferCollectionType<Schema, C, Opts> => {
         type RecordType = ExtractRecordType<Schema, C>;
         const expandStores = options?.expand as Record<string, ExpandTargetCollection> | undefined;
-        const expandString = expandStores ? Object.keys(expandStores).sort().join(',') : undefined;
+        const expandString = expandStores ? Object.keys(expandStores).sort().join(",") : undefined;
+
+        const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true;
 
         async function fetchRecords(loadOptions?: ExtendedLoadSubsetOptions): Promise<RecordType[]> {
             const filter = convertToPocketBaseFilter(loadOptions?.where);
@@ -134,22 +133,29 @@ export function createCollection<Schema extends SchemaDeclaration>(
             const limit = loadOptions?.limit;
 
             let items: RecordType[];
-            if (limit) {
-                // Use getList when limit is specified to avoid fetching all records
-                const result = await pb.collection(collectionName).getList(1, limit, {
-                    filter,
-                    sort,
-                    skipTotal: true, // Optimize by skipping total count
-                    expand: expandString,
-                });
-                items = result.items as unknown as RecordType[];
-            } else {
-                // Use getFullList to fetch all records with automatic pagination
-                items = await pb.collection(collectionName).getFullList({
-                    filter,
-                    sort,
-                    expand: expandString,
-                }) as unknown as RecordType[];
+            try {
+                if (limit) {
+                    // Use getList when limit is specified to avoid fetching all records
+                    const result = await pb.collection(collectionName).getList(1, limit, {
+                        filter,
+                        sort,
+                        skipTotal: true, // Optimize by skipping total count
+                        expand: expandString,
+                    });
+                    items = result.items as unknown as RecordType[];
+                } else {
+                    // Use getFullList to fetch all records with automatic pagination
+                    items = (await pb.collection(collectionName).getFullList({
+                        filter,
+                        sort,
+                        expand: expandString,
+                    })) as unknown as RecordType[];
+                }
+            } catch (error) {
+                if (ignoreAutoCancellation && error instanceof Error && error.message.includes("autocancelled")) {
+                    return queryClient.getQueryData<RecordType[]>([collectionName]) ?? [];
+                }
+                throw error;
             }
 
             if (expandStores) {
@@ -161,11 +167,11 @@ export function createCollection<Schema extends SchemaDeclaration>(
                         const targetStore = expandStores[key];
                         if (!targetStore.utils) continue;
                         if (!targetStore.isReady()) {
-                            if (targetStore.config?.syncMode === 'on-demand') {
+                            if (targetStore.config?.syncMode === "on-demand") {
                                 await targetStore._sync.startSync();
                             } else {
-                                logger.warn(`not syncing ${key} on ${collectionName} because store is not yet ready`)
-                                continue
+                                logger.warn(`not syncing ${key} on ${collectionName} because store is not yet ready`);
+                                continue;
                             }
                         }
                         const values = Array.isArray(value) ? value : [value];
@@ -180,41 +186,61 @@ export function createCollection<Schema extends SchemaDeclaration>(
         const collectionOptions = queryCollectionOptions({
             queryClient,
             queryKey: [collectionName],
-            syncMode: options?.syncMode ?? 'eager',
+            syncMode: options?.syncMode ?? "eager",
             queryFn: async (ctx): Promise<RecordType[]> => {
                 return fetchRecords(ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined);
             },
             getKey: (item: RecordType) => {
                 const record = item as any;
-                if (!record || typeof record !== 'object' || !('id' in record)) {
-                    throw new Error(`Record in collection '${collectionName}' is missing required 'id' field. Received: ${JSON.stringify(item)}`);
+                if (!record || typeof record !== "object" || !("id" in record)) {
+                    throw new Error(
+                        `Record in collection '${collectionName}' is missing required 'id' field. Received: ${JSON.stringify(item)}`,
+                    );
                 }
                 return record.id;
             },
-            onInsert: options?.onInsert === false ? undefined : options?.onInsert ?? (async ({ transaction }) => {
-                await Promise.all(
-                    transaction.mutations.map(async (mutation) => {
-                        const { created, updated, collectionId, collectionName: _, ...data } = mutation.modified as unknown as Record<string, unknown>;
-                        await pb.collection(collectionName).create(data);
-                    })
-                );
-            }),
-            onUpdate: options?.onUpdate === false ? undefined : options?.onUpdate ?? (async ({ transaction }) => {
-                await Promise.all(
-                    transaction.mutations.map(async (mutation) => {
-                        const recordWithId = mutation.original as { id: string };
-                        await pb.collection(collectionName).update(recordWithId.id, mutation.changes);
-                    })
-                );
-            }),
-            onDelete: options?.onDelete === false ? undefined : options?.onDelete ?? (async ({ transaction }) => {
-                await Promise.all(
-                    transaction.mutations.map(async (mutation) => {
-                        const recordWithId = mutation.original as { id: string };
-                        await pb.collection(collectionName).delete(recordWithId.id);
-                    })
-                );
-            })
+            onInsert:
+                options?.onInsert === false
+                    ? undefined
+                    : (options?.onInsert ??
+                      (async ({ transaction }) => {
+                          await Promise.all(
+                              transaction.mutations.map(async (mutation) => {
+                                  const {
+                                      created,
+                                      updated,
+                                      collectionId,
+                                      collectionName: _,
+                                      ...data
+                                  } = mutation.modified as unknown as Record<string, unknown>;
+                                  await pb.collection(collectionName).create(data);
+                              }),
+                          );
+                      })),
+            onUpdate:
+                options?.onUpdate === false
+                    ? undefined
+                    : (options?.onUpdate ??
+                      (async ({ transaction }) => {
+                          await Promise.all(
+                              transaction.mutations.map(async (mutation) => {
+                                  const recordWithId = mutation.original as { id: string };
+                                  await pb.collection(collectionName).update(recordWithId.id, mutation.changes);
+                              }),
+                          );
+                      })),
+            onDelete:
+                options?.onDelete === false
+                    ? undefined
+                    : (options?.onDelete ??
+                      (async ({ transaction }) => {
+                          await Promise.all(
+                              transaction.mutations.map(async (mutation) => {
+                                  const recordWithId = mutation.original as { id: string };
+                                  await pb.collection(collectionName).delete(recordWithId.id);
+                              }),
+                          );
+                      })),
         });
 
         const collection = createTanStackCollection(collectionOptions);
@@ -231,14 +257,14 @@ export function createCollection<Schema extends SchemaDeclaration>(
 
             collection.utils.writeBatch(() => {
                 switch (event.action) {
-                    case 'create':
+                    case "create":
                         collection.utils.writeInsert(event.record);
                         break;
-                    case 'update':
+                    case "update":
                         collection.utils.writeUpsert(event.record);
                         break;
-                    case 'delete':
-                        if (event.record && 'id' in event.record) {
+                    case "delete":
+                        if (event.record && "id" in event.record) {
                             collection.utils.writeDelete((event.record as { id: string }).id);
                         }
                         break;
@@ -258,15 +284,15 @@ export function createCollection<Schema extends SchemaDeclaration>(
             }
 
             try {
-                unsubscribeFn = await pb.collection(collectionName).subscribe('*', handleRealtimeEvent);
+                unsubscribeFn = await pb.collection(collectionName).subscribe("*", handleRealtimeEvent);
                 isSubscribed = true;
-                logger.debug('Subscription started', { collectionName });
+                logger.debug("Subscription started", { collectionName });
                 // Resolve the promise to notify waiters
                 if (subscriptionResolve) {
                     subscriptionResolve();
                 }
             } catch (error) {
-                logger.error('Failed to start subscription', { collectionName, error });
+                logger.error("Failed to start subscription", { collectionName, error });
             }
         };
 
@@ -281,9 +307,9 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 // Reset promise for next subscription cycle
                 subscriptionPromise = null;
                 subscriptionResolve = null;
-                logger.debug('Subscription stopped', { collectionName });
+                logger.debug("Subscription stopped", { collectionName });
             } catch (error) {
-                logger.debug('Unsubscribe failed (expected if connection closed)', { collectionName, error });
+                logger.debug("Unsubscribe failed (expected if connection closed)", { collectionName, error });
             }
         };
 
@@ -311,14 +337,14 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 await Promise.race([
                     subscriptionPromise,
                     new Promise<void>((_, reject) =>
-                        setTimeout(() => reject(new Error('Subscription timeout')), timeout)
-                    )
+                        setTimeout(() => reject(new Error("Subscription timeout")), timeout),
+                    ),
                 ]);
             }
         };
 
         // Manage subscription based on collection subscriber count
-        collection.on('subscribers:change', (event: { subscriberCount: number; previousSubscriberCount: number }) => {
+        collection.on("subscribers:change", (event: { subscriberCount: number; previousSubscriberCount: number }) => {
             const newCount = event.subscriberCount;
             const previousCount = event.previousSubscriberCount;
 
@@ -341,4 +367,3 @@ export function createCollection<Schema extends SchemaDeclaration>(
         return collection as any;
     };
 }
-

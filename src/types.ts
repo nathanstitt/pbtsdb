@@ -410,4 +410,27 @@ export interface CreateCollectionOptions<
      * ```
      */
     syncMode?: 'eager' | 'on-demand';
+
+    /**
+     * Whether to ignore PocketBase auto-cancellation errors.
+     *
+     * PocketBase automatically cancels pending requests when a new request is made
+     * to the same endpoint. This can throw ClientResponseError with a message
+     * containing "autocancelled". When this option is true, such errors are
+     * silently ignored and the existing cached data is returned for the cancelled request.
+     *
+     * @default true
+     *
+     * @example
+     * ```ts
+     * // Default: auto-cancellation errors are ignored
+     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     *
+     * // Explicitly handle auto-cancellation errors
+     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     *     ignoreAutoCancellation: false
+     * });
+     * ```
+     */
+    ignoreAutoCancellation?: boolean;
 }
