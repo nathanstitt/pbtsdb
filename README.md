@@ -25,6 +25,7 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
   - [Basic Queries](#basic-queries)
   - [Filtering and Sorting](#filtering-and-sorting)
   - [Relations and Joins](#relations-and-joins)
+  - [Includes (Nested Subqueries)](#includes-nested-subqueries)
   - [Real-time Updates](#real-time-updates)
   - [Mutations](#mutations)
 - [TypeScript](#typescript)
@@ -306,6 +307,8 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable
+- `ignoreAutoCancellation?: boolean` - Ignore PocketBase auto-cancellation errors (default: `true`)
+- `collectionOptions?: object` - Additional TanStack DB collection options passed through directly (see [Collection Options Passthrough](#collection-options-passthrough))
 
 **Returns:** Fully-typed Collection instance with subscription capabilities
 
@@ -332,6 +335,26 @@ const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
 
 // Expanded records auto-inserted into authorsCollection
 ```
+
+#### Collection Options Passthrough
+
+Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:
+
+```typescript
+import { BasicIndex } from 'pbtsdb';
+
+const c = createCollection<MySchema>(pb, queryClient);
+const booksCollection = c('books', {
+    collectionOptions: {
+        autoIndex: 'eager',
+        defaultIndexType: BasicIndex,
+        gcTime: 60000,       // 1 minute GC
+        startSync: true,     // Start syncing immediately
+    }
+});
+```
+
+The following fields are managed by pbtsdb and excluded from `collectionOptions`: `getKey`, `syncMode`, `onInsert`, `onUpdate`, `onDelete`, `schema`.
 
 ### React Integration
 
@@ -479,6 +502,30 @@ booksCollection.insert(newBook);
 ```
 
 **Returns:** `string` - 15-character lowercase alphanumeric ID
+
+#### Re-exported TanStack DB Utilities
+
+pbtsdb re-exports commonly used TanStack DB utilities so you don't need to depend on `@tanstack/db` directly:
+
+```typescript
+import {
+    // Includes helpers
+    toArray,
+    createEffect,
+
+    // Index types (for collectionOptions.defaultIndexType)
+    BasicIndex,
+    BTreeIndex,
+    ReverseIndex,
+
+    // Types
+    type DeltaEvent,
+    type DeltaType,
+    type EffectConfig,
+    type EffectContext,
+    type IndexConstructor,
+} from 'pbtsdb';
+```
 
 ## Usage Examples
 
@@ -738,6 +785,78 @@ export function ProjectDashboard({ projectId }: { projectId: string }) {
 ```
 
 Demonstrates variadic `useStore()`, client-side aggregations, and TanStack DB joins.
+
+### Includes (Nested Subqueries)
+
+TanStack DB 0.6.0 introduces **includes** — nested subqueries within `select()` that project normalized data into hierarchical shapes. This is useful when you want to compose related data from multiple collections reactively.
+
+#### Single relation with `findOne()`
+
+```typescript
+import { useLiveQuery, eq } from '@tanstack/react-db';
+
+const { data: booksWithAuthors } = useLiveQuery((q) =>
+    q.from({ b: booksCollection }).select(({ b }) => ({
+        id: b.id,
+        title: b.title,
+        author: q
+            .from({ a: authorsCollection })
+            .where(({ a }) => eq(a.id, b.author))
+            .select(({ a }) => ({ id: a.id, name: a.name }))
+            .findOne(),
+    }))
+);
+```
+
+#### Many relation with `toArray()`
+
+```typescript
+import { useLiveQuery, eq, toArray } from '@tanstack/react-db';
+// Or: import { toArray } from 'pbtsdb';
+
+const { data: booksWithTags } = useLiveQuery((q) =>
+    q.from({ b: booksCollection }).select(({ b }) => ({
+        id: b.id,
+        title: b.title,
+        tags: toArray(
+            q.from({ bt: bookTagsCollection })
+                .where(({ bt }) => eq(bt.book, b.id))
+                .join({ t: tagsCollection }, ({ bt, t }) => eq(bt.tag, t.id))
+                .select(({ t }) => ({ id: t.id, name: t.name }))
+        ),
+    }))
+);
+```
+
+#### Combining expand with includes
+
+Use PocketBase's `expand` to auto-populate a related collection, then use includes to query from it:
+
+```typescript
+const authorsCollection = c('authors', { syncMode: 'on-demand' });
+const booksCollection = c('books', {
+    syncMode: 'on-demand',
+    expand: { author: authorsCollection },  // Auto-populates authorsCollection
+});
+
+const { data } = useLiveQuery((q) =>
+    q.from({ b: booksCollection }).select(({ b }) => ({
+        id: b.id,
+        title: b.title,
+        // Query from the expand-populated authorsCollection
+        author: q.from({ a: authorsCollection })
+            .where(({ a }) => eq(a.id, b.author))
+            .select(({ a }) => ({ id: a.id, name: a.name }))
+            .findOne(),
+        tags: toArray(
+            q.from({ bt: bookTagsCollection })
+                .where(({ bt }) => eq(bt.book, b.id))
+                .join({ t: tagsCollection }, ({ bt, t }) => eq(bt.tag, t.id))
+                .select(({ t }) => ({ id: t.id, name: t.name }))
+        ),
+    }))
+);
+```
 
 ## TypeScript
 
