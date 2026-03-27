@@ -16,3 +16,4 @@ dist/
 # PocketBase
 pb_data/
 .env
+.localstorage-test*
