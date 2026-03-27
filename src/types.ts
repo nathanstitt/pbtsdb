@@ -1,4 +1,4 @@
-import type { Collection, InsertMutationFn, UpdateMutationFn, DeleteMutationFn } from "@tanstack/db"
+import type { Collection, InsertMutationFn, UpdateMutationFn, DeleteMutationFn, BaseCollectionConfig } from "@tanstack/db"
 
 // ============================================================================
 // Schema Type Definitions
@@ -433,4 +433,30 @@ export interface CreateCollectionOptions<
      * ```
      */
     ignoreAutoCancellation?: boolean;
+
+    /**
+     * Additional options passed directly to the underlying TanStack DB collection.
+     * Use this to configure indexing, garbage collection, comparison functions,
+     * and any other TanStack DB collection options not explicitly exposed by pbtsdb.
+     *
+     * Options set here are spread into the `queryCollectionOptions()` call.
+     * Fields managed by pbtsdb (`getKey`, `syncMode`, `onInsert`, `onUpdate`,
+     * `onDelete`, `schema`) are excluded from the type.
+     *
+     * @example
+     * ```ts
+     * import { BasicIndex } from 'pbtsdb'
+     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     *     collectionOptions: {
+     *         autoIndex: 'eager',
+     *         defaultIndexType: BasicIndex,
+     *         gcTime: 60000,
+     *     }
+     * });
+     * ```
+     */
+    collectionOptions?: Omit<
+        Partial<BaseCollectionConfig<ExtractRecordType<Schema, CollectionName>, string | number>>,
+        'getKey' | 'syncMode' | 'onInsert' | 'onUpdate' | 'onDelete' | 'schema'
+    >;
 }

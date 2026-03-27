@@ -18,6 +18,15 @@ export { setLogger, resetLogger, type Logger } from './logger';
 
 export { newRecordId } from './util';
 
+export { toArray, createEffect, BasicIndex, BTreeIndex, ReverseIndex } from '@tanstack/db';
+export type {
+    DeltaEvent,
+    DeltaType,
+    EffectConfig,
+    EffectContext,
+    IndexConstructor,
+} from '@tanstack/db';
+
 export type {
     SchemaDeclaration,
     CreateCollectionOptions,

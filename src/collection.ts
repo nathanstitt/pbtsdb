@@ -184,6 +184,7 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
         }
 
         const collectionOptions = queryCollectionOptions({
+            ...options?.collectionOptions,
             queryClient,
             queryKey: [collectionName],
             syncMode: options?.syncMode ?? "eager",
