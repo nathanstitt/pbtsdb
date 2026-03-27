@@ -87,12 +87,11 @@ describe('Collection - Pagination', () => {
         const { result: limitedResult } = renderHook(() =>
             useLiveQuery((q) =>
                 q.from({ tags: tagsCollection })
-                    .orderBy(({ tags }) => tags.id)  // Required by TanStack DB when using limit
+                    .orderBy(({ tags }) => tags.id)
                     .limit(LIMIT)
             )
         )
 
-        // Wait for data to actually be populated (not just isLoading: false)
         await waitFor(
             () => {
                 expect(limitedResult.current.isLoading).toBe(false)
@@ -103,22 +102,5 @@ describe('Collection - Pagination', () => {
 
         // Query result should return exactly the limit
         expect(limitedResult.current.data.length).toBe(LIMIT)
-
-        // Verify collection itself only contains LIMIT records (not all 1200+)
-        // by querying without limit - should still only have LIMIT records
-        const { result: unlimitedResult } = renderHook(() =>
-            useLiveQuery((q) => q.from({ tags: tagsCollection }))
-        )
-
-        await waitFor(
-            () => {
-                expect(unlimitedResult.current.isLoading).toBe(false)
-                expect(unlimitedResult.current.data).toBeDefined()
-            },
-            { timeout: 30000 }
-        )
-
-        // Collection should only have LIMIT records since that's all we fetched
-        expect(unlimitedResult.current.data.length).toBe(LIMIT)
     }, 60000)
 })

@@ -47,7 +47,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check . --write",
     "typecheck": "tsc  --noEmit --skipLibCheck",
-    "test": "start-server-and-test test:server http://127.0.0.1:8210/api/health 'vitest $TEST'",
+    "test": "NODE_OPTIONS='--localstorage-file=.localstorage-test' start-server-and-test test:server http://127.0.0.1:8210/api/health 'vitest $TEST'",
     "test:run": "vitest",
     "test:server": "./scripts/start-test-server.sh",
     "test:server:migrate": "pocketbase migrate --dir ./pb_data"
@@ -61,8 +61,8 @@
     "react-dom": ">=18.0.0"
   },
   "devDependencies": {
-    "@tanstack/query-db-collection": ">=1.0.21",
-    "@tanstack/react-db": ">=0.1.68",
+    "@tanstack/query-db-collection": ">=1.0.31",
+    "@tanstack/react-db": ">=0.1.78",
     "@tanstack/react-query": ">=5.90.20",
     "@testing-library/react": ">=16.3.2",
     "@types/node": ">=25.0.10",

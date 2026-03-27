@@ -99,7 +99,7 @@ describe('Per-Collection Expand Feature', () => {
             // Key part: expanded data should also be upserted into authors collection
             const authors = Array.from(authorsCollection.values());
             expect(authors.length).toBe(1);
-            expect(authors[0]).toBe(firstBook.expand!.author);
+            expect(authors[0].id).toBe(firstBook.expand!.author!.id);
         }, 15000);
 
         it('should type expanded fields correctly', async () => {
