@@ -4,7 +4,7 @@ import {
     createCollection as createTanStackCollection,
     type Collection,
     type LoadSubsetOptions,
-} from "@tanstack/react-db";
+} from "@tanstack/db";
 import { queryCollectionOptions, type QueryCollectionUtils } from "@tanstack/query-db-collection";
 import { QueryClient } from "@tanstack/react-query";
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from "./pocketbase-query-converter";
