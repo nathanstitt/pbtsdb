@@ -298,5 +298,37 @@ describe("Collection - Mutations", () => {
                 }
             }
         }, 15000);
+
+        it("default (false) — delete does not trigger a refetch", async () => {
+            const factory = createCollectionFactory(queryClient);
+            const collection = factory.create("books", {
+                omitOnInsert: ["created", "updated"] as const,
+            });
+
+            const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
+            await waitForLoadFinish(result);
+            await waitForSubscription(collection);
+
+            const authorId = await getTestAuthorId();
+            const seed = await pb.collection("books").create({
+                title: `Seed for delete ${Date.now().toString().slice(-8)}`,
+                isbn: getTestSlug("nrd"),
+                genre: "Fiction",
+                author: authorId,
+                published_date: "",
+                page_count: 0,
+            });
+
+            await waitFor(() => {
+                expect(result.current.data.find((b) => b.id === seed.id)).toBeDefined();
+            });
+
+            const getFullListSpy = vi.spyOn(pb.collection("books"), "getFullList");
+
+            const tx = collection.delete(seed.id);
+            await tx.isPersisted.promise;
+
+            expect(getFullListSpy).not.toHaveBeenCalled();
+        }, 15000);
     });
 });
