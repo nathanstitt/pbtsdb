@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { useLiveQuery } from "@tanstack/react-db";
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
@@ -34,6 +34,7 @@ describe("Collection - Mutations", () => {
 
     afterEach(() => {
         queryClient.clear();
+        vi.restoreAllMocks();
     });
 
     it("should support insert mutations with automatic PocketBase sync", async () => {
@@ -230,39 +231,28 @@ describe("Collection - Mutations", () => {
             await waitForLoadFinish(result);
             await waitForSubscription(collection);
 
-            const booksApi = pb.collection("books");
-            const originalGetFullList = booksApi.getFullList;
-            let getFullListCalls = 0;
-            type GetFullList = typeof originalGetFullList;
-            (booksApi as unknown as { getFullList: GetFullList }).getFullList = ((...args: Parameters<GetFullList>) => {
-                getFullListCalls += 1;
-                return originalGetFullList.call(booksApi, ...args)
-            }) as GetFullList;
+            const getFullListSpy = vi.spyOn(pb.collection("books"), "getFullList");
+
+            const authorId = await getTestAuthorId();
+            const newBook = {
+                id: newRecordId(),
+                title: `No-Refetch Insert ${Date.now().toString().slice(-8)}`,
+                genre: "Fiction" as const,
+                isbn: getTestSlug("nri"),
+                author: authorId,
+                published_date: "",
+                page_count: 0,
+            };
+
+            const tx = collection.insert(newBook);
+            await tx.isPersisted.promise;
+
+            expect(getFullListSpy).not.toHaveBeenCalled();
 
             try {
-                const authorId = await getTestAuthorId();
-                const newBook = {
-                    id: newRecordId(),
-                    title: `No-Refetch Insert ${Date.now().toString().slice(-8)}`,
-                    genre: "Fiction" as const,
-                    isbn: getTestSlug("nri"),
-                    author: authorId,
-                    published_date: "",
-                    page_count: 0,
-                };
-
-                const tx = collection.insert(newBook);
-                await tx.isPersisted.promise;
-
-                expect(getFullListCalls).toBe(0);
-
-                try {
-                    await pb.collection("books").delete(newBook.id);
-                } catch (_error) {
-                    // ignore cleanup errors
-                }
-            } finally {
-                (booksApi as unknown as { getFullList: GetFullList }).getFullList = originalGetFullList;
+                await pb.collection("books").delete(newBook.id);
+            } catch (_error) {
+                // ignore cleanup errors
             }
         }, 15000);
     });
