@@ -218,4 +218,52 @@ describe("Collection - Mutations", () => {
 
         expect(result.current.data.find((b) => b.id === newBook.id)).toBeUndefined();
     }, 15000);
+
+    describe("refetchOnMutation behavior", () => {
+        it("default (false) — insert does not trigger a refetch", async () => {
+            const factory = createCollectionFactory(queryClient);
+            const collection = factory.create("books", {
+                omitOnInsert: ["created", "updated"] as const,
+            });
+
+            const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
+            await waitForLoadFinish(result);
+            await waitForSubscription(collection);
+
+            const booksApi = pb.collection("books");
+            const originalGetFullList = booksApi.getFullList;
+            let getFullListCalls = 0;
+            type GetFullList = typeof originalGetFullList;
+            (booksApi as unknown as { getFullList: GetFullList }).getFullList = ((...args: Parameters<GetFullList>) => {
+                getFullListCalls += 1;
+                return originalGetFullList.call(booksApi, ...args)
+            }) as GetFullList;
+
+            try {
+                const authorId = await getTestAuthorId();
+                const newBook = {
+                    id: newRecordId(),
+                    title: `No-Refetch Insert ${Date.now().toString().slice(-8)}`,
+                    genre: "Fiction" as const,
+                    isbn: getTestSlug("nri"),
+                    author: authorId,
+                    published_date: "",
+                    page_count: 0,
+                };
+
+                const tx = collection.insert(newBook);
+                await tx.isPersisted.promise;
+
+                expect(getFullListCalls).toBe(0);
+
+                try {
+                    await pb.collection("books").delete(newBook.id);
+                } catch (_error) {
+                    // ignore cleanup errors
+                }
+            } finally {
+                (booksApi as unknown as { getFullList: GetFullList }).getFullList = originalGetFullList;
+            }
+        }, 15000);
+    });
 });
