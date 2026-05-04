@@ -268,6 +268,20 @@ const { data } = useLiveQuery((q) =>
 - **Shared:** Multiple components using the same collection share one subscription
 - **No manual control needed:** The collection handles all subscription management internally
 
+### Mutations and Refetch
+
+By default, pbtsdb does **not** refetch the entire collection after a successful insert, update, or delete. The realtime subscription delivers server-confirmed rows — including server-assigned fields like `id`, `created`, `updated`, and any values rewritten by PocketBase hooks — and TanStack DB's optimistic write keeps the UI consistent in the meantime. The post-mutation refetch is therefore redundant.
+
+Set `refetchOnMutation: true` to opt back into the previous behavior — for example, when realtime is unreliable in your environment, or when a server-side hook produces a field you must read synchronously after the mutation resolves:
+
+```typescript
+const collection = c('books', {
+    refetchOnMutation: true,
+});
+```
+
+The option only affects the built-in default handlers. If you supply your own `onInsert`, `onUpdate`, or `onDelete`, you control its return value yourself — return `{ refetch: false }` (or omit a return) to skip the refetch, return `{ refetch: true }` to force one.
+
 ### Type Safety
 
 Full TypeScript support with compile-time type checking:
