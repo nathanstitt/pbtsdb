@@ -126,6 +126,7 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
         const expandString = expandStores ? Object.keys(expandStores).sort().join(",") : undefined;
 
         const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true;
+        const refetchOnMutation = options?.refetchOnMutation ?? false;
 
         async function fetchRecords(loadOptions?: ExtendedLoadSubsetOptions): Promise<RecordType[]> {
             const filter = convertToPocketBaseFilter(loadOptions?.where);
@@ -217,6 +218,7 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                                   await pb.collection(collectionName).create(data);
                               }),
                           );
+                          return { refetch: refetchOnMutation };
                       })),
             onUpdate:
                 options?.onUpdate === false
@@ -229,6 +231,7 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                                   await pb.collection(collectionName).update(recordWithId.id, mutation.changes);
                               }),
                           );
+                          return { refetch: refetchOnMutation };
                       })),
             onDelete:
                 options?.onDelete === false
@@ -241,6 +244,7 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                                   await pb.collection(collectionName).delete(recordWithId.id);
                               }),
                           );
+                          return { refetch: refetchOnMutation };
                       })),
         });
 

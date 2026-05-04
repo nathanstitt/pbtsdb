@@ -386,6 +386,27 @@ export interface CreateCollectionOptions<
     onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false;
 
     /**
+     * If true, refetch the entire collection after a successful insert,
+     * update, or delete. Defaults to false: pbtsdb relies on its PocketBase
+     * realtime subscription to deliver server-confirmed rows. Set true if
+     * you do not trust realtime to reconcile in time (e.g. flaky socket,
+     * server-side hooks producing fields you must read synchronously).
+     *
+     * Only affects the built-in default handlers. If you supply your own
+     * onInsert/onUpdate/onDelete, you control the return value yourself.
+     *
+     * @default false
+     *
+     * @example
+     * ```ts
+     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     *     refetchOnMutation: true,
+     * });
+     * ```
+     */
+    refetchOnMutation?: boolean;
+
+    /**
      * Sync mode for the collection. Controls when and how data is fetched from PocketBase.
      *
      * - `'eager'` (default): Fetches all data immediately when collection is created.

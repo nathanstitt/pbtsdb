@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { useLiveQuery } from "@tanstack/react-db";
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
@@ -34,6 +34,7 @@ describe("Collection - Mutations", () => {
 
     afterEach(() => {
         queryClient.clear();
+        vi.restoreAllMocks();
     });
 
     it("should support insert mutations with automatic PocketBase sync", async () => {
@@ -218,4 +219,116 @@ describe("Collection - Mutations", () => {
 
         expect(result.current.data.find((b) => b.id === newBook.id)).toBeUndefined();
     }, 15000);
+
+    describe("refetchOnMutation behavior", () => {
+        it("default (false) — insert does not trigger a refetch", async () => {
+            const factory = createCollectionFactory(queryClient);
+            const collection = factory.create("books", {
+                omitOnInsert: ["created", "updated"] as const,
+            });
+
+            const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
+            await waitForLoadFinish(result);
+            await waitForSubscription(collection);
+
+            const getFullListSpy = vi.spyOn(pb.collection("books"), "getFullList");
+
+            const authorId = await getTestAuthorId();
+            const newBook = {
+                id: newRecordId(),
+                title: `No-Refetch Insert ${Date.now().toString().slice(-8)}`,
+                genre: "Fiction" as const,
+                isbn: getTestSlug("nri"),
+                author: authorId,
+                published_date: "",
+                page_count: 0,
+            };
+
+            const tx = collection.insert(newBook);
+            await tx.isPersisted.promise;
+
+            expect(getFullListSpy).not.toHaveBeenCalled();
+
+            try {
+                await pb.collection("books").delete(newBook.id);
+            } catch (_error) {
+                // ignore cleanup errors
+            }
+        }, 15000);
+
+        it("default (false) — update does not trigger a refetch", async () => {
+            const factory = createCollectionFactory(queryClient);
+            const collection = factory.create("books", {
+                omitOnInsert: ["created", "updated"] as const,
+            });
+
+            const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
+            await waitForLoadFinish(result);
+            await waitForSubscription(collection);
+
+            const authorId = await getTestAuthorId();
+            const seedIsbn = getTestSlug("nru");
+            const seed = await pb.collection("books").create({
+                title: `Seed for update ${Date.now().toString().slice(-8)}`,
+                isbn: seedIsbn,
+                genre: "Fiction",
+                author: authorId,
+                published_date: "",
+                page_count: 0,
+            });
+
+            await waitFor(() => {
+                expect(result.current.data.find((b) => b.id === seed.id)).toBeDefined();
+            });
+
+            const getFullListSpy = vi.spyOn(pb.collection("books"), "getFullList");
+
+            try {
+                const tx = collection.update(seed.id, (draft) => {
+                    (draft as Books).title = `Updated ${Date.now().toString().slice(-8)}`;
+                });
+                await tx.isPersisted.promise;
+
+                expect(getFullListSpy).not.toHaveBeenCalled();
+            } finally {
+                try {
+                    await pb.collection("books").delete(seed.id);
+                } catch (_error) {
+                    // ignore cleanup errors
+                }
+            }
+        }, 15000);
+
+        it("default (false) — delete does not trigger a refetch", async () => {
+            const factory = createCollectionFactory(queryClient);
+            const collection = factory.create("books", {
+                omitOnInsert: ["created", "updated"] as const,
+            });
+
+            const { result } = renderHook(() => useLiveQuery((q) => q.from({ books: collection })));
+            await waitForLoadFinish(result);
+            await waitForSubscription(collection);
+
+            const authorId = await getTestAuthorId();
+            const seed = await pb.collection("books").create({
+                title: `Seed for delete ${Date.now().toString().slice(-8)}`,
+                isbn: getTestSlug("nrd"),
+                genre: "Fiction",
+                author: authorId,
+                published_date: "",
+                page_count: 0,
+            });
+
+            await waitFor(() => {
+                expect(result.current.data.find((b) => b.id === seed.id)).toBeDefined();
+            });
+
+            const getFullListSpy = vi.spyOn(pb.collection("books"), "getFullList");
+
+            const tx = collection.delete(seed.id);
+            await tx.isPersisted.promise;
+
+            expect(getFullListSpy).not.toHaveBeenCalled();
+        }, 15000);
+    });
 });
