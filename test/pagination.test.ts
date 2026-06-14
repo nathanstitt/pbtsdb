@@ -1,16 +1,16 @@
-import { renderHook, waitFor } from '@testing-library/react'
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
-    pb,
-    createTestQueryClient,
     authenticateTestUser,
     clearAuth,
-    createTagsCollection,
     createCollectionFactory,
+    createTagsCollection,
+    createTestQueryClient,
+    pb,
     waitForLoadFinish,
 } from './helpers'
 
@@ -36,7 +36,7 @@ describe('Collection - Pagination', () => {
                 )
             }
             const results = await Promise.all(batch)
-            createdTagIds.push(...results.map((r) => r.id))
+            createdTagIds.push(...results.map(r => r.id))
         }
     }, 120000)
 
@@ -45,7 +45,14 @@ describe('Collection - Pagination', () => {
         const batchSize = 100
         for (let i = 0; i < createdTagIds.length; i += batchSize) {
             const batch = createdTagIds.slice(i, i + batchSize)
-            await Promise.all(batch.map((id) => pb.collection('tags').delete(id).catch(() => {})))
+            await Promise.all(
+                batch.map(id =>
+                    pb
+                        .collection('tags')
+                        .delete(id)
+                        .catch(() => {})
+                )
+            )
         }
         clearAuth()
     }, 120000)
@@ -62,8 +69,10 @@ describe('Collection - Pagination', () => {
         const tagsCollection = createTagsCollection(queryClient)
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) => q.from({ tags: tagsCollection }).where(({ tags }) => eq(tags.color, COLOR)))
-        )            
+            useLiveQuery(q =>
+                q.from({ tags: tagsCollection }).where(({ tags }) => eq(tags.color, COLOR))
+            )
+        )
 
         await waitForLoadFinish(result, 30000)
 
@@ -71,7 +80,7 @@ describe('Collection - Pagination', () => {
         expect(result.current.data.length).toBeGreaterThanOrEqual(RECORD_COUNT)
 
         // Verify our test tags are present
-        const testTags = result.current.data.filter((tag) =>
+        const testTags = result.current.data.filter(tag =>
             tag.name.startsWith('pagination-test-tag-')
         )
         expect(testTags.length).toBe(RECORD_COUNT)
@@ -85,8 +94,9 @@ describe('Collection - Pagination', () => {
 
         // Query with a limit - should only fetch LIMIT records from server
         const { result: limitedResult } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ tags: tagsCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ tags: tagsCollection })
                     .orderBy(({ tags }) => tags.id)
                     .limit(LIMIT)
             )

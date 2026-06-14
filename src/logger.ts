@@ -8,28 +8,28 @@ export interface Logger {
      * @param msg - The message to log
      * @param context - Optional context object with additional information
      */
-    debug: (msg: string, context?: object) => void;
+    debug: (msg: string, context?: object) => void
 
     /**
      * Log info-level messages.
      * @param msg - The message to log
      * @param context - Optional context object with additional information
      */
-    info: (msg: string, context?: object) => void;
+    info: (msg: string, context?: object) => void
 
     /**
      * Log warning-level messages.
      * @param msg - The message to log
      * @param context - Optional context object with additional information
      */
-    warn: (msg: string, context?: object) => void;
+    warn: (msg: string, context?: object) => void
 
     /**
      * Log error-level messages.
      * @param msg - The message to log
      * @param context - Optional context object with additional information
      */
-    error: (msg: string, context?: object) => void;
+    error: (msg: string, context?: object) => void
 }
 
 /**
@@ -38,30 +38,25 @@ export interface Logger {
  */
 const defaultLogger: Logger = {
     debug: (msg: string, context?: object) => {
-        // Only log debug in development
         if (process.env.NODE_ENV === 'development') {
-            // biome-ignore lint/suspicious/noConsoleLog: Debug logging is acceptable in development
-            console.log(`[pbtsdb] ${msg}`, context || '');
+            console.debug(`[pbtsdb] ${msg}`, context || '')
         }
     },
     info: (msg: string, context?: object) => {
-        // biome-ignore lint/suspicious/noConsoleLog: Info logging is acceptable
-        console.info(`[pbtsdb] ${msg}`, context || '');
+        console.info(`[pbtsdb] ${msg}`, context || '')
     },
     warn: (msg: string, context?: object) => {
-        // biome-ignore lint/suspicious/noConsoleLog: Warning logging is acceptable
-        console.warn(`[pbtsdb] ${msg}`, context || '');
+        console.warn(`[pbtsdb] ${msg}`, context || '')
     },
     error: (msg: string, context?: object) => {
-        // biome-ignore lint/suspicious/noConsoleLog: Error logging is acceptable
-        console.error(`[pbtsdb] ${msg}`, context || '');
+        console.error(`[pbtsdb] ${msg}`, context || '')
     },
-};
+}
 
 /**
  * Current logger instance (can be replaced by users).
  */
-let currentLogger: Logger = defaultLogger;
+let currentLogger: Logger = defaultLogger
 
 /**
  * Internal logger instance used by the library.
@@ -71,7 +66,7 @@ export const logger: Logger = {
     info: (msg: string, context?: object) => currentLogger.info(msg, context),
     warn: (msg: string, context?: object) => currentLogger.warn(msg, context),
     error: (msg: string, context?: object) => currentLogger.error(msg, context),
-};
+}
 
 /**
  * Set a custom logger implementation.
@@ -105,12 +100,12 @@ export const logger: Logger = {
  * ```
  */
 export function setLogger(customLogger: Logger): void {
-    currentLogger = customLogger;
+    currentLogger = customLogger
 }
 
 /**
  * Reset the logger to the default implementation.
  */
 export function resetLogger(): void {
-    currentLogger = defaultLogger;
+    currentLogger = defaultLogger
 }

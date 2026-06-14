@@ -1,10 +1,16 @@
-import { renderHook, waitFor } from '@testing-library/react'
-import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createBooksCollection } from './helpers'
+import {
+    authenticateTestUser,
+    clearAuth,
+    createBooksCollection,
+    createTestQueryClient,
+    pb,
+} from './helpers'
 
 describe('Server-Side Filtering (on-demand mode)', () => {
     let queryClient: QueryClient
@@ -38,9 +44,8 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => eq(books.genre, testGenre))
+            useLiveQuery(q =>
+                q.from({ books: booksCollection }).where(({ books }) => eq(books.genre, testGenre))
             )
         )
 
@@ -63,9 +68,10 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         })
 
         expect(callWithFilter).toBeDefined()
+        if (!callWithFilter) throw new Error('expected a getFullList call with a filter')
 
         // Verify the filter parameter was passed correctly
-        const [options] = callWithFilter!
+        const [options] = callWithFilter
         expect((options as { filter?: string })?.filter).toBe(`genre = "${testGenre}"`)
 
         // All returned records must match the filter
@@ -80,9 +86,10 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .orderBy(({ books }) => books.id)  // Required by TanStack DB when using limit
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
+                    .orderBy(({ books }) => books.id) // Required by TanStack DB when using limit
                     .limit(2)
             )
         )
@@ -115,9 +122,8 @@ describe('Server-Side Filtering (on-demand mode)', () => {
 
         // Query with filter
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => eq(books.genre, testGenre))
+            useLiveQuery(q =>
+                q.from({ books: booksCollection }).where(({ books }) => eq(books.genre, testGenre))
             )
         )
 
@@ -149,8 +155,9 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         const testGenre = allBooks[0].genre
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => eq(books.genre, testGenre))
                     .orderBy(({ books }) => books.created, 'desc')
             )

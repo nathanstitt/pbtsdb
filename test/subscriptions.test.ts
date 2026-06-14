@@ -1,14 +1,23 @@
-import { renderHook, waitFor } from '@testing-library/react'
-import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-
+import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { pb, createTestQueryClient, authenticateTestUser, clearAuth, getTestSlug, createBooksCollection, createCollectionFactory, getTestAuthorId, waitForLoadFinish, waitForSubscription } from './helpers'
+import {
+    authenticateTestUser,
+    clearAuth,
+    createBooksCollection,
+    createCollectionFactory,
+    createTestQueryClient,
+    getTestAuthorId,
+    getTestSlug,
+    pb,
+    waitForLoadFinish,
+    waitForSubscription,
+} from './helpers'
 
 describe('Collection - Real-time Subscriptions', () => {
-
     let queryClient: QueryClient
 
     beforeAll(async () => {
@@ -31,11 +40,7 @@ describe('Collection - Real-time Subscriptions', () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
 
         // Set up the live query first
-        const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
-        )
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
         const initialCount = result.current.data.length
@@ -49,12 +54,13 @@ describe('Collection - Real-time Subscriptions', () => {
             title: `Test Book ${Date.now().toString().slice(-8)}`,
             genre: 'Fiction',
             isbn: getTestSlug('test'),
-            author: authorId
+            author: authorId,
         })
 
         // Wait for the real-time update to propagate
-        await waitFor(() => expect(result.current.data.length).toBe(initialCount + 1), { timeout: 5000 })
-
+        await waitFor(() => expect(result.current.data.length).toBe(initialCount + 1), {
+            timeout: 5000,
+        })
 
         // Verify the new book appears in the collection
         const createdBook = result.current.data.find(b => b.id === newBook.id)
@@ -78,14 +84,13 @@ describe('Collection - Real-time Subscriptions', () => {
             title: `Update Test ${Date.now().toString().slice(-8)}`,
             genre: 'Fiction',
             isbn: getTestSlug('upd'),
-            author: authorId
+            author: authorId,
         })
 
         // Set up the live query
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => eq(books.id, testBook.id))
+            useLiveQuery(q =>
+                q.from({ books: booksCollection }).where(({ books }) => eq(books.id, testBook.id))
             )
         )
 
@@ -100,7 +105,7 @@ describe('Collection - Real-time Subscriptions', () => {
         // Update the book
         const updatedTitle = `Updated ${Date.now().toString().slice(-8)}`
         await pb.collection('books').update(testBook.id, {
-            title: updatedTitle
+            title: updatedTitle,
         })
 
         // Wait for the real-time update to propagate
@@ -132,22 +137,18 @@ describe('Collection - Real-time Subscriptions', () => {
             title: `Delete Test ${Date.now().toString().slice(-8)}`,
             genre: 'Fiction',
             isbn: getTestSlug('del'),
-            author: authorId
+            author: authorId,
         })
 
         // Set up the live query
-        const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
-        )
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
         await waitFor(
             () => expect(result.current.data.some(b => b.id === testBook.id)).toBe(true),
             { timeout: 5000 }
         )
-        const countWithBook = result.current.data.length
+        const _countWithBook = result.current.data.length
 
         // Delete the book
         await pb.collection('books').delete(testBook.id)
@@ -163,11 +164,7 @@ describe('Collection - Real-time Subscriptions', () => {
         const booksCollection = createBooksCollection(queryClient)
 
         // Set up live query
-        const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
-        )
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
 
@@ -182,26 +179,32 @@ describe('Collection - Real-time Subscriptions', () => {
         const authorId = await getTestAuthorId()
 
         // Create books one by one with minimal delay
-        books.push(await pb.collection('books').create({
-            title: `Batch1 ${baseTimestamp}`,
-            genre: 'Fiction',
-            isbn: `bt1-${baseTimestamp}`,
-            author: authorId
-        }))
+        books.push(
+            await pb.collection('books').create({
+                title: `Batch1 ${baseTimestamp}`,
+                genre: 'Fiction',
+                isbn: `bt1-${baseTimestamp}`,
+                author: authorId,
+            })
+        )
 
-        books.push(await pb.collection('books').create({
-            title: `Batch2 ${baseTimestamp}`,
-            genre: 'Fiction',
-            isbn: `bt2-${baseTimestamp}`,
-            author: authorId
-        }))
+        books.push(
+            await pb.collection('books').create({
+                title: `Batch2 ${baseTimestamp}`,
+                genre: 'Fiction',
+                isbn: `bt2-${baseTimestamp}`,
+                author: authorId,
+            })
+        )
 
-        books.push(await pb.collection('books').create({
-            title: `Batch3 ${baseTimestamp}`,
-            genre: 'Fiction',
-            isbn: `bt3-${baseTimestamp}`,
-            author: authorId
-        }))
+        books.push(
+            await pb.collection('books').create({
+                title: `Batch3 ${baseTimestamp}`,
+                genre: 'Fiction',
+                isbn: `bt3-${baseTimestamp}`,
+                author: authorId,
+            })
+        )
 
         // Wait for all updates to propagate
         await waitFor(
@@ -218,13 +221,15 @@ describe('Collection - Real-time Subscriptions', () => {
         }
 
         // Cleanup
-        await Promise.all(books.map(async book => {
-            try {
-                await pb.collection('books').delete(book.id)
-            } catch (_error) {
-                // Ignore cleanup errors
-            }
-        }))
+        await Promise.all(
+            books.map(async book => {
+                try {
+                    await pb.collection('books').delete(book.id)
+                } catch (_error) {
+                    // Ignore cleanup errors
+                }
+            })
+        )
     }, 20000)
 
     it('should automatically manage subscriptions based on query lifecycle', async () => {
@@ -238,9 +243,7 @@ describe('Collection - Real-time Subscriptions', () => {
 
         // Set up live query - subscription should start automatically
         const { result, unmount } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
+            useLiveQuery(q => q.from({ books: booksCollection }))
         )
 
         await waitForLoadFinish(result)
@@ -254,7 +257,7 @@ describe('Collection - Real-time Subscriptions', () => {
             title: `Auto-subscribe Test ${Date.now().toString().slice(-8)}`,
             genre: 'Fiction',
             isbn: getTestSlug('auto'),
-            author: authorId
+            author: authorId,
         })
 
         // Wait for real-time update to propagate
@@ -279,14 +282,11 @@ describe('Collection - Real-time Subscriptions', () => {
         // When useLiveQuery unmounts and TanStack Query GCs the query, cleanupQueryIfIdle
         // sees refcount=1 but hasListeners()=false, triggering the warning.
         // The library handles this gracefully by cleaning up anyway (preventing leaks).
-        const invariantCalls = consoleWarnSpy.mock.calls.filter(
-            call => call.some(arg => typeof arg === 'string' && arg.includes('Invariant violation'))
+        const invariantCalls = consoleWarnSpy.mock.calls.filter(call =>
+            call.some(arg => typeof arg === 'string' && arg.includes('Invariant violation'))
         )
 
         if (invariantCalls.length > 0) {
-            // Log for visibility but don't fail - this is an upstream issue
-            // eslint-disable-next-line no-console
-            console.log(`[DEBUG] Invariant violations logged (upstream issue): ${invariantCalls.length}`)
         }
 
         // Restore console.warn
@@ -305,11 +305,12 @@ describe('Collection - Real-time Subscriptions', () => {
         const booksCollection = factory.create('books')
 
         // Use a hook that conditionally returns null
-        const { result, rerender, unmount } = renderHook(({ enabled }: { enabled: boolean }) =>
-            useLiveQuery((q) => {
-                if (!enabled) return null
-                return q.from({ books: booksCollection })
-            }),
+        const { result, rerender, unmount } = renderHook(
+            ({ enabled }: { enabled: boolean }) =>
+                useLiveQuery(q => {
+                    if (!enabled) return null
+                    return q.from({ books: booksCollection })
+                }),
             { initialProps: { enabled: false } }
         )
 
@@ -331,5 +332,4 @@ describe('Collection - Real-time Subscriptions', () => {
         // Unmount to trigger cleanup - should NOT cause invariant violation
         unmount()
     }, 20000)
-
 })

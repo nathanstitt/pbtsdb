@@ -1,15 +1,15 @@
-import { renderHook, waitFor } from '@testing-library/react'
-import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
+import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
-    pb,
-    createTestQueryClient,
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
+    createTestQueryClient,
+    pb,
     waitForLoadFinish,
 } from './helpers'
 
@@ -43,9 +43,7 @@ describe('Collection - Basic Operations', () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
 
         const { result, unmount } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
+            useLiveQuery(q => q.from({ books: booksCollection }))
         )
 
         await waitForLoadFinish(result)
@@ -63,9 +61,7 @@ describe('Collection - Basic Operations', () => {
 
         // First, get all books to find one we can query
         const { result: listResult, unmount: unmountList } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
+            useLiveQuery(q => q.from({ books: booksCollection }))
         )
 
         await waitForLoadFinish(listResult)
@@ -76,8 +72,9 @@ describe('Collection - Basic Operations', () => {
 
         // Now use findOne to fetch the same book by ISBN
         const { result: findOneResult, unmount: unmountFindOne } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => eq(books.isbn, targetIsbn))
                     .findOne()
             )
@@ -102,8 +99,9 @@ describe('Collection - Basic Operations', () => {
         const nonExistentIsbn = `nonexistent-${Date.now()}`
 
         const { result, unmount } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => eq(books.isbn, nonExistentIsbn))
                     .findOne()
             )
@@ -118,5 +116,4 @@ describe('Collection - Basic Operations', () => {
 
         unmount()
     }, 15000)
-
 })
