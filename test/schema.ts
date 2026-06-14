@@ -211,7 +211,19 @@ export interface Books {
      * | hidden   | `false`          |
      * | required | `true`           |
      */
-    genre: 'Fiction' | 'Non-Fiction' | 'Science Fiction' | 'Fantasy' | 'Mystery' | 'Romance' | 'Thriller' | 'Biography' | 'History' | 'Science' | 'Self-Help' | 'Other'
+    genre:
+        | 'Fiction'
+        | 'Non-Fiction'
+        | 'Science Fiction'
+        | 'Fantasy'
+        | 'Mystery'
+        | 'Romance'
+        | 'Thriller'
+        | 'Biography'
+        | 'History'
+        | 'Science'
+        | 'Self-Help'
+        | 'Other'
     /**
      * |                |                    |
      * | -------------- | ------------------ |
@@ -272,7 +284,19 @@ export interface BookMetadata {
      * | hidden   | `false`          |
      * | required | `true`           |
      */
-    genre: 'Fiction' | 'Non-Fiction' | 'Science Fiction' | 'Fantasy' | 'Mystery' | 'Romance' | 'Thriller' | 'Biography' | 'History' | 'Science' | 'Self-Help' | 'Other'
+    genre:
+        | 'Fiction'
+        | 'Non-Fiction'
+        | 'Science Fiction'
+        | 'Fantasy'
+        | 'Mystery'
+        | 'Romance'
+        | 'Thriller'
+        | 'Biography'
+        | 'History'
+        | 'Science'
+        | 'Self-Help'
+        | 'Other'
     /**
      * |          |         |
      * | -------- | ------- |
@@ -433,7 +457,6 @@ export interface BookTags {
     updated: string
 }
 
-
 /**
  * Commented-out back-relations are what will be inferred by pocketbase-ts from the forward relations.
  *
@@ -448,9 +471,8 @@ export type Schema = {
     }
     authors: {
         type: Authors
-        relations: {
-            // books_via_author?: Books[]
-        }
+        relations: Record<string, never>
+        // books_via_author?: Books[]
     }
     books: {
         type: Books
@@ -468,9 +490,8 @@ export type Schema = {
     }
     tags: {
         type: Tags
-        relations: {
-            // book_tags_via_tag?: BookTags[]
-        }
+        relations: Record<string, never>
+        // book_tags_via_tag?: BookTags[]
     }
     book_tags: {
         type: BookTags
@@ -480,4 +501,3 @@ export type Schema = {
         }
     }
 }
-

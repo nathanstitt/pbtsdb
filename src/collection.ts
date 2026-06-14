@@ -144,32 +144,69 @@ export function createCollection<Schema extends SchemaDeclaration>(
         const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
         const refetchOnMutation = options?.refetchOnMutation ?? false
 
-        async function fetchRecords(
-            loadOptions?: ExtendedLoadSubsetOptions
-        ): Promise<RecordType[]> {
+        async function upsertExpandedRelation(
+            key: string,
+            value: object | object[],
+            stores: Record<string, ExpandTargetCollection>
+        ): Promise<void> {
+            const targetStore = stores[key]
+            if (!targetStore.utils) return
+            if (!targetStore.isReady()) {
+                if (targetStore.config?.syncMode === 'on-demand') {
+                    await targetStore._sync.startSync()
+                } else {
+                    logger.warn(
+                        `not syncing ${key} on ${collectionName} because store is not yet ready`
+                    )
+                    return
+                }
+            }
+            const values = Array.isArray(value) ? value : [value]
+            targetStore.utils.writeUpsert(values)
+        }
+
+        async function upsertExpandedRelations(items: RecordType[]): Promise<void> {
+            if (!expandStores) return
+            for (const record of items) {
+                const expandData = (
+                    record as RecordType & { expand?: Record<string, object | object[]> }
+                ).expand
+                if (!expandData) continue
+                for (const [key, value] of Object.entries(expandData)) {
+                    await upsertExpandedRelation(key, value, expandStores)
+                }
+            }
+        }
+
+        async function fetchItems(loadOptions?: ExtendedLoadSubsetOptions): Promise<RecordType[]> {
             const filter = convertToPocketBaseFilter(loadOptions?.where)
             const sort = convertToPocketBaseSort(loadOptions?.orderBy)
             const limit = loadOptions?.limit
 
+            if (limit) {
+                // Use getList when limit is specified to avoid fetching all records
+                const result = await pb.collection(collectionName).getList(1, limit, {
+                    filter,
+                    sort,
+                    skipTotal: true, // Optimize by skipping total count
+                    expand: expandString,
+                })
+                return result.items as unknown as RecordType[]
+            }
+            // Use getFullList to fetch all records with automatic pagination
+            return (await pb.collection(collectionName).getFullList({
+                filter,
+                sort,
+                expand: expandString,
+            })) as unknown as RecordType[]
+        }
+
+        async function fetchRecords(
+            loadOptions?: ExtendedLoadSubsetOptions
+        ): Promise<RecordType[]> {
             let items: RecordType[]
             try {
-                if (limit) {
-                    // Use getList when limit is specified to avoid fetching all records
-                    const result = await pb.collection(collectionName).getList(1, limit, {
-                        filter,
-                        sort,
-                        skipTotal: true, // Optimize by skipping total count
-                        expand: expandString,
-                    })
-                    items = result.items as unknown as RecordType[]
-                } else {
-                    // Use getFullList to fetch all records with automatic pagination
-                    items = (await pb.collection(collectionName).getFullList({
-                        filter,
-                        sort,
-                        expand: expandString,
-                    })) as unknown as RecordType[]
-                }
+                items = await fetchItems(loadOptions)
             } catch (error) {
                 if (
                     ignoreAutoCancellation &&
@@ -181,31 +218,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 throw error
             }
 
-            if (expandStores) {
-                for (const record of items) {
-                    const expandData = (
-                        record as RecordType & { expand?: Record<string, object | object[]> }
-                    ).expand
-                    if (!expandData) continue
-
-                    for (const [key, value] of Object.entries(expandData)) {
-                        const targetStore = expandStores[key]
-                        if (!targetStore.utils) continue
-                        if (!targetStore.isReady()) {
-                            if (targetStore.config?.syncMode === 'on-demand') {
-                                await targetStore._sync.startSync()
-                            } else {
-                                logger.warn(
-                                    `not syncing ${key} on ${collectionName} because store is not yet ready`
-                                )
-                                continue
-                            }
-                        }
-                        const values = Array.isArray(value) ? value : [value]
-                        targetStore.utils.writeUpsert(values)
-                    }
-                }
-            }
+            await upsertExpandedRelations(items)
 
             return items
         }
