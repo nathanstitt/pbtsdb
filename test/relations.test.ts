@@ -1,22 +1,20 @@
-import { renderHook } from '@testing-library/react'
-import { useLiveQuery } from '@tanstack/react-db'
 import { eq } from '@tanstack/db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
-
+import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
-    pb,
-    createTestQueryClient,
     authenticateTestUser,
     clearAuth,
     createCollectionFactory,
     createTestLogger,
-    setLogger,
+    createTestQueryClient,
+    pb,
     resetLogger,
+    setLogger,
     waitForLoadFinish,
 } from './helpers'
-import type { Schema } from './schema'
 
 describe('Collection - Relations', () => {
     let queryClient: QueryClient
@@ -49,8 +47,9 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', { syncMode: 'eager' })
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ book: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ book: booksCollection })
                     .join(
                         { author: authorsCollection },
                         ({ book, author }) => eq(book.author, author.id),
@@ -59,8 +58,8 @@ describe('Collection - Relations', () => {
                     .select(({ book, author }) => ({
                         ...book,
                         expand: {
-                            author: author ? { ...author } : undefined
-                        }
+                            author: author ? { ...author } : undefined,
+                        },
                     }))
             )
         )
@@ -101,15 +100,11 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             expand: {
-                author: authorsCollection
-            }
+                author: authorsCollection,
+            },
         })
 
-        const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
-        )
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
         expect(result.current.data).toBeDefined()
@@ -130,13 +125,13 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             expand: {
-                author: authorsCollection
-            }
+                author: authorsCollection,
+            },
         })
 
         // Get an author ID to filter by
         const allBooks = await pb.collection('books').getList(1, 10, {
-            expand: 'author'
+            expand: 'author',
         })
         expect(allBooks.items.length).toBeGreaterThan(0)
 
@@ -150,8 +145,9 @@ describe('Collection - Relations', () => {
         const testAuthorId = bookWithAuthor.author
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => eq(books.author, testAuthorId))
             )
         )
@@ -172,15 +168,11 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             expand: {
-                author: authorsCollection
-            }
+                author: authorsCollection,
+            },
         })
 
-        const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-            )
-        )
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
         expect(result.current.data).toBeDefined()
@@ -204,8 +196,8 @@ describe('Collection - Relations', () => {
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             expand: {
-                author: authorsCollection
-            }
+                author: authorsCollection,
+            },
         })
 
         // Get test data
@@ -213,8 +205,9 @@ describe('Collection - Relations', () => {
         const testGenre = allBooks.items[0].genre
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => eq(books.genre, testGenre))
                     .orderBy(({ books }) => books.title)
             )

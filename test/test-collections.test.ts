@@ -1,144 +1,144 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { QueryClient } from '@tanstack/react-query';
+import type { QueryClient } from '@tanstack/react-query'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { pb, createTestQueryClient, authenticateTestUser, clearAuth } from './helpers';
+import { authenticateTestUser, clearAuth, createTestQueryClient, pb } from './helpers'
 
 describe('Test Collections - Relationship Testing', () => {
-    let queryClient: QueryClient;
+    let queryClient: QueryClient
 
     beforeAll(async () => {
-        await authenticateTestUser();
-    });
+        await authenticateTestUser()
+    })
 
     afterAll(() => {
-        clearAuth();
-    });
+        clearAuth()
+    })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient();
-    });
+        queryClient = createTestQueryClient()
+    })
 
     afterEach(() => {
-        queryClient.clear();
-    });
+        queryClient.clear()
+    })
 
     describe('Authors Collection (Base Collection)', () => {
         it('should fetch authors from the database', async () => {
-            const authors = await pb.collection('authors').getFullList();
-            expect(authors).toBeDefined();
-            expect(Array.isArray(authors)).toBe(true);
-            expect(authors.length).toBeGreaterThan(0);
-        });
+            const authors = await pb.collection('authors').getFullList()
+            expect(authors).toBeDefined()
+            expect(Array.isArray(authors)).toBe(true)
+            expect(authors.length).toBeGreaterThan(0)
+        })
 
         it('should have proper author fields', async () => {
-            const authors = await pb.collection('authors').getFullList();
-            const author = authors[0];
-            expect(author).toHaveProperty('id');
-            expect(author).toHaveProperty('name');
-            expect(author).toHaveProperty('bio');
-            expect(author).toHaveProperty('email');
-            expect(author).toHaveProperty('created');
-            expect(author).toHaveProperty('updated');
-        });
-    });
+            const authors = await pb.collection('authors').getFullList()
+            const author = authors[0]
+            expect(author).toHaveProperty('id')
+            expect(author).toHaveProperty('name')
+            expect(author).toHaveProperty('bio')
+            expect(author).toHaveProperty('email')
+            expect(author).toHaveProperty('created')
+            expect(author).toHaveProperty('updated')
+        })
+    })
 
     describe('Books Collection (One-to-Many with Authors)', () => {
         it('should fetch books from the database', async () => {
-            const books = await pb.collection('books').getFullList();
-            expect(books).toBeDefined();
-            expect(Array.isArray(books)).toBe(true);
-            expect(books.length).toBeGreaterThan(0);
-        });
+            const books = await pb.collection('books').getFullList()
+            expect(books).toBeDefined()
+            expect(Array.isArray(books)).toBe(true)
+            expect(books.length).toBeGreaterThan(0)
+        })
 
         it('should have author relation field', async () => {
-            const books = await pb.collection('books').getFullList();
-            const book = books[0];
+            const books = await pb.collection('books').getFullList()
+            const book = books[0]
 
-            expect(book).toHaveProperty('author');
-            expect(typeof book.author).toBe('string'); // Should be author ID
-        });
+            expect(book).toHaveProperty('author')
+            expect(typeof book.author).toBe('string') // Should be author ID
+        })
 
         it('should expand author relation', async () => {
             const books = await pb.collection('books').getFullList({
-                expand: 'author'
-            });
-            const book = books[0];
+                expand: 'author',
+            })
+            const book = books[0]
 
-            expect(book.expand?.author).toBeDefined();
-            expect(book.expand?.author).toHaveProperty('name');
-            expect(book.expand?.author).toHaveProperty('email');
-        });
-    });
+            expect(book.expand?.author).toBeDefined()
+            expect(book.expand?.author).toHaveProperty('name')
+            expect(book.expand?.author).toHaveProperty('email')
+        })
+    })
 
     describe('Book Metadata Collection (One-to-One with Books)', () => {
         it('should fetch book metadata from the database', async () => {
-            const metadata = await pb.collection('book_metadata').getFullList();
-            expect(metadata).toBeDefined();
-            expect(Array.isArray(metadata)).toBe(true);
-            expect(metadata.length).toBeGreaterThan(0);
-        });
+            const metadata = await pb.collection('book_metadata').getFullList()
+            expect(metadata).toBeDefined()
+            expect(Array.isArray(metadata)).toBe(true)
+            expect(metadata.length).toBeGreaterThan(0)
+        })
 
         it('should have unique book relation', async () => {
-            const metadata = await pb.collection('book_metadata').getFullList();
+            const metadata = await pb.collection('book_metadata').getFullList()
 
             // Check for unique book IDs (one-to-one constraint)
-            const bookIds = metadata.map((m) => m.book);
-            const uniqueBookIds = new Set(bookIds);
-            expect(bookIds.length).toBe(uniqueBookIds.size);
-        });
+            const bookIds = metadata.map(m => m.book)
+            const uniqueBookIds = new Set(bookIds)
+            expect(bookIds.length).toBe(uniqueBookIds.size)
+        })
 
         it('should expand book relation', async () => {
             const metadata = await pb.collection('book_metadata').getFullList({
-                expand: 'book'
-            });
-            const item = metadata[0];
+                expand: 'book',
+            })
+            const item = metadata[0]
 
-            expect(item.expand?.book).toBeDefined();
-            expect(item.expand?.book).toHaveProperty('title');
-            expect(item.expand?.book).toHaveProperty('isbn');
-        });
-    });
+            expect(item.expand?.book).toBeDefined()
+            expect(item.expand?.book).toHaveProperty('title')
+            expect(item.expand?.book).toHaveProperty('isbn')
+        })
+    })
 
-     describe('Complex Relationship Queries', () => {
+    describe('Complex Relationship Queries', () => {
         it('should fetch books with all relations expanded', async () => {
             const books = await pb.collection('books').getFullList({
-                expand: 'author'
-            });
-            expect(books.length).toBeGreaterThan(0);
+                expand: 'author',
+            })
+            expect(books.length).toBeGreaterThan(0)
 
             // Verify author expansion
-            const bookWithAuthor = books.find((b) => b.expand?.author);
-            expect(bookWithAuthor).toBeDefined();
-            expect(bookWithAuthor?.expand?.author?.name).toBeDefined();
-        });
+            const bookWithAuthor = books.find(b => b.expand?.author)
+            expect(bookWithAuthor).toBeDefined()
+            expect(bookWithAuthor?.expand?.author?.name).toBeDefined()
+        })
 
         it('should query specific author and their books', async () => {
             // First get an author
-            const authors = await pb.collection('authors').getFullList();
-            const author = authors[0];
+            const authors = await pb.collection('authors').getFullList()
+            const author = authors[0]
 
             // Then query books by that author
             const books = await pb.collection('books').getFullList({
-                filter: `author = "${author.id}"`
-            });
+                filter: `author = "${author.id}"`,
+            })
 
-            expect(books.length).toBeGreaterThan(0);
-            books.forEach((book) => {
-                expect(book.author).toBe(author.id);
-            });
-        });
+            expect(books.length).toBeGreaterThan(0)
+            books.forEach(book => {
+                expect(book.author).toBe(author.id)
+            })
+        })
 
         it('should query book with metadata', async () => {
-            const books = await pb.collection('books').getFullList();
-            const book = books[0];
+            const books = await pb.collection('books').getFullList()
+            const book = books[0]
 
             // Query metadata for this book
             const metadata = await pb.collection('book_metadata').getFullList({
-                filter: `book = "${book.id}"`
-            });
+                filter: `book = "${book.id}"`,
+            })
 
-            expect(metadata.length).toBe(1); // One-to-one relationship
-            expect(metadata[0].book).toBe(book.id);
-        });
-    });
-});
+            expect(metadata.length).toBe(1) // One-to-one relationship
+            expect(metadata[0].book).toBe(book.id)
+        })
+    })
+})

@@ -1,53 +1,56 @@
-import PocketBase from "pocketbase";
-import type { RecordSubscription } from "pocketbase";
 import {
-    createCollection as createTanStackCollection,
     type Collection,
+    createCollection as createTanStackCollection,
     type LoadSubsetOptions,
-} from "@tanstack/db";
+} from '@tanstack/db'
 import {
-    queryCollectionOptions,
-    type QueryCollectionUtils,
     DeleteOperationItemNotFoundError,
-} from "@tanstack/query-db-collection";
-import { QueryClient } from "@tanstack/react-query";
-import { convertToPocketBaseFilter, convertToPocketBaseSort } from "./pocketbase-query-converter";
+    type QueryCollectionUtils,
+    queryCollectionOptions,
+} from '@tanstack/query-db-collection'
+import type { QueryClient } from '@tanstack/react-query'
+import type PocketBase from 'pocketbase'
+import type { RecordSubscription } from 'pocketbase'
+import { logger } from './logger'
+import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
-    SchemaDeclaration,
     CreateCollectionOptions,
-    ExtractRecordType,
     ExpandTargetCollection,
-    BaseRecord,
-} from "./types";
-import { logger } from "./logger";
+    ExtractRecordType,
+    SchemaDeclaration,
+} from './types'
 
-export type { SchemaDeclaration, CreateCollectionOptions, BaseRecord } from "./types";
+export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './types'
 
 /**
  * Extended LoadSubsetOptions that includes PocketBase-specific expand parameter.
  * @internal
  */
 type ExtendedLoadSubsetOptions = LoadSubsetOptions & {
-    pbExpand?: string;
-};
+    pbExpand?: string
+}
 
 /**
  * Compute the record type with expand property when expand option is configured.
  * @internal
  */
-type WithExpandFromConfig<Schema extends SchemaDeclaration, C extends keyof Schema, Opts> = Opts extends {
-    expand: infer E;
+type WithExpandFromConfig<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema,
+    Opts,
+> = Opts extends {
+    expand: infer E
 }
     ? ExtractRecordType<Schema, C> & {
           expand?: {
-              [K in keyof E]: K extends keyof import("./types").ExtractRelations<Schema, C>
-                  ? import("./types").ExtractRelations<Schema, C>[K] extends Array<infer U>
+              [K in keyof E]: K extends keyof import('./types').ExtractRelations<Schema, C>
+                  ? import('./types').ExtractRelations<Schema, C>[K] extends Array<infer U>
                       ? U[]
-                      : import("./types").ExtractRelations<Schema, C>[K]
-                  : never;
-          };
+                      : import('./types').ExtractRelations<Schema, C>[K]
+                  : never
+          }
       }
-    : ExtractRecordType<Schema, C>;
+    : ExtractRecordType<Schema, C>
 
 /**
  * Subscription helpers added to collection instances.
@@ -55,11 +58,11 @@ type WithExpandFromConfig<Schema extends SchemaDeclaration, C extends keyof Sche
  */
 interface CollectionSubscriptionHelpers {
     /** The PocketBase collection name */
-    collectionName: string;
+    collectionName: string
     /** Wait for subscription to be established (useful in tests) */
-    waitForSubscription: (timeout?: number) => Promise<void>;
+    waitForSubscription: (timeout?: number) => Promise<void>
     /** Check if collection has an active subscription */
-    isSubscribed: () => boolean;
+    isSubscribed: () => boolean
 }
 
 /**
@@ -74,16 +77,22 @@ type InferCollectionType<
     WithExpandFromConfig<Schema, C, Opts>,
     string | number,
     // TUtils - QueryCollectionUtils from TanStack Query DB Collection
-    QueryCollectionUtils<WithExpandFromConfig<Schema, C, Opts>, string | number, WithExpandFromConfig<Schema, C, Opts>>,
+    QueryCollectionUtils<
+        WithExpandFromConfig<Schema, C, Opts>,
+        string | number,
+        WithExpandFromConfig<Schema, C, Opts>
+    >,
     // TSchema - we don't use StandardSchema validation
     never,
     Opts extends {
-        omitOnInsert: infer O extends readonly import("./types").OmittableFields<ExtractRecordType<Schema, C>>[];
+        omitOnInsert: infer O extends readonly import('./types').OmittableFields<
+            ExtractRecordType<Schema, C>
+        >[]
     }
-        ? import("./types").ComputeInsertType<ExtractRecordType<Schema, C>, O>
+        ? import('./types').ComputeInsertType<ExtractRecordType<Schema, C>, O>
         : ExtractRecordType<Schema, C>
 > &
-    CollectionSubscriptionHelpers;
+    CollectionSubscriptionHelpers
 
 /**
  * Creates a type-safe TanStack DB collection backed by PocketBase.
@@ -117,27 +126,32 @@ type InferCollectionType<
  * // data[0].expand.author is typed and populated
  * ```
  */
-export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBase, queryClient: QueryClient) {
+export function createCollection<Schema extends SchemaDeclaration>(
+    pb: PocketBase,
+    queryClient: QueryClient
+) {
     return <
         C extends keyof Schema & string,
         Opts extends CreateCollectionOptions<Schema, C> = CreateCollectionOptions<Schema, C>,
     >(
         collectionName: C,
-        options?: Opts,
+        options?: Opts
     ): InferCollectionType<Schema, C, Opts> => {
-        type RecordType = ExtractRecordType<Schema, C>;
-        const expandStores = options?.expand as Record<string, ExpandTargetCollection> | undefined;
-        const expandString = expandStores ? Object.keys(expandStores).sort().join(",") : undefined;
+        type RecordType = ExtractRecordType<Schema, C>
+        const expandStores = options?.expand as Record<string, ExpandTargetCollection> | undefined
+        const expandString = expandStores ? Object.keys(expandStores).sort().join(',') : undefined
 
-        const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true;
-        const refetchOnMutation = options?.refetchOnMutation ?? false;
+        const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
+        const refetchOnMutation = options?.refetchOnMutation ?? false
 
-        async function fetchRecords(loadOptions?: ExtendedLoadSubsetOptions): Promise<RecordType[]> {
-            const filter = convertToPocketBaseFilter(loadOptions?.where);
-            const sort = convertToPocketBaseSort(loadOptions?.orderBy);
-            const limit = loadOptions?.limit;
+        async function fetchRecords(
+            loadOptions?: ExtendedLoadSubsetOptions
+        ): Promise<RecordType[]> {
+            const filter = convertToPocketBaseFilter(loadOptions?.where)
+            const sort = convertToPocketBaseSort(loadOptions?.orderBy)
+            const limit = loadOptions?.limit
 
-            let items: RecordType[];
+            let items: RecordType[]
             try {
                 if (limit) {
                     // Use getList when limit is specified to avoid fetching all records
@@ -146,64 +160,74 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                         sort,
                         skipTotal: true, // Optimize by skipping total count
                         expand: expandString,
-                    });
-                    items = result.items as unknown as RecordType[];
+                    })
+                    items = result.items as unknown as RecordType[]
                 } else {
                     // Use getFullList to fetch all records with automatic pagination
                     items = (await pb.collection(collectionName).getFullList({
                         filter,
                         sort,
                         expand: expandString,
-                    })) as unknown as RecordType[];
+                    })) as unknown as RecordType[]
                 }
             } catch (error) {
-                if (ignoreAutoCancellation && error instanceof Error && error.message.includes("autocancelled")) {
-                    return queryClient.getQueryData<RecordType[]>([collectionName]) ?? [];
+                if (
+                    ignoreAutoCancellation &&
+                    error instanceof Error &&
+                    error.message.includes('autocancelled')
+                ) {
+                    return queryClient.getQueryData<RecordType[]>([collectionName]) ?? []
                 }
-                throw error;
+                throw error
             }
 
             if (expandStores) {
                 for (const record of items) {
-                    const expandData = (record as RecordType & { expand?: Record<string, object | object[]> }).expand;
-                    if (!expandData) continue;
+                    const expandData = (
+                        record as RecordType & { expand?: Record<string, object | object[]> }
+                    ).expand
+                    if (!expandData) continue
 
                     for (const [key, value] of Object.entries(expandData)) {
-                        const targetStore = expandStores[key];
-                        if (!targetStore.utils) continue;
+                        const targetStore = expandStores[key]
+                        if (!targetStore.utils) continue
                         if (!targetStore.isReady()) {
-                            if (targetStore.config?.syncMode === "on-demand") {
-                                await targetStore._sync.startSync();
+                            if (targetStore.config?.syncMode === 'on-demand') {
+                                await targetStore._sync.startSync()
                             } else {
-                                logger.warn(`not syncing ${key} on ${collectionName} because store is not yet ready`);
-                                continue;
+                                logger.warn(
+                                    `not syncing ${key} on ${collectionName} because store is not yet ready`
+                                )
+                                continue
                             }
                         }
-                        const values = Array.isArray(value) ? value : [value];
-                        targetStore.utils.writeUpsert(values);
+                        const values = Array.isArray(value) ? value : [value]
+                        targetStore.utils.writeUpsert(values)
                     }
                 }
             }
 
-            return items;
+            return items
         }
 
         const collectionOptions = queryCollectionOptions({
             ...options?.collectionOptions,
             queryClient,
             queryKey: [collectionName],
-            syncMode: options?.syncMode ?? "eager",
+            syncMode: options?.syncMode ?? 'eager',
             queryFn: async (ctx): Promise<RecordType[]> => {
-                return fetchRecords(ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined);
+                return fetchRecords(
+                    ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined
+                )
             },
             getKey: (item: RecordType) => {
-                const record = item as any;
-                if (!record || typeof record !== "object" || !("id" in record)) {
+                const record = item as unknown as Record<string, unknown>
+                if (!record || typeof record !== 'object' || !('id' in record)) {
                     throw new Error(
-                        `Record in collection '${collectionName}' is missing required 'id' field. Received: ${JSON.stringify(item)}`,
-                    );
+                        `Record in collection '${collectionName}' is missing required 'id' field. Received: ${JSON.stringify(item)}`
+                    )
                 }
-                return record.id;
+                return record.id as string
             },
             onInsert:
                 options?.onInsert === false
@@ -211,18 +235,18 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                     : (options?.onInsert ??
                       (async ({ transaction }) => {
                           await Promise.all(
-                              transaction.mutations.map(async (mutation) => {
+                              transaction.mutations.map(async mutation => {
                                   const {
                                       created,
                                       updated,
                                       collectionId,
                                       collectionName: _,
                                       ...data
-                                  } = mutation.modified as unknown as Record<string, unknown>;
-                                  await pb.collection(collectionName).create(data);
-                              }),
-                          );
-                          return { refetch: refetchOnMutation };
+                                  } = mutation.modified as unknown as Record<string, unknown>
+                                  await pb.collection(collectionName).create(data)
+                              })
+                          )
+                          return { refetch: refetchOnMutation }
                       })),
             onUpdate:
                 options?.onUpdate === false
@@ -230,12 +254,14 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                     : (options?.onUpdate ??
                       (async ({ transaction }) => {
                           await Promise.all(
-                              transaction.mutations.map(async (mutation) => {
-                                  const recordWithId = mutation.original as { id: string };
-                                  await pb.collection(collectionName).update(recordWithId.id, mutation.changes);
-                              }),
-                          );
-                          return { refetch: refetchOnMutation };
+                              transaction.mutations.map(async mutation => {
+                                  const recordWithId = mutation.original as { id: string }
+                                  await pb
+                                      .collection(collectionName)
+                                      .update(recordWithId.id, mutation.changes)
+                              })
+                          )
+                          return { refetch: refetchOnMutation }
                       })),
             onDelete:
                 options?.onDelete === false
@@ -243,22 +269,22 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                     : (options?.onDelete ??
                       (async ({ transaction }) => {
                           await Promise.all(
-                              transaction.mutations.map(async (mutation) => {
-                                  const recordWithId = mutation.original as { id: string };
-                                  await pb.collection(collectionName).delete(recordWithId.id);
-                              }),
-                          );
-                          return { refetch: refetchOnMutation };
+                              transaction.mutations.map(async mutation => {
+                                  const recordWithId = mutation.original as { id: string }
+                                  await pb.collection(collectionName).delete(recordWithId.id)
+                              })
+                          )
+                          return { refetch: refetchOnMutation }
                       })),
-        });
+        })
 
-        const collection = createTanStackCollection(collectionOptions);
+        const collection = createTanStackCollection(collectionOptions)
 
         // Real-time subscription state
-        let unsubscribeFn: (() => Promise<void>) | null = null;
-        let isSubscribed = false;
-        let subscriptionPromise: Promise<void> | null = null;
-        let subscriptionResolve: (() => void) | null = null;
+        let unsubscribeFn: (() => Promise<void>) | null = null
+        let isSubscribed = false
+        let subscriptionPromise: Promise<void> | null = null
+        let subscriptionResolve: (() => void) | null = null
 
         // Handle real-time events from PocketBase.
         //
@@ -269,26 +295,26 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
         //   - writeDelete: throws DeleteOperationItemNotFoundError on an absent key.
         // So only the delete branch can throw, and we make it idempotent below.
         const handleRealtimeEvent = (event: RecordSubscription<RecordType>) => {
-            if (!collection.utils) return;
+            if (!collection.utils) return
 
             try {
                 collection.utils.writeBatch(() => {
                     switch (event.action) {
-                        case "create":
-                            collection.utils.writeInsert(event.record);
-                            break;
-                        case "update":
-                            collection.utils.writeUpsert(event.record);
-                            break;
-                        case "delete":
-                            if (event.record && "id" in event.record) {
+                        case 'create':
+                            collection.utils.writeInsert(event.record)
+                            break
+                        case 'update':
+                            collection.utils.writeUpsert(event.record)
+                            break
+                        case 'delete':
+                            if (event.record && 'id' in event.record) {
                                 // Throws DeleteOperationItemNotFoundError if the key
                                 // is no longer in the synced store (see catch below).
-                                collection.utils.writeDelete((event.record as { id: string }).id);
+                                collection.utils.writeDelete((event.record as { id: string }).id)
                             }
-                            break;
+                            break
                     }
-                });
+                })
             } catch (error) {
                 // How a delete echo throws: writeDelete fails when its key is already
                 // gone from the synced store. That happens when something removed it
@@ -306,108 +332,116 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
                 // (gone), so the echo is a no-op and the error is safe to ignore.
                 // Anything that is NOT a missing-key delete is a real error: rethrow.
                 if (error instanceof DeleteOperationItemNotFoundError) {
-                    logger.debug("Ignoring delete echo for already-removed record", {
+                    logger.debug('Ignoring delete echo for already-removed record', {
                         collectionName,
                         id: (event.record as { id?: string } | undefined)?.id,
-                    });
+                    })
                 } else {
-                    throw error;
+                    throw error
                 }
             }
-        };
+        }
 
         // Start PocketBase real-time subscription
         const startSubscription = async () => {
-            if (isSubscribed) return;
+            if (isSubscribed) return
 
             // Create promise before starting so waiters can await it
             if (!subscriptionPromise) {
-                subscriptionPromise = new Promise<void>((resolve) => {
-                    subscriptionResolve = resolve;
-                });
+                subscriptionPromise = new Promise<void>(resolve => {
+                    subscriptionResolve = resolve
+                })
             }
 
             try {
-                unsubscribeFn = await pb.collection(collectionName).subscribe("*", handleRealtimeEvent);
-                isSubscribed = true;
-                logger.debug("Subscription started", { collectionName });
+                unsubscribeFn = await pb
+                    .collection(collectionName)
+                    .subscribe('*', handleRealtimeEvent)
+                isSubscribed = true
+                logger.debug('Subscription started', { collectionName })
                 // Resolve the promise to notify waiters
                 if (subscriptionResolve) {
-                    subscriptionResolve();
+                    subscriptionResolve()
                 }
             } catch (error) {
-                logger.error("Failed to start subscription", { collectionName, error });
+                logger.error('Failed to start subscription', { collectionName, error })
             }
-        };
+        }
 
         // Stop PocketBase real-time subscription
         const stopSubscription = async () => {
-            if (!isSubscribed || !unsubscribeFn) return;
+            if (!isSubscribed || !unsubscribeFn) return
 
             try {
-                await unsubscribeFn();
-                unsubscribeFn = null;
-                isSubscribed = false;
+                await unsubscribeFn()
+                unsubscribeFn = null
+                isSubscribed = false
                 // Reset promise for next subscription cycle
-                subscriptionPromise = null;
-                subscriptionResolve = null;
-                logger.debug("Subscription stopped", { collectionName });
+                subscriptionPromise = null
+                subscriptionResolve = null
+                logger.debug('Subscription stopped', { collectionName })
             } catch (error) {
-                logger.debug("Unsubscribe failed (expected if connection closed)", { collectionName, error });
+                logger.debug('Unsubscribe failed (expected if connection closed)', {
+                    collectionName,
+                    error,
+                })
             }
-        };
+        }
 
         // Wait for subscription to be established (for testing)
         const waitForSubscription = async (timeout = 5000): Promise<void> => {
-            if (isSubscribed) return;
+            if (isSubscribed) return
 
             if (!subscriptionPromise) {
                 // No subscription in progress, wait for one to start
-                await new Promise<void>((resolve) => {
+                await new Promise<void>(resolve => {
                     const checkInterval = setInterval(() => {
                         if (subscriptionPromise) {
-                            clearInterval(checkInterval);
-                            resolve();
+                            clearInterval(checkInterval)
+                            resolve()
                         }
-                    }, 10);
+                    }, 10)
                     setTimeout(() => {
-                        clearInterval(checkInterval);
-                        resolve();
-                    }, timeout);
-                });
+                        clearInterval(checkInterval)
+                        resolve()
+                    }, timeout)
+                })
             }
 
             if (subscriptionPromise) {
                 await Promise.race([
                     subscriptionPromise,
                     new Promise<void>((_, reject) =>
-                        setTimeout(() => reject(new Error("Subscription timeout")), timeout),
+                        setTimeout(() => reject(new Error('Subscription timeout')), timeout)
                     ),
-                ]);
+                ])
             }
-        };
+        }
 
         // Manage subscription based on collection subscriber count
-        collection.on("subscribers:change", (event: { subscriberCount: number; previousSubscriberCount: number }) => {
-            const newCount = event.subscriberCount;
-            const previousCount = event.previousSubscriberCount;
+        collection.on(
+            'subscribers:change',
+            (event: { subscriberCount: number; previousSubscriberCount: number }) => {
+                const newCount = event.subscriberCount
+                const previousCount = event.previousSubscriberCount
 
-            if (newCount > 0 && previousCount === 0) {
-                // First subscriber - start real-time subscription
-                startSubscription().catch(() => {});
-            } else if (newCount === 0 && previousCount > 0) {
-                // Last subscriber removed - stop real-time subscription
-                stopSubscription().catch(() => {});
+                if (newCount > 0 && previousCount === 0) {
+                    // First subscriber - start real-time subscription
+                    startSubscription().catch(() => {})
+                } else if (newCount === 0 && previousCount > 0) {
+                    // Last subscriber removed - stop real-time subscription
+                    stopSubscription().catch(() => {})
+                }
             }
-        });
+        )
 
         // Add collectionName and subscription helpers
         Object.assign(collection, {
             collectionName,
             waitForSubscription,
             isSubscribed: () => isSubscribed,
-        });
+        })
 
-        return collection as any;
-    };
+        return collection as unknown as InferCollectionType<Schema, C, Opts>
+    }
 }

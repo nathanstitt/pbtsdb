@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { convertToPocketBaseFilter, convertToPocketBaseSort } from '../src/pocketbase-query-converter'
-import { eq, gt, and, or } from '@tanstack/db'
 import type { IR } from '@tanstack/db'
+import { and, eq, gt, or } from '@tanstack/db'
+import { describe, expect, it } from 'vitest'
+import {
+    convertToPocketBaseFilter,
+    convertToPocketBaseSort,
+} from '../src/pocketbase-query-converter'
 
 // Helper to create mock field operands for testing the converter
 // The converter uses parseWhereExpression which extracts field paths from the IR structure
@@ -63,11 +66,7 @@ describe('PocketBase Query Converter', () => {
                     type: 'ref',
                 },
                 {
-                    value: [
-                        'x0xz23mbkpouksb',
-                        'x0xz23mbkpouksb',
-                        'x0xz23mbkpouksb',
-                    ],
+                    value: ['x0xz23mbkpouksb', 'x0xz23mbkpouksb', 'x0xz23mbkpouksb'],
                     type: 'val',
                 },
             ],

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, type ReactNode } from 'react';
+import React, { createContext, type ReactNode, useContext } from 'react'
 
 /**
  * UseStore hook type for variadic collection access.
@@ -6,7 +6,7 @@ import React, { createContext, useContext, type ReactNode } from 'react';
  */
 type UseStoreFn<CollectionsMap> = <K extends (keyof CollectionsMap)[]>(
     ...keys: K
-) => { [I in keyof K]: K[I] extends keyof CollectionsMap ? CollectionsMap[K[I]] : never };
+) => { [I in keyof K]: K[I] extends keyof CollectionsMap ? CollectionsMap[K[I]] : never }
 
 /**
  * Return type for createReactProvider function.
@@ -16,7 +16,7 @@ export interface ReactProviderResult<CollectionsMap> {
      * React Context Provider component.
      * Wrap your app with this provider to make collections available to useStore.
      */
-    Provider: React.FC<{ children: ReactNode }>;
+    Provider: React.FC<{ children: ReactNode }>
 
     /**
      * Hook to access collections from the provider.
@@ -31,7 +31,7 @@ export interface ReactProviderResult<CollectionsMap> {
      * const [books, authors] = useStore('books', 'authors');
      * ```
      */
-    useStore: UseStoreFn<CollectionsMap>;
+    useStore: UseStoreFn<CollectionsMap>
 }
 
 /**
@@ -123,34 +123,36 @@ export interface ReactProviderResult<CollectionsMap> {
  * }
  * ```
  */
-export function createReactProvider<CollectionsMap extends Record<string, any>>(
+export function createReactProvider<CollectionsMap extends Record<string, unknown>>(
     collections: CollectionsMap
 ): ReactProviderResult<CollectionsMap> {
-    const Context = createContext<CollectionsMap | null>(null);
+    const Context = createContext<CollectionsMap | null>(null)
 
     const Provider: React.FC<{ children: ReactNode }> = ({ children }) => (
         <Context.Provider value={collections}>{children}</Context.Provider>
-    );
+    )
 
     function useStore<K extends (keyof CollectionsMap)[]>(
         ...keys: K
     ): { [I in keyof K]: K[I] extends keyof CollectionsMap ? CollectionsMap[K[I]] : never } {
-        const context = useContext(Context);
+        const context = useContext(Context)
 
         if (!context) {
-            throw new Error('useStore must be used within the Provider returned by createReactProvider');
+            throw new Error(
+                'useStore must be used within the Provider returned by createReactProvider'
+            )
         }
 
-        return keys.map((key) => {
+        return keys.map(key => {
             if (!(key in context)) {
-                throw new Error(`Collection "${String(key)}" not found in collections`);
+                throw new Error(`Collection "${String(key)}" not found in collections`)
             }
-            return context[key];
-        }) as { [I in keyof K]: K[I] extends keyof CollectionsMap ? CollectionsMap[K[I]] : never };
+            return context[key]
+        }) as { [I in keyof K]: K[I] extends keyof CollectionsMap ? CollectionsMap[K[I]] : never }
     }
 
     return {
         Provider,
         useStore: useStore as UseStoreFn<CollectionsMap>,
-    };
+    }
 }

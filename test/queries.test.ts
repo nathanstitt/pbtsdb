@@ -1,10 +1,18 @@
-import { renderHook, waitFor } from '@testing-library/react'
-import { useLiveQuery } from '@tanstack/react-db'
 import { and, eq, gt, gte, lt, lte, or } from '@tanstack/db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
+import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { pb, createTestQueryClient, authenticateTestUser, clearAuth, createBooksCollection, createCollectionFactory, waitForLoadFinish } from './helpers'
+import {
+    authenticateTestUser,
+    clearAuth,
+    createBooksCollection,
+    createCollectionFactory,
+    createTestQueryClient,
+    pb,
+    waitForLoadFinish,
+} from './helpers'
 
 describe('Collection - Query Operators', () => {
     let queryClient: QueryClient
@@ -34,9 +42,8 @@ describe('Collection - Query Operators', () => {
         const testGenre = allBooks.items[0].genre
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => eq(books.genre, testGenre))
+            useLiveQuery(q =>
+                q.from({ books: booksCollection }).where(({ books }) => eq(books.genre, testGenre))
             )
         )
 
@@ -56,8 +63,9 @@ describe('Collection - Query Operators', () => {
         const pastDate = new Date('2020-01-01')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => gt(books.created, pastDate.toISOString()))
             )
         )
@@ -80,8 +88,9 @@ describe('Collection - Query Operators', () => {
         const thresholdDate = allBooks.items[0].created
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => gte(books.created, thresholdDate))
             )
         )
@@ -96,7 +105,9 @@ describe('Collection - Query Operators', () => {
 
         // All results should have created date >= threshold
         result.current.data.forEach(book => {
-            expect(new Date(book.created).getTime()).toBeGreaterThanOrEqual(new Date(thresholdDate).getTime())
+            expect(new Date(book.created).getTime()).toBeGreaterThanOrEqual(
+                new Date(thresholdDate).getTime()
+            )
         })
     })
 
@@ -107,8 +118,9 @@ describe('Collection - Query Operators', () => {
         const futureDate = new Date('2030-01-01')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => lt(books.created, futureDate.toISOString()))
             )
         )
@@ -128,8 +140,9 @@ describe('Collection - Query Operators', () => {
         const futureDate = new Date('2030-01-01')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
                     .where(({ books }) => lte(books.created, futureDate.toISOString()))
             )
         )
@@ -153,12 +166,12 @@ describe('Collection - Query Operators', () => {
         const pastDate = new Date('2020-01-01')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => and(
-                        eq(books.genre, testGenre),
-                        gt(books.created, pastDate.toISOString())
-                    ))
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
+                    .where(({ books }) =>
+                        and(eq(books.genre, testGenre), gt(books.created, pastDate.toISOString()))
+                    )
             )
         )
 
@@ -184,12 +197,10 @@ describe('Collection - Query Operators', () => {
         const genre2 = uniqueGenres.length > 1 ? uniqueGenres[1] : genre1
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => or(
-                        eq(books.genre, genre1),
-                        eq(books.genre, genre2)
-                    ))
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
+                    .where(({ books }) => or(eq(books.genre, genre1), eq(books.genre, genre2)))
             )
         )
 
@@ -206,9 +217,8 @@ describe('Collection - Query Operators', () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .orderBy(({ books }) => books.created, 'desc')
+            useLiveQuery(q =>
+                q.from({ books: booksCollection }).orderBy(({ books }) => books.created, 'desc')
             )
         )
 
@@ -234,15 +244,18 @@ describe('Collection - Query Operators', () => {
         const futureDate = new Date('2030-01-01')
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
-                q.from({ books: booksCollection })
-                    .where(({ books }) => and(
-                        eq(books.genre, testGenre),
-                        or(
-                            gt(books.created, pastDate.toISOString()),
-                            lt(books.updated, futureDate.toISOString())
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
+                    .where(({ books }) =>
+                        and(
+                            eq(books.genre, testGenre),
+                            or(
+                                gt(books.created, pastDate.toISOString()),
+                                lt(books.updated, futureDate.toISOString())
+                            )
                         )
-                    ))
+                    )
             )
         )
 
@@ -267,9 +280,11 @@ describe('Collection - Query Operators', () => {
 
         expect(() => {
             renderHook(() =>
-                useLiveQuery((q) =>
-                    q.from({ books: factory.create('books') })
+                useLiveQuery(q =>
+                    q
+                        .from({ books: factory.create('books') })
                         // Testing unsupported structure
+                        // biome-ignore lint/suspicious/noExplicitAny: deliberately bypassing types to assert the converter rejects an unsupported operator at runtime
                         .where(() => ({ op: 'unsupported', field: ['name'], value: 'test' }) as any)
                 )
             )

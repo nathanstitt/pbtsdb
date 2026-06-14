@@ -1,20 +1,20 @@
-import { renderHook } from '@testing-library/react'
-import { useLiveQuery, eq, toArray } from '@tanstack/react-db'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
+import { eq, toArray, useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
+import { renderHook } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createCollection } from '../src/collection'
-import type { Schema } from './schema'
 import {
-    pb,
-    createTestQueryClient,
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    setLogger,
+    createTestQueryClient,
+    pb,
     resetLogger,
+    setLogger,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('TanStack DB Includes (Subquery) Feature', () => {
     let queryClient: QueryClient
@@ -45,7 +45,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
         const booksCollection = c('books', { syncMode: 'eager' })
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
+            useLiveQuery(q =>
                 q.from({ b: booksCollection }).select(({ b }) => ({
                     id: b.id,
                     title: b.title,
@@ -54,8 +54,8 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
                         .where(({ a }) => eq(a.id, b.author))
                         .select(({ a }) => ({ id: a.id, name: a.name }))
                         .findOne(),
-                })),
-            ),
+                }))
+            )
         )
 
         await waitForLoadFinish(result, 10000)
@@ -83,7 +83,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
         const tagsCollection = c('tags', { syncMode: 'eager' })
 
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
+            useLiveQuery(q =>
                 q.from({ b: booksCollection }).select(({ b }) => ({
                     id: b.id,
                     title: b.title,
@@ -91,14 +91,11 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
                         q
                             .from({ bt: bookTagsCollection })
                             .where(({ bt }) => eq(bt.book, b.id))
-                            .join(
-                                { t: tagsCollection },
-                                ({ bt, t }) => eq(bt.tag, t.id),
-                            )
-                            .select(({ t }) => ({ id: t.id, name: t.name })),
+                            .join({ t: tagsCollection }, ({ bt, t }) => eq(bt.tag, t.id))
+                            .select(({ t }) => ({ id: t.id, name: t.name }))
                     ),
-                })),
-            ),
+                }))
+            )
         )
 
         await waitForLoadFinish(result, 10000)
@@ -112,7 +109,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
         expect(Array.isArray(firstBook.tags)).toBe(true)
 
         // At least one book should have tags in our test data
-        const bookWithTags = books.find((b) => b.tags.length > 0)
+        const bookWithTags = books.find(b => b.tags.length > 0)
         if (bookWithTags) {
             expect(bookWithTags.tags[0].id).toBeTypeOf('string')
             expect(bookWithTags.tags[0].name).toBeTypeOf('string')
@@ -133,7 +130,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
 
         // Use expand to auto-populate authorsCollection, then use includes to query from it
         const { result } = renderHook(() =>
-            useLiveQuery((q) =>
+            useLiveQuery(q =>
                 q.from({ b: booksCollection }).select(({ b }) => ({
                     id: b.id,
                     title: b.title,
@@ -146,14 +143,11 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
                         q
                             .from({ bt: bookTagsCollection })
                             .where(({ bt }) => eq(bt.book, b.id))
-                            .join(
-                                { t: tagsCollection },
-                                ({ bt, t }) => eq(bt.tag, t.id),
-                            )
-                            .select(({ t }) => ({ id: t.id, name: t.name })),
+                            .join({ t: tagsCollection }, ({ bt, t }) => eq(bt.tag, t.id))
+                            .select(({ t }) => ({ id: t.id, name: t.name }))
                     ),
-                })),
-            ),
+                }))
+            )
         )
 
         await waitForLoadFinish(result, 10000)

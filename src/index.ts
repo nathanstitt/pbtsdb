@@ -7,9 +7,9 @@
  * @packageDocumentation
  */
 
-export * from './core';
+export * from './core'
 
 export {
     createReactProvider,
     type ReactProviderResult,
-} from './react.js';
+} from './react.js'

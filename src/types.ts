@@ -1,4 +1,10 @@
-import type { Collection, InsertMutationFn, UpdateMutationFn, DeleteMutationFn, BaseCollectionConfig } from "@tanstack/db"
+import type {
+    BaseCollectionConfig,
+    Collection,
+    DeleteMutationFn,
+    InsertMutationFn,
+    UpdateMutationFn,
+} from '@tanstack/db'
 
 // ============================================================================
 // Schema Type Definitions
@@ -9,7 +15,7 @@ import type { Collection, InsertMutationFn, UpdateMutationFn, DeleteMutationFn, 
  * All records must have an 'id' field.
  */
 export interface BaseRecord {
-    id: string;
+    id: string
 }
 
 /**
@@ -30,11 +36,11 @@ export interface BaseRecord {
  */
 export interface SchemaDeclaration {
     [collectionName: string]: {
-        type: BaseRecord;
+        type: BaseRecord
         relations?: {
-            [fieldName: string]: BaseRecord | BaseRecord[];
-        };
-    };
+            [fieldName: string]: BaseRecord | BaseRecord[]
+        }
+    }
 }
 
 // ============================================================================
@@ -47,15 +53,15 @@ export interface SchemaDeclaration {
  */
 export type ExtractRecordType<
     Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema
-> = Schema[CollectionName]['type'];
+    CollectionName extends keyof Schema,
+> = Schema[CollectionName]['type']
 
 /**
  * Valid field names that can be omitted during insert operations.
  * Excludes 'id' which is always required for TanStack DB record tracking.
  * @internal
  */
-export type OmittableFields<T extends object> = Exclude<keyof T, 'id'>;
+export type OmittableFields<T extends object> = Exclude<keyof T, 'id'>
 
 /**
  * Computes the insert input type by making specified fields optional.
@@ -72,8 +78,8 @@ export type OmittableFields<T extends object> = Exclude<keyof T, 'id'>;
  */
 export type ComputeInsertType<
     T extends object,
-    OmitFields extends readonly OmittableFields<T>[]
-> = Omit<T, OmitFields[number]> & Partial<Pick<T, OmitFields[number]>>;
+    OmitFields extends readonly OmittableFields<T>[],
+> = Omit<T, OmitFields[number]> & Partial<Pick<T, OmitFields[number]>>
 
 /**
  * Extracts the relations object from a schema collection.
@@ -82,8 +88,8 @@ export type ComputeInsertType<
  */
 export type ExtractRelations<
     Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema
-> = Schema[CollectionName] extends { relations: infer R } ? R : never;
+    CollectionName extends keyof Schema,
+> = Schema[CollectionName] extends { relations: infer R } ? R : never
 
 // ============================================================================
 // Expand Type Utilities
@@ -97,10 +103,9 @@ export type ExtractRelations<
  * ParseExpandFields<"customer,address"> => "customer" | "address"
  * @internal
  */
-export type ParseExpandFields<T extends string> =
-    T extends `${infer Field},${infer Rest}`
-        ? Field | ParseExpandFields<Rest>
-        : T;
+export type ParseExpandFields<T extends string> = T extends `${infer Field},${infer Rest}`
+    ? Field | ParseExpandFields<Rest>
+    : T
 
 /**
  * Builds the expand object type based on field names.
@@ -120,19 +125,21 @@ export type ParseExpandFields<T extends string> =
 export type WithExpand<
     Schema extends SchemaDeclaration,
     CollectionName extends keyof Schema,
-    ExpandFields extends string | undefined
+    ExpandFields extends string | undefined,
 > = ExpandFields extends string
     ? ExtractRecordType<Schema, CollectionName> & {
-        expand?: {
-            [K in ParseExpandFields<ExpandFields>]?: K extends keyof ExtractRelations<Schema, CollectionName>
-                ? ExtractRelations<Schema, CollectionName>[K] extends Array<infer U>
-                    ? U[]  // Array relation
-                    : ExtractRelations<Schema, CollectionName>[K]  // Single relation
-                : never;
-        };
-    }
-    : ExtractRecordType<Schema, CollectionName>;
-
+          expand?: {
+              [K in ParseExpandFields<ExpandFields>]?: K extends keyof ExtractRelations<
+                  Schema,
+                  CollectionName
+              >
+                  ? ExtractRelations<Schema, CollectionName>[K] extends Array<infer U>
+                      ? U[] // Array relation
+                      : ExtractRelations<Schema, CollectionName>[K] // Single relation
+                  : never
+          }
+      }
+    : ExtractRecordType<Schema, CollectionName>
 
 // ============================================================================
 // Relation Type Utilities
@@ -146,7 +153,7 @@ export type WithExpand<
  * ExcludeUndefined<Customer | undefined> => Customer
  * @internal
  */
-export type ExcludeUndefined<T> = T extends (infer U) | undefined ? U : T;
+export type ExcludeUndefined<T> = T extends infer U | undefined ? U : T
 
 /**
  * Converts a schema relation type to its corresponding Collection constraint.
@@ -157,15 +164,20 @@ export type ExcludeUndefined<T> = T extends (infer U) | undefined ? U : T;
  * collections with different TInput types (from omitOnInsert) to be compatible.
  *
  * @example
- * RelationAsCollection<Customer> => Collection<Customer, string | number, any, any, any>
- * RelationAsCollection<Customer[]> => Collection<Customer, string | number, any, any, any>
+ * RelationAsCollection<Customer> => Collection<Customer, string | number, ...>
+ * RelationAsCollection<Customer[]> => Collection<Customer, string | number, ...>
  * @internal
  */
+// biome-ignore-start lint/suspicious/noExplicitAny: wildcards absorb TUtils/TSchema/TInsertInput variance so relations with differing omitOnInsert insert types stay structurally compatible
 export type RelationAsCollection<T> =
     T extends Array<infer U>
-        ? U extends object ? Collection<U, string | number, any, any, any> : Collection<object, string | number, any, any, any>
-        : T extends object ? Collection<T, string | number, any, any, any> : Collection<object, string | number, any, any, any>;
-
+        ? U extends object
+            ? Collection<U, string | number, any, any, any>
+            : Collection<object, string | number, any, any, any>
+        : T extends object
+          ? Collection<T, string | number, any, any, any>
+          : Collection<object, string | number, any, any, any>
+// biome-ignore-end lint/suspicious/noExplicitAny: see above
 
 /**
  * Configuration for per-collection expand - maps relation field names to their target collections.
@@ -181,16 +193,14 @@ export type RelationAsCollection<T> =
  * });
  * ```
  */
-export type ExpandConfig<
-    Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema
-> = ExtractRelations<Schema, CollectionName> extends never
-    ? Record<string, never>
-    : Partial<{
-        [K in keyof ExtractRelations<Schema, CollectionName>]: RelationAsCollection<
-            ExcludeUndefined<ExtractRelations<Schema, CollectionName>[K]>
-        >;
-    }>;
+export type ExpandConfig<Schema extends SchemaDeclaration, CollectionName extends keyof Schema> =
+    ExtractRelations<Schema, CollectionName> extends never
+        ? Record<string, never>
+        : Partial<{
+              [K in keyof ExtractRelations<Schema, CollectionName>]: RelationAsCollection<
+                  ExcludeUndefined<ExtractRelations<Schema, CollectionName>[K]>
+              >
+          }>
 
 /**
  * Runtime representation of a collection that can receive upserted expand data.
@@ -199,15 +209,15 @@ export type ExpandConfig<
  */
 export interface ExpandTargetCollection {
     utils?: {
-        writeUpsert: (records: object[]) => void;
-    };
-    isReady: () => boolean;
+        writeUpsert: (records: object[]) => void
+    }
+    isReady: () => boolean
     _sync: {
-        startSync: () => Promise<void>;
-    };
+        startSync: () => Promise<void>
+    }
     config?: {
-        syncMode?: 'eager' | 'on-demand';
-    };
+        syncMode?: 'eager' | 'on-demand'
+    }
 }
 
 /**
@@ -217,12 +227,13 @@ export interface ExpandTargetCollection {
  */
 export type ExpandableStoresConfig<
     Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema
-> = ExtractRelations<Schema, CollectionName> extends never
-    ? Record<string, never>
-    : Partial<{
-        [K in keyof ExtractRelations<Schema, CollectionName>]: ExpandTargetCollection;
-    }>;
+    CollectionName extends keyof Schema,
+> =
+    ExtractRelations<Schema, CollectionName> extends never
+        ? Record<string, never>
+        : Partial<{
+              [K in keyof ExtractRelations<Schema, CollectionName>]: ExpandTargetCollection
+          }>
 
 // ============================================================================
 // Configuration Options
@@ -233,7 +244,7 @@ export type ExpandableStoresConfig<
  */
 export interface CreateCollectionOptions<
     Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema
+    CollectionName extends keyof Schema,
 > {
     /**
      * Configure relations to automatically expand on every fetch.
@@ -255,7 +266,7 @@ export interface CreateCollectionOptions<
      * // data[0].expand.author is typed and populated
      * ```
      */
-    expand?: ExpandConfig<Schema, CollectionName>;
+    expand?: ExpandConfig<Schema, CollectionName>
 
     /**
      * Fields that can be omitted during insert operations.
@@ -285,7 +296,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    omitOnInsert?: readonly OmittableFields<ExtractRecordType<Schema, CollectionName>>[];
+    omitOnInsert?: readonly OmittableFields<ExtractRecordType<Schema, CollectionName>>[]
 
     /**
      * Custom handler for insert mutations.
@@ -318,7 +329,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    onInsert?: InsertMutationFn<ExtractRecordType<Schema, CollectionName>> | false;
+    onInsert?: InsertMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
      * Custom handler for update mutations.
@@ -351,7 +362,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    onUpdate?: UpdateMutationFn<ExtractRecordType<Schema, CollectionName>> | false;
+    onUpdate?: UpdateMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
      * Custom handler for delete mutations.
@@ -383,7 +394,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false;
+    onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
      * If true, refetch the entire collection after a successful insert,
@@ -404,7 +415,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    refetchOnMutation?: boolean;
+    refetchOnMutation?: boolean
 
     /**
      * Sync mode for the collection. Controls when and how data is fetched from PocketBase.
@@ -430,7 +441,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    syncMode?: 'eager' | 'on-demand';
+    syncMode?: 'eager' | 'on-demand'
 
     /**
      * Whether to ignore PocketBase auto-cancellation errors.
@@ -453,7 +464,7 @@ export interface CreateCollectionOptions<
      * });
      * ```
      */
-    ignoreAutoCancellation?: boolean;
+    ignoreAutoCancellation?: boolean
 
     /**
      * Additional options passed directly to the underlying TanStack DB collection.
@@ -479,5 +490,5 @@ export interface CreateCollectionOptions<
     collectionOptions?: Omit<
         Partial<BaseCollectionConfig<ExtractRecordType<Schema, CollectionName>, string | number>>,
         'getKey' | 'syncMode' | 'onInsert' | 'onUpdate' | 'onDelete' | 'schema'
-    >;
+    >
 }

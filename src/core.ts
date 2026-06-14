@@ -7,29 +7,25 @@
  * @packageDocumentation
  */
 
-export { createCollection } from './collection';
-
-export { setLogger, resetLogger, type Logger } from './logger';
-
-export { newRecordId } from './util';
-
-export { toArray, createEffect, BasicIndex, BTreeIndex, ReverseIndex } from '@tanstack/db';
 export type {
     DeltaEvent,
     DeltaType,
     EffectConfig,
     EffectContext,
     IndexConstructor,
-} from '@tanstack/db';
-
+} from '@tanstack/db'
+export { BasicIndex, BTreeIndex, createEffect, ReverseIndex, toArray } from '@tanstack/db'
+export { createCollection } from './collection'
+export { type Logger, resetLogger, setLogger } from './logger'
 export type {
-    SchemaDeclaration,
     CreateCollectionOptions,
-    WithExpand,
+    ExcludeUndefined,
     ExtractRecordType,
     ExtractRelations,
-    ParseExpandFields,
-    ExcludeUndefined,
-    RelationAsCollection,
     OmittableFields,
-} from './types';
+    ParseExpandFields,
+    RelationAsCollection,
+    SchemaDeclaration,
+    WithExpand,
+} from './types'
+export { newRecordId } from './util'

@@ -1,9 +1,9 @@
 import { QueryClient } from '@tanstack/react-query'
 import { waitFor } from '@testing-library/react'
-import { expect } from 'vitest'
 import PocketBase from 'pocketbase'
+import { expect } from 'vitest'
 import 'dotenv/config'
-import { createCollection, newRecordId, setLogger, resetLogger, type Logger } from '../src'
+import { createCollection, type Logger, newRecordId, resetLogger, setLogger } from '../src'
 import type { Schema } from './schema'
 
 export { newRecordId }
@@ -14,12 +14,12 @@ export { newRecordId }
  */
 export interface TestLogger extends Logger {
     messages: {
-        debug: Array<{ msg: string; context?: object }>;
-        info: Array<{ msg: string; context?: object }>;
-        warn: Array<{ msg: string; context?: object }>;
-        error: Array<{ msg: string; context?: object }>;
-    };
-    clear: () => void;
+        debug: Array<{ msg: string; context?: object }>
+        info: Array<{ msg: string; context?: object }>
+        warn: Array<{ msg: string; context?: object }>
+        error: Array<{ msg: string; context?: object }>
+    }
+    clear: () => void
 }
 
 /**
@@ -32,49 +32,49 @@ export function createTestLogger(): TestLogger {
         info: [],
         warn: [],
         error: [],
-    };
+    }
 
     return {
         messages,
         debug: (msg: string, context?: object) => {
-            messages.debug.push({ msg, context });
+            messages.debug.push({ msg, context })
         },
         info: (msg: string, context?: object) => {
-            messages.info.push({ msg, context });
+            messages.info.push({ msg, context })
         },
         warn: (msg: string, context?: object) => {
-            messages.warn.push({ msg, context });
+            messages.warn.push({ msg, context })
         },
         error: (msg: string, context?: object) => {
-            messages.error.push({ msg, context });
+            messages.error.push({ msg, context })
         },
         clear: () => {
-            messages.debug = [];
-            messages.info = [];
-            messages.warn = [];
-            messages.error = [];
+            messages.debug = []
+            messages.info = []
+            messages.warn = []
+            messages.error = []
         },
-    };
+    }
 }
 
-export { setLogger, resetLogger }
+export { resetLogger, setLogger }
 
 /**
  * Compatibility shim for old CollectionFactory API.
  * Returns an object with a create() method that matches the old factory pattern.
  */
 export function createCollectionFactory(queryClient: QueryClient) {
-    const factory = createCollection<Schema>(pb, queryClient);
+    const factory = createCollection<Schema>(pb, queryClient)
     return {
-        create: factory
-    };
+        create: factory,
+    }
 }
 
 if (!process.env.TESTING_PB_ADDR) {
     throw new Error('TESTING_PB_ADDR environment variable is not set')
 }
 
-export const pb = new PocketBase(process.env.TESTING_PB_ADDR!)
+export const pb = new PocketBase(process.env.TESTING_PB_ADDR)
 pb.autoCancellation(false)
 
 /**
@@ -95,10 +95,11 @@ export function createTestQueryClient(): QueryClient {
  * Authenticate with PocketBase using test credentials
  */
 export async function authenticateTestUser(): Promise<void> {
-    await pb.collection('users').authWithPassword(
-        process.env.TEST_USER_EMAIL!,
-        process.env.TEST_USER_PW!
-    )
+    const { TEST_USER_EMAIL, TEST_USER_PW } = process.env
+    if (!TEST_USER_EMAIL || !TEST_USER_PW) {
+        throw new Error('TEST_USER_EMAIL and TEST_USER_PW environment variables must be set')
+    }
+    await pb.collection('users').authWithPassword(TEST_USER_EMAIL, TEST_USER_PW)
 }
 
 /**
@@ -131,7 +132,7 @@ export function createBooksCollection(
     options?: { syncMode?: 'eager' | 'on-demand' }
 ) {
     return createCollection<Schema>(pb, queryClient)('books', {
-        syncMode: options?.syncMode
+        syncMode: options?.syncMode,
     })
 }
 
@@ -200,8 +201,8 @@ export async function waitForLoadFinish(
  * Collection type with subscription helpers exposed for testing.
  */
 interface CollectionWithSubscription {
-    waitForSubscription: (timeout?: number) => Promise<void>;
-    isSubscribed: () => boolean;
+    waitForSubscription: (timeout?: number) => Promise<void>
+    isSubscribed: () => boolean
 }
 
 /**
@@ -214,5 +215,5 @@ export async function waitForSubscription(
     collection: CollectionWithSubscription,
     timeout = 5000
 ): Promise<void> {
-    await collection.waitForSubscription(timeout);
+    await collection.waitForSubscription(timeout)
 }
