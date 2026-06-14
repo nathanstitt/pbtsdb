@@ -5,7 +5,11 @@ import {
     type Collection,
     type LoadSubsetOptions,
 } from "@tanstack/db";
-import { queryCollectionOptions, type QueryCollectionUtils } from "@tanstack/query-db-collection";
+import {
+    queryCollectionOptions,
+    type QueryCollectionUtils,
+    DeleteOperationItemNotFoundError,
+} from "@tanstack/query-db-collection";
 import { QueryClient } from "@tanstack/react-query";
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from "./pocketbase-query-converter";
 import type {
@@ -256,25 +260,60 @@ export function createCollection<Schema extends SchemaDeclaration>(pb: PocketBas
         let subscriptionPromise: Promise<void> | null = null;
         let subscriptionResolve: (() => void) | null = null;
 
-        // Handle real-time events from PocketBase
+        // Handle real-time events from PocketBase.
+        //
+        // The write primitives differ in how they treat a key that is absent from
+        // the *synced* store (collection._state.syncedData, which is what they
+        // validate against — not the optimistic view exposed by collection.has()):
+        //   - writeInsert / writeUpsert: idempotent, never throw on an absent key.
+        //   - writeDelete: throws DeleteOperationItemNotFoundError on an absent key.
+        // So only the delete branch can throw, and we make it idempotent below.
         const handleRealtimeEvent = (event: RecordSubscription<RecordType>) => {
             if (!collection.utils) return;
 
-            collection.utils.writeBatch(() => {
-                switch (event.action) {
-                    case "create":
-                        collection.utils.writeInsert(event.record);
-                        break;
-                    case "update":
-                        collection.utils.writeUpsert(event.record);
-                        break;
-                    case "delete":
-                        if (event.record && "id" in event.record) {
-                            collection.utils.writeDelete((event.record as { id: string }).id);
-                        }
-                        break;
+            try {
+                collection.utils.writeBatch(() => {
+                    switch (event.action) {
+                        case "create":
+                            collection.utils.writeInsert(event.record);
+                            break;
+                        case "update":
+                            collection.utils.writeUpsert(event.record);
+                            break;
+                        case "delete":
+                            if (event.record && "id" in event.record) {
+                                // Throws DeleteOperationItemNotFoundError if the key
+                                // is no longer in the synced store (see catch below).
+                                collection.utils.writeDelete((event.record as { id: string }).id);
+                            }
+                            break;
+                    }
+                });
+            } catch (error) {
+                // How a delete echo throws: writeDelete fails when its key is already
+                // gone from the synced store. That happens when something removed it
+                // before the echo arrived:
+                //   1. on-demand sync — each useLiveQuery refetches with a server
+                //      filter, and query-db-collection prunes rows no longer owned by
+                //      any active query out of the synced store. If that prune (or a
+                //      concurrent query's reconcile) runs before this client's own
+                //      delete echo lands, the key is already gone -> throw. This is
+                //      the on-demand-only race; eager collections have no such second
+                //      writer to the synced store, so they cannot hit it.
+                //   2. a re-delivered SSE delete (e.g. after a reconnect) for a key
+                //      that was already deleted -> throw on the second echo.
+                // In both cases the record is already in its intended end state
+                // (gone), so the echo is a no-op and the error is safe to ignore.
+                // Anything that is NOT a missing-key delete is a real error: rethrow.
+                if (error instanceof DeleteOperationItemNotFoundError) {
+                    logger.debug("Ignoring delete echo for already-removed record", {
+                        collectionName,
+                        id: (event.record as { id?: string } | undefined)?.id,
+                    });
+                } else {
+                    throw error;
                 }
-            });
+            }
         };
 
         // Start PocketBase real-time subscription
