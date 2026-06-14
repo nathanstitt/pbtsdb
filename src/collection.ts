@@ -202,7 +202,8 @@ export function createCollection<Schema extends SchemaDeclaration>(
         }
 
         async function fetchRecords(
-            loadOptions?: ExtendedLoadSubsetOptions
+            loadOptions?: ExtendedLoadSubsetOptions,
+            queryKey?: readonly unknown[]
         ): Promise<RecordType[]> {
             let items: RecordType[]
             try {
@@ -213,7 +214,17 @@ export function createCollection<Schema extends SchemaDeclaration>(
                     error instanceof Error &&
                     error.message.includes('autocancelled')
                 ) {
-                    return queryClient.getQueryData<RecordType[]>([collectionName]) ?? []
+                    // PocketBase auto-cancelled this in-flight read because a newer
+                    // request superseded it. Resolve to THIS subset's own cached rows
+                    // (keyed by the full query key) so the reconcile is a no-op for the
+                    // subset. The base key ([collectionName]) holds the full-collection
+                    // snapshot — returning that here would let applySuccessfulResult
+                    // reconcile foreign rows into a filtered subset (re-introducing rows
+                    // the subset's filter excludes). Re-throwing instead would error the
+                    // subset and empty/retry it.
+                    return (
+                        queryClient.getQueryData<RecordType[]>(queryKey ?? [collectionName]) ?? []
+                    )
                 }
                 throw error
             }
@@ -230,7 +241,8 @@ export function createCollection<Schema extends SchemaDeclaration>(
             syncMode: options?.syncMode ?? 'eager',
             queryFn: async (ctx): Promise<RecordType[]> => {
                 return fetchRecords(
-                    ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined
+                    ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined,
+                    ctx.queryKey
                 )
             },
             getKey: (item: RecordType) => {
@@ -293,7 +305,111 @@ export function createCollection<Schema extends SchemaDeclaration>(
                       })),
         })
 
+        // Set while pbtsdb performs its own authoritative writes (mutation-response
+        // write-backs and realtime echoes) through collection.utils.*. Those writes
+        // share the same sync `write` primitive as the query-result reconcile path
+        // (see the sync.sync wrapper below), so the guard uses this flag to tell them
+        // apart: pbtsdb's own writes are exempt from the optimistic-pending arm of the
+        // guard (the mutation-response write-back intentionally lands the confirmed
+        // value while that very mutation's optimistic overlay is still in flight).
+        let applyingOwnWrite = false
+        function writeOwn(fn: () => void): void {
+            applyingOwnWrite = true
+            try {
+                fn()
+            } finally {
+                applyingOwnWrite = false
+            }
+        }
+
+        // The record id a synced insert/update targets, or null when the op is a delete
+        // (terminal — never guarded) or carries no usable key.
+        function syncedWriteKey(op: {
+            type: string
+            value?: unknown
+            key?: unknown
+        }): string | null {
+            if (op.type !== 'insert' && op.type !== 'update') return null
+            if (typeof op.key === 'string') return op.key
+            const id = (op.value as { id?: unknown } | undefined)?.id
+            return typeof id === 'string' ? id : null
+        }
+
+        // Guard the synced write path that pbtsdb does not otherwise control:
+        // @tanstack/query-db-collection's applySuccessfulResult reconciles every query
+        // result into the synced store via this same `write`, with no recency or
+        // optimistic check. Under on-demand contention a single-row/subset read can
+        // resolve with a pre-mutation row and land here after the row already moved on,
+        // reverting it. We drop such a synced insert/update when either it targets a key
+        // with a pending optimistic mutation (see the arm below) or it is strictly older
+        // than the synced row (out-of-order read). pbtsdb's own writes (applyingOwnWrite)
+        // skip the optimistic arm; they are still staleness-filtered upstream by
+        // writeServerRecords/isStaleEcho.
+        function shouldDropSyncedWrite(op: {
+            type: string
+            value?: unknown
+            key?: unknown
+        }): boolean {
+            const key = syncedWriteKey(op)
+            if (key === null) return false
+            // Optimistic arm: only guard a key already present in the synced store. A
+            // write to a key the synced store doesn't yet hold is populating it (e.g. the
+            // initial fetch landing a row the user just optimistically inserted) and must
+            // pass — dropping it would leave the row absent once the overlay clears. A
+            // write to a key already synced, while an optimistic mutation is pending, is a
+            // racing read that would revert the in-flight value, so drop it.
+            if (
+                !applyingOwnWrite &&
+                hasPendingOptimisticMutation(key) &&
+                collection._state.syncedData.has(key)
+            ) {
+                logger.debug('Dropping synced write for optimistically-pending row', {
+                    collectionName,
+                    id: key,
+                })
+                return true
+            }
+            if (isStaleServerRecord(op.value)) {
+                logger.debug('Dropping stale synced write', { collectionName, id: key })
+                return true
+            }
+            return false
+        }
+
+        // Wrap the sync factory so every synced `write` flows through the guard above.
+        // @tanstack/db invokes sync.sync with the write primitives; we hand back the
+        // same params with a filtered `write`. begin/commit/markReady/etc. pass through.
+        const innerSync = collectionOptions.sync.sync
+        collectionOptions.sync = {
+            ...collectionOptions.sync,
+            sync: (params: Parameters<typeof innerSync>[0]) => {
+                const guardedWrite: typeof params.write = message => {
+                    if (
+                        shouldDropSyncedWrite(
+                            message as { type: string; value?: unknown; key?: unknown }
+                        )
+                    ) {
+                        return
+                    }
+                    return params.write(message)
+                }
+                return innerSync({ ...params, write: guardedWrite })
+            },
+        }
+
         const collection = createTanStackCollection(collectionOptions)
+
+        // True when the key has an in-flight (not yet settled) optimistic mutation.
+        // While pending, the optimistic overlay — not syncedData — is the visible value,
+        // so any synced write would only take effect once the overlay collapses, and an
+        // older/racing read landing here is exactly what reverts a just-applied move.
+        function hasPendingOptimisticMutation(key: string): boolean {
+            const state = collection._state as unknown as {
+                optimisticUpserts: { has: (k: string) => boolean }
+                optimisticDeletes: { has: (k: string) => boolean }
+            }
+            return state.optimisticUpserts.has(key) || state.optimisticDeletes.has(key)
+        }
 
         // Read the PocketBase `updated` autodate from a record, if present.
         // Collections without an `updated` field opt out of staleness checks.
@@ -329,7 +445,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
             if (!collection.utils || !collection.isReady()) return
             const fresh = records.filter(record => !isStaleServerRecord(record))
             if (fresh.length === 0) return
-            collection.utils.writeUpsert(fresh)
+            writeOwn(() => collection.utils.writeUpsert(fresh))
         }
 
         // Decide whether a realtime echo should be dropped as stale. Under realtime
@@ -367,23 +483,27 @@ export function createCollection<Schema extends SchemaDeclaration>(
             if (isStaleEcho(event)) return
 
             try {
-                collection.utils.writeBatch(() => {
-                    switch (event.action) {
-                        case 'create':
-                            collection.utils.writeInsert(event.record)
-                            break
-                        case 'update':
-                            collection.utils.writeUpsert(event.record)
-                            break
-                        case 'delete':
-                            if (event.record && 'id' in event.record) {
-                                // Throws DeleteOperationItemNotFoundError if the key
-                                // is no longer in the synced store (see catch below).
-                                collection.utils.writeDelete((event.record as { id: string }).id)
-                            }
-                            break
-                    }
-                })
+                writeOwn(() =>
+                    collection.utils.writeBatch(() => {
+                        switch (event.action) {
+                            case 'create':
+                                collection.utils.writeInsert(event.record)
+                                break
+                            case 'update':
+                                collection.utils.writeUpsert(event.record)
+                                break
+                            case 'delete':
+                                if (event.record && 'id' in event.record) {
+                                    // Throws DeleteOperationItemNotFoundError if the key
+                                    // is no longer in the synced store (see catch below).
+                                    collection.utils.writeDelete(
+                                        (event.record as { id: string }).id
+                                    )
+                                }
+                                break
+                        }
+                    })
+                )
             } catch (error) {
                 // How a delete echo throws: writeDelete fails when its key is already
                 // gone from the synced store. That happens when something removed it
