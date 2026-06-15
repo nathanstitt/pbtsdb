@@ -4,6 +4,12 @@ export default defineConfig({
     // Entry point
     entry: ['src/index.ts', 'src/core.ts'],
 
+    // Build-only tsconfig: silences the TS 6.0 `baseUrl` deprecation that tsup's
+    // dts step injects. Kept separate from tsconfig.json so typecheck/consumers stay
+    // on a config valid for both TS 5.9 and 6.0 (the `ignoreDeprecations` value is
+    // version-specific and would break TS 5.9).
+    tsconfig: 'tsconfig.build.json',
+
     // Output format: ESM only (modern)
     format: ['esm'],
 
