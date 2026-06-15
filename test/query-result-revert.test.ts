@@ -294,6 +294,91 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
             .catch(() => {})
     }, 30000)
 
+    it('does not revert with an equal-`updated` query result when NO optimistic mutation is pending (post-settle window)', async () => {
+        // The report's residual case (0.6.2 -> bug report 2): the stale read lands a beat
+        // AFTER the optimistic move has fully settled, so the pending-optimistic arm is
+        // already OFF (the key has left optimisticUpserts). The only remaining guard is the
+        // timestamp arm, and the stale read carries the SAME `updated` second as the value
+        // it would revert -> strict `<` is false -> the write passes and reverts the row.
+        //
+        // To reproduce that guard input WITHOUT the nondeterministic optimistic-overlay
+        // collapse timing, the synced store is brought to the post-settle state directly:
+        // the row is updated server-side to DEST and the owning id= query refetched so
+        // synced = DEST with NO optimistic overlay (exactly what "post-settle" means). The
+        // stale read then returns the pre-move row (SOURCE) carrying the same `updated`
+        // second as the synced DEST value. The guard must drop it via the timestamp arm.
+        const seed = await seedBook(SOURCE_GENRE)
+        const collection = createCollectionFactory(queryClient).create('books', {
+            syncMode: 'on-demand',
+        })
+
+        const realGetFullList = pb.collection('books').getFullList.bind(pb.collection('books'))
+        // The stale row is filled in AFTER synced reaches DEST, so its `updated` can be set
+        // to exactly the synced DEST value (the equal-second case the report describes).
+        const control = { serveStale: false, served: 0, staleRow: null as Books | null }
+        vi.spyOn(pb.collection('books'), 'getFullList').mockImplementation(
+            async (...args: Parameters<typeof realGetFullList>) => {
+                const filter = (args[0] as { filter?: string } | undefined)?.filter ?? ''
+                if (
+                    control.serveStale &&
+                    control.staleRow &&
+                    filter.includes(seed.id) &&
+                    !filter.includes('genre')
+                ) {
+                    control.served++
+                    return [{ ...control.staleRow }] as unknown as ReturnType<
+                        typeof realGetFullList
+                    >
+                }
+                return realGetFullList(...args)
+            }
+        )
+
+        const { result: idResult } = renderHook(() =>
+            useLiveQuery(q =>
+                q.from({ books: collection }).where(({ books }) => eq(books.id, seed.id))
+            )
+        )
+        await waitForLoadFinish(idResult, 10000)
+        await waitFor(
+            () =>
+                expect(idResult.current.data.find(b => b.id === seed.id)?.genre).toBe(SOURCE_GENRE),
+            { timeout: 10000 }
+        )
+
+        // Bring synced to the post-settle state via a plain server write + refetch: the
+        // owning id= query reconciles DEST into synced with NO optimistic overlay.
+        await pb.collection('books').update(seed.id, { genre: DEST_GENRE })
+        await collection.utils.refetch()
+        await waitFor(() => expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE), {
+            timeout: 10000,
+        })
+        expect(hasPendingOverlay(collection, seed.id)).toBe(false)
+        const settled = syncedGet(collection, seed.id)
+
+        // Arm the stale read: pre-move genre (SOURCE) but the SAME `updated` second as the
+        // synced DEST value. Without the `<=` arm this reverts the row to SOURCE.
+        control.staleRow = {
+            ...seed,
+            genre: SOURCE_GENRE,
+            updated: settled?.updated ?? seed.updated,
+        }
+        control.serveStale = true
+        await collection.utils.refetch()
+        await new Promise(r => setTimeout(r, 400))
+
+        expect(control.served).toBeGreaterThan(0)
+        expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
+        expect(
+            testLogger.messages.debug.some(m => m.msg.includes('Dropping stale synced write'))
+        ).toBe(true)
+
+        await pb
+            .collection('books')
+            .delete(seed.id)
+            .catch(() => {})
+    }, 30000)
+
     it('still applies a genuinely newer query result for an owned row', async () => {
         const seed = await seedBook(SOURCE_GENRE)
         const collection = createCollectionFactory(queryClient).create('books', {

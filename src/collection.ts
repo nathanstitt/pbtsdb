@@ -341,10 +341,12 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // optimistic check. Under on-demand contention a single-row/subset read can
         // resolve with a pre-mutation row and land here after the row already moved on,
         // reverting it. We drop such a synced insert/update when either it targets a key
-        // with a pending optimistic mutation (see the arm below) or it is strictly older
-        // than the synced row (out-of-order read). pbtsdb's own writes (applyingOwnWrite)
-        // skip the optimistic arm; they are still staleness-filtered upstream by
-        // writeServerRecords/isStaleEcho.
+        // with a pending optimistic mutation (see the arm below) or it is no newer than
+        // the synced row (out-of-order or post-settle read — equal `updated` included,
+        // since the read can only carry a same-or-older value than the move's write-back
+        // already in synced). pbtsdb's own writes (applyingOwnWrite) skip the optimistic
+        // arm; they are still staleness-filtered upstream by writeServerRecords/isStaleEcho
+        // (which keep the strict `<` so a confirmed same-second value can re-land).
         function shouldDropSyncedWrite(op: {
             type: string
             value?: unknown
@@ -369,7 +371,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 })
                 return true
             }
-            if (isStaleServerRecord(op.value)) {
+            if (isStaleServerRecord(op.value, !applyingOwnWrite)) {
                 logger.debug('Dropping stale synced write', { collectionName, id: key })
                 return true
             }
@@ -419,13 +421,24 @@ export function createCollection<Schema extends SchemaDeclaration>(
         }
 
         // A server record is stale relative to the synced store when an entry for
-        // the same key already holds a strictly-newer `updated` timestamp. PocketBase
-        // can redeliver or reorder realtime echoes (and a slow mutation response can
+        // the same key already holds a newer `updated` timestamp. PocketBase can
+        // redeliver or reorder realtime echoes (and a slow mutation response can
         // resolve after a newer echo), so applying an older write would revert the
         // row. ISO 8601 timestamps sort lexicographically, so string comparison is
         // chronological. When either side lacks a comparable timestamp we cannot
         // tell, so we treat the write as fresh and let it through.
-        function isStaleServerRecord(record: unknown): boolean {
+        //
+        // `treatEqualAsStale` controls the equal-timestamp case. PocketBase bumps
+        // `updated` on every mutation, so a record carrying the SAME `updated` second
+        // as the synced row holds the same content — it cannot be newer. The default
+        // (strict `<`) lets an own write-back/realtime echo re-land that confirmed
+        // value harmlessly. The query-result path passes `true` (`<=`): a server read
+        // resolving with the same-second value is the post-settle revert race — once
+        // an optimistic move settles, the only thing that put a *fresher* value in
+        // synced is that move's own write-back, and a same-second read would overwrite
+        // it back to the pre-move row. There is nothing newer for an equal-timestamp
+        // query result to legitimately deliver, so dropping it is safe.
+        function isStaleServerRecord(record: unknown, treatEqualAsStale = false): boolean {
             const id = (record as { id?: unknown } | null | undefined)?.id
             if (typeof id !== 'string') return false
             const incoming = recordUpdatedAt(record)
@@ -433,7 +446,8 @@ export function createCollection<Schema extends SchemaDeclaration>(
             const current = recordUpdatedAt(
                 collection._state.syncedData.get(id) as RecordType | undefined
             )
-            return current !== undefined && incoming < current
+            if (current === undefined) return false
+            return treatEqualAsStale ? incoming <= current : incoming < current
         }
 
         // Write authoritative server records (mutation responses or realtime echoes)
