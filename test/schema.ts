@@ -433,6 +433,49 @@ export interface BookTags {
     updated: string
 }
 
+export interface TokenGated {
+    /**
+     * |                     |                |
+     * | ------------------- | -------------- |
+     * | type                | `text`         |
+     * | hidden              | `false`        |
+     * | required            | `true`         |
+     * | min                 | `15`           |
+     * | max                 | `15`           |
+     * | pattern             | `^[a-z0-9]+$`  |
+     * | autogeneratePattern | `[a-z0-9]{15}` |
+     */
+    id: string
+    /**
+     * |          |         |
+     * | -------- | ------- |
+     * | type     | `text`  |
+     * | hidden   | `false` |
+     * | required | `true`  |
+     * | min      | `1`     |
+     * | max      | `255`   |
+     */
+    title: string
+    /**
+     * |          |            |
+     * | -------- | ---------- |
+     * | type     | `autodate` |
+     * | hidden   | `false`    |
+     * | onCreate | `true`     |
+     * | onUpdate | `false`    |
+     */
+    created: string
+    /**
+     * |          |            |
+     * | -------- | ---------- |
+     * | type     | `autodate` |
+     * | hidden   | `false`    |
+     * | onCreate | `true`     |
+     * | onUpdate | `true`     |
+     */
+    updated: string
+}
+
 
 /**
  * Commented-out back-relations are what will be inferred by pocketbase-ts from the forward relations.
@@ -478,6 +521,9 @@ export type Schema = {
             book: Books
             tag: Tags
         }
+    }
+    token_gated: {
+        type: TokenGated
     }
 }
 

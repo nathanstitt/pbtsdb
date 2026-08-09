@@ -39,7 +39,7 @@ npm install pbtsdb pocketbase @tanstack/react-query @tanstack/react-db @tanstack
 
 ### Peer Dependencies
 
-- `pocketbase` >= 0.21.0
+- `pocketbase` >= 0.22.0
 - `@tanstack/react-query` >= 5.0.0
 - `@tanstack/react-db` >= 0.1.0
 - `@tanstack/query-db-collection` >= 1.0.0
@@ -304,13 +304,18 @@ const { data } = useLiveQuery((q) =>
 The main function for creating type-safe collections. Uses a curried API for better type inference.
 
 ```typescript
-const c = createCollection<Schema>(pb: PocketBase, queryClient: QueryClient);
+const c = createCollection<Schema>(
+    pb: PocketBase,
+    queryClient: QueryClient,
+    factoryOptions?: CreateCollectionFactoryOptions
+);
 const collection = c(collectionName: string, options?: CreateCollectionOptions);
 ```
 
 **Parameters:**
 - `pb` - PocketBase instance
 - `queryClient` - TanStack Query QueryClient instance
+- `factoryOptions` - Optional configuration applied to every collection this factory builds (see [Subscription Options](#subscription-options))
 - `collectionName` - Name of the PocketBase collection
 - `options` - Optional configuration
 
@@ -493,6 +498,41 @@ Wait for subscription to be established (useful in tests).
 await collection.waitForSubscription(); // Wait with default 5s timeout
 await collection.waitForSubscription(10000); // Wait with custom timeout (ms)
 ```
+
+#### Subscription Options
+
+Pass `subscribeOptions` as the third `createCollection` argument to attach extra
+options — `headers`, `filter`, `expand`, `fields` — to every real-time
+subscription the factory creates.
+
+```typescript
+const c = createCollection<Schema>(pb, queryClient, {
+    subscribeOptions: () => {
+        const token = getShareToken();
+        return token ? { headers: { 'X-Share-Token': token } } : undefined;
+    },
+});
+```
+
+It is a **getter, not a static object**, and that matters. Subscriptions restart
+on reconnect and whenever the subscriber count rises from zero, so a value read
+once would go stale exactly when it counts — for example when a visitor
+authenticates mid-session and should stop presenting an anonymous token.
+
+Returning `undefined` subscribes with no extra options, identical to omitting
+the option entirely.
+
+The common use is authorizing anonymous access. PocketBase snakecases header
+names the same way for real-time as for REST, so `X-Share-Token` is readable in
+a collection rule as `@request.headers.x_share_token` — a single rule covers
+both transports:
+
+```
+@request.auth.id != "" || @request.headers.x_share_token = "..."
+```
+
+Setting the matching header on REST requests remains the application's job, via
+`pb.beforeSend`. Requires `pocketbase >= 0.22.0`.
 
 ### Utility Functions
 

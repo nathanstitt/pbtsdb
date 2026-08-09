@@ -15,7 +15,8 @@ export type {
     IndexConstructor,
 } from '@tanstack/db'
 export { BasicIndex, BTreeIndex, createEffect, ReverseIndex, toArray } from '@tanstack/db'
-export { createCollection } from './collection'
+export type { RecordSubscribeOptions } from 'pocketbase'
+export { type CreateCollectionFactoryOptions, createCollection } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export type {
     CreateCollectionOptions,
