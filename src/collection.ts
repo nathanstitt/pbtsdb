@@ -10,7 +10,7 @@ import {
 } from '@tanstack/query-db-collection'
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
-import type { RecordSubscription } from 'pocketbase'
+import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -21,6 +21,23 @@ import type {
 } from './types'
 
 export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './types'
+
+/**
+ * Options applied to every collection built by a {@link createCollection} factory.
+ */
+export interface CreateCollectionFactoryOptions {
+    /**
+     * Extra options passed to every real-time subscription this factory creates,
+     * such as `headers`, `filter`, `expand` or `fields`.
+     *
+     * Invoked at subscribe time rather than read once, because a subscription is
+     * re-established on reconnect and whenever the subscriber count rises from
+     * zero — a value captured at build time would go stale exactly then.
+     *
+     * Returning `undefined` subscribes with no extra options.
+     */
+    subscribeOptions?: () => RecordSubscribeOptions | undefined
+}
 
 /**
  * Extended LoadSubsetOptions that includes PocketBase-specific expand parameter.
@@ -128,7 +145,8 @@ type InferCollectionType<
  */
 export function createCollection<Schema extends SchemaDeclaration>(
     pb: PocketBase,
-    queryClient: QueryClient
+    queryClient: QueryClient,
+    factoryOptions?: CreateCollectionFactoryOptions
 ) {
     return <
         C extends keyof Schema & string,
@@ -559,7 +577,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
             try {
                 unsubscribeFn = await pb
                     .collection(collectionName)
-                    .subscribe('*', handleRealtimeEvent)
+                    .subscribe('*', handleRealtimeEvent, factoryOptions?.subscribeOptions?.())
                 isSubscribed = true
                 logger.debug('Subscription started', { collectionName })
                 // Resolve the promise to notify waiters

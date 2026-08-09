@@ -1,6 +1,6 @@
 {
     "name": "pbtsdb",
-    "version": "0.6.3",
+    "version": "0.7.0",
     "description": "Type-safe PocketBase integration with TanStack Query and TanStack DB",
     "keywords": [
         "pocketbase",
@@ -61,7 +61,7 @@
         "@tanstack/query-db-collection": ">=1.0.40",
         "@tanstack/react-db": ">=0.1.86",
         "@tanstack/react-query": ">=5.0.0",
-        "pocketbase": ">=0.21.0",
+        "pocketbase": ">=0.22.0",
         "react": ">=18.0.0",
         "react-dom": ">=18.0.0"
     },

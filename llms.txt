@@ -72,7 +72,7 @@ const [myBooks] = useStore('myBooks');
 
 ## Key Concepts
 
-- **createCollection**: Curried function `createCollection<Schema>(pb, queryClient)` returns `(collectionName, options) => Collection`
+- **createCollection**: Curried function `createCollection<Schema>(pb, queryClient, factoryOptions?)` returns `(collectionName, options) => Collection`
 - **createReactProvider**: Wraps collections for React, returns `{ Provider, useStore }`
 - **Collections are lazy**: No network activity until first query
 - **Subscriptions are automatic**: Start when component mounts, stop 5s after unmount
@@ -92,6 +92,33 @@ const booksCollection = c('books', {});
 // Collections have TanStack DB interface
 // Use with useLiveQuery or direct access
 ```
+
+## Real-time Subscription Options
+
+The third `createCollection` argument applies to every collection the factory
+builds. `subscribeOptions` is a getter invoked at subscribe time, so the value
+may change across reconnects:
+
+```typescript
+const c = createCollection<Schema>(pb, queryClient, {
+    subscribeOptions: () => {
+        const token = getShareToken();
+        return token ? { headers: { 'X-Share-Token': token } } : undefined;
+    },
+});
+```
+
+- Returns `RecordSubscribeOptions` (re-exported from `pbtsdb`), so `headers`,
+  `filter`, `expand` and `fields` are all available.
+- Returning `undefined` subscribes with no extra options — identical to omitting
+  the option entirely.
+- Use a getter, not a captured object. Subscriptions restart on reconnect and
+  whenever the subscriber count rises from zero, so a value read once goes stale
+  exactly when it matters (for example when a visitor authenticates mid-session).
+- Headers are snakecased by PocketBase, matching the REST path: `X-Share-Token`
+  is readable in collection rules as `@request.headers.x_share_token`. One rule
+  can therefore serve both REST and real-time.
+- Requires `pocketbase >= 0.22.0`.
 
 ## Testing
 
