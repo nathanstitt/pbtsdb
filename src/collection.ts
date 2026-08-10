@@ -219,37 +219,99 @@ export function createCollection<Schema extends SchemaDeclaration>(
             })) as unknown as RecordType[]
         }
 
+        // Each in-flight fetch registers a set here before its request goes out;
+        // authoritative local writes (mutation write-backs and realtime echoes)
+        // add the confirmed record ids to every registered set. An id added
+        // after a fetch was issued is newer than that fetch's view of the
+        // server, so the result cannot speak to the id's absence. The merge
+        // deliberately ignores the fetch's filter: the manual-write cache push
+        // grants every active query ownership of every synced row, so even a
+        // row outside this subset's filter must be shielded from its reconcile.
+        //
+        // Why this exists: @tanstack/query-db-collection's applySuccessfulResult
+        // reconcile-DELETES every row a query owns that its result omits, and the
+        // synced-write guard below deliberately exempts deletes. A subset read
+        // issued before a row existed can therefore resolve late and delete the
+        // just-confirmed row (rows a query owns include rows pushed into its
+        // cache by the manual-write path that runs on every write-back). The fix
+        // is applied to the RESULT rather than the delete: fetchRecords merges
+        // such rows back in, which both prevents the delete and keeps the row
+        // owned by the query — a dropped delete alone would still strip
+        // ownership and leave the row to a later GC pass.
+        const inFlightConfirmedIds = new Set<Set<string>>()
+
+        function markConfirmedPresent(records: RecordType[]): void {
+            if (inFlightConfirmedIds.size === 0) return
+            for (const record of records) {
+                const id = (record as { id?: unknown } | null | undefined)?.id
+                if (typeof id !== 'string') continue
+                for (const confirmed of inFlightConfirmedIds) confirmed.add(id)
+            }
+        }
+
+        function withRowsConfirmedMidFlight(
+            items: RecordType[],
+            confirmedMidFlight: Set<string>
+        ): RecordType[] {
+            if (confirmedMidFlight.size === 0) return items
+            const resultIds = new Set(
+                items.map(item => (item as { id?: unknown } | null | undefined)?.id)
+            )
+            // Ids absent from the synced store (deleted mid-flight, or never
+            // landed) have nothing to protect and drop out of the merge.
+            const mergedIds = [...confirmedMidFlight].filter(
+                id => !resultIds.has(id) && collection._state.syncedData.has(id)
+            )
+            if (mergedIds.length === 0) return items
+            logger.debug('Merging rows confirmed while fetch was in flight', {
+                collectionName,
+                ids: mergedIds,
+            })
+            return [
+                ...items,
+                ...mergedIds.map(id => collection._state.syncedData.get(id) as RecordType),
+            ]
+        }
+
         async function fetchRecords(
             loadOptions?: ExtendedLoadSubsetOptions,
             queryKey?: readonly unknown[]
         ): Promise<RecordType[]> {
-            let items: RecordType[]
+            const confirmedMidFlight = new Set<string>()
+            inFlightConfirmedIds.add(confirmedMidFlight)
             try {
-                items = await fetchItems(loadOptions)
-            } catch (error) {
-                if (
-                    ignoreAutoCancellation &&
-                    error instanceof Error &&
-                    error.message.includes('autocancelled')
-                ) {
-                    // PocketBase auto-cancelled this in-flight read because a newer
-                    // request superseded it. Resolve to THIS subset's own cached rows
-                    // (keyed by the full query key) so the reconcile is a no-op for the
-                    // subset. The base key ([collectionName]) holds the full-collection
-                    // snapshot — returning that here would let applySuccessfulResult
-                    // reconcile foreign rows into a filtered subset (re-introducing rows
-                    // the subset's filter excludes). Re-throwing instead would error the
-                    // subset and empty/retry it.
-                    return (
-                        queryClient.getQueryData<RecordType[]>(queryKey ?? [collectionName]) ?? []
-                    )
+                let items: RecordType[]
+                try {
+                    items = await fetchItems(loadOptions)
+                } catch (error) {
+                    if (
+                        ignoreAutoCancellation &&
+                        error instanceof Error &&
+                        error.message.includes('autocancelled')
+                    ) {
+                        // PocketBase auto-cancelled this in-flight read because a newer
+                        // request superseded it. Resolve to THIS subset's own cached rows
+                        // (keyed by the full query key) so the reconcile is a no-op for the
+                        // subset. The base key ([collectionName]) holds the full-collection
+                        // snapshot — returning that here would let applySuccessfulResult
+                        // reconcile foreign rows into a filtered subset (re-introducing rows
+                        // the subset's filter excludes). Re-throwing instead would error the
+                        // subset and empty/retry it.
+                        return withRowsConfirmedMidFlight(
+                            queryClient.getQueryData<RecordType[]>(queryKey ?? [collectionName]) ??
+                                [],
+                            confirmedMidFlight
+                        )
+                    }
+                    throw error
                 }
-                throw error
+
+                await upsertExpandedRelations(items)
+
+                return withRowsConfirmedMidFlight(items, confirmedMidFlight)
+            } finally {
+                inFlightConfirmedIds.delete(confirmedMidFlight)
             }
-
-            await upsertExpandedRelations(items)
-
-            return items
         }
 
         const collectionOptions = queryCollectionOptions({
@@ -474,6 +536,9 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // sync has initialized throws, and with no live query there is nothing to
         // keep in sync — the next query fetches the already-persisted state.
         function writeServerRecords(records: RecordType[]): void {
+            // Even a record the staleness filter below drops proves the server
+            // holds the row — presence is what the mid-flight merge guards.
+            markConfirmedPresent(records)
             if (!collection.utils || !collection.isReady()) return
             const fresh = records.filter(record => !isStaleServerRecord(record))
             if (fresh.length === 0) return
@@ -510,8 +575,16 @@ export function createCollection<Schema extends SchemaDeclaration>(
         //   - writeInsert / writeUpsert: idempotent, never throw on an absent key.
         //   - writeDelete: throws DeleteOperationItemNotFoundError on an absent key.
         // So only the delete branch can throw, and we make it idempotent below.
+        // Runs BEFORE the stale-echo filter: even a stale create/update echo
+        // proves the server holds the row. Delete echoes need no marking — the
+        // merge checks the synced store, which the delete's writeDelete empties.
+        function markEchoPresence(event: RecordSubscription<RecordType>): void {
+            if (event.action !== 'delete') markConfirmedPresent([event.record])
+        }
+
         const handleRealtimeEvent = (event: RecordSubscription<RecordType>) => {
             if (!collection.utils) return
+            markEchoPresence(event)
             if (isStaleEcho(event)) return
 
             try {
