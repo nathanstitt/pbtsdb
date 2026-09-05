@@ -405,13 +405,27 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // `markConfirmedPresent` still runs immediately: the in-flight fetch
         // bookkeeping needs to know the rows are confirmed the moment the
         // server said so, not a tick later.
+        //
+        // The deferred write itself: a no-op until the collection is ready
+        // (writing into the synced store before sync has initialized throws,
+        // and with no live query there is nothing to keep in sync — the next
+        // query fetches the already-persisted state; the transaction can
+        // outlive the last subscriber), and it drops any row the store already
+        // supersedes — a realtime echo may have landed a newer copy while the
+        // transaction was settling, and writing the response over it would
+        // revert the row.
         function writeBackAfterPersisted(
             transaction: { isPersisted: { promise: Promise<unknown> } },
             records: RecordType[]
         ): void {
             markConfirmedPresent(records)
             void transaction.isPersisted.promise.then(
-                () => writeServerRecords(records),
+                () => {
+                    if (!collection.utils || !collection.isReady()) return
+                    const fresh = records.filter(record => !isStaleServerRecord(record))
+                    if (fresh.length === 0) return
+                    writeOwn(() => collection.utils.writeUpsert(fresh))
+                },
                 // A rejected transaction rolled its draft back; there is
                 // nothing to write and nothing to report here.
                 () => undefined
@@ -458,7 +472,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // the synced row (out-of-order or post-settle read — equal `updated` included,
         // since the read can only carry a same-or-older value than the move's write-back
         // already in synced). pbtsdb's own writes (applyingOwnWrite) skip the optimistic
-        // arm; they are still staleness-filtered upstream by writeServerRecords/isStaleEcho
+        // arm; they are still staleness-filtered upstream by writeBackAfterPersisted/isStaleEcho
         // (which keep the strict `<` so a confirmed same-second value can re-land).
         function shouldDropSyncedWrite(op: {
             type: string
@@ -561,21 +575,6 @@ export function createCollection<Schema extends SchemaDeclaration>(
             )
             if (current === undefined) return false
             return treatEqualAsStale ? incoming <= current : incoming < current
-        }
-
-        // Write authoritative server records (mutation responses or realtime echoes)
-        // into the synced store, dropping any that the store already supersedes.
-        // No-op until the collection is ready: writing into the synced store before
-        // sync has initialized throws, and with no live query there is nothing to
-        // keep in sync — the next query fetches the already-persisted state.
-        function writeServerRecords(records: RecordType[]): void {
-            // Even a record the staleness filter below drops proves the server
-            // holds the row — presence is what the mid-flight merge guards.
-            markConfirmedPresent(records)
-            if (!collection.utils || !collection.isReady()) return
-            const fresh = records.filter(record => !isStaleServerRecord(record))
-            if (fresh.length === 0) return
-            writeOwn(() => collection.utils.writeUpsert(fresh))
         }
 
         // Decide whether a realtime echo should be dropped as stale. Under realtime
