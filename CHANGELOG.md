@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 > Releases 0.1.0 through 0.6.3 were reconstructed from git history after the
 > fact, so they summarise each release rather than record it contemporaneously.
 
+## [0.7.3] - 2026-09-05
+
+### Fixed
+
+- A mutation's server response is written back into the synced store after
+  the transaction persists, not inside the mutation handler. When the
+  realtime echo of a create arrived before the HTTP response, the earlier
+  write-back left TanStack DB holding the draft as a confirmed-but-unsynced
+  overlay that nothing cleared, so server-assigned fields read as missing
+  until a reload.
+
+### Removed
+
+- The equal-`updated` drop on the query-result write path (0.6.3). PocketBase
+  stamps `updated` to the millisecond and bumps it on every write, so a read
+  cannot carry old content under an equal timestamp; the revert it guarded was
+  the write-back race above. Staleness is strictly-older everywhere, and the
+  optimistic-pending arm alone holds a move against a read racing it.
+
 ## [0.7.0] - 2026-08-09
 
 ### Added

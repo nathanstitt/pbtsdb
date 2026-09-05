@@ -468,12 +468,10 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // optimistic check. Under on-demand contention a single-row/subset read can
         // resolve with a pre-mutation row and land here after the row already moved on,
         // reverting it. We drop such a synced insert/update when either it targets a key
-        // with a pending optimistic mutation (see the arm below) or it is no newer than
-        // the synced row (out-of-order or post-settle read — equal `updated` included,
-        // since the read can only carry a same-or-older value than the move's write-back
-        // already in synced). pbtsdb's own writes (applyingOwnWrite) skip the optimistic
-        // arm; they are still staleness-filtered upstream by writeBackAfterPersisted/isStaleEcho
-        // (which keep the strict `<` so a confirmed same-second value can re-land).
+        // with a pending optimistic mutation (see the arm below) or it is strictly older
+        // than the synced row (an out-of-order read). pbtsdb's own writes
+        // (applyingOwnWrite) skip the optimistic arm; they are staleness-filtered
+        // upstream by writeBackAfterPersisted/isStaleEcho.
         function shouldDropSyncedWrite(op: {
             type: string
             value?: unknown
@@ -498,7 +496,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 })
                 return true
             }
-            if (isStaleServerRecord(op.value, !applyingOwnWrite)) {
+            if (isStaleServerRecord(op.value)) {
                 logger.debug('Dropping stale synced write', { collectionName, id: key })
                 return true
             }
@@ -555,17 +553,15 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // chronological. When either side lacks a comparable timestamp we cannot
         // tell, so we treat the write as fresh and let it through.
         //
-        // `treatEqualAsStale` controls the equal-timestamp case. PocketBase bumps
-        // `updated` on every mutation, so a record carrying the SAME `updated` second
-        // as the synced row holds the same content — it cannot be newer. The default
-        // (strict `<`) lets an own write-back/realtime echo re-land that confirmed
-        // value harmlessly. The query-result path passes `true` (`<=`): a server read
-        // resolving with the same-second value is the post-settle revert race — once
-        // an optimistic move settles, the only thing that put a *fresher* value in
-        // synced is that move's own write-back, and a same-second read would overwrite
-        // it back to the pre-move row. There is nothing newer for an equal-timestamp
-        // query result to legitimately deliver, so dropping it is safe.
-        function isStaleServerRecord(record: unknown, treatEqualAsStale = false): boolean {
+        // Strictly older, never equal. PocketBase stamps `updated` to the
+        // millisecond and bumps it on every write, so an equal timestamp is the
+        // same version of the row: re-landing it changes nothing, and it is what
+        // lets a confirmed value clear a lingering optimistic overlay. (An earlier
+        // `<=` variant on the query-result path guarded against a read carrying
+        // old content under a new timestamp, which a real server cannot produce;
+        // the revert it chased was the write-back racing its own transaction,
+        // fixed in writeBackAfterPersisted.)
+        function isStaleServerRecord(record: unknown): boolean {
             const id = (record as { id?: unknown } | null | undefined)?.id
             if (typeof id !== 'string') return false
             const incoming = recordUpdatedAt(record)
@@ -574,7 +570,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 collection._state.syncedData.get(id) as RecordType | undefined
             )
             if (current === undefined) return false
-            return treatEqualAsStale ? incoming <= current : incoming < current
+            return incoming < current
         }
 
         // Decide whether a realtime echo should be dropped as stale. Under realtime
