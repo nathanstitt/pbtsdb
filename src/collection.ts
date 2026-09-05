@@ -351,7 +351,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                                   return pb.collection(collectionName).create(data)
                               })
                           )
-                          writeServerRecords(created)
+                          writeBackAfterPersisted(transaction, created)
                           return { refetch: refetchOnMutation }
                       })),
             onUpdate:
@@ -367,7 +367,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                                       .update(recordWithId.id, mutation.changes)
                               })
                           )
-                          writeServerRecords(updated)
+                          writeBackAfterPersisted(transaction, updated)
                           return { refetch: refetchOnMutation }
                       })),
             onDelete:
@@ -384,6 +384,53 @@ export function createCollection<Schema extends SchemaDeclaration>(
                           return { refetch: refetchOnMutation }
                       })),
         })
+
+        // Write the server's copy of a mutation's rows back AFTER the transaction
+        // has persisted — never from inside its handler.
+        //
+        // TanStack DB keeps a completed transaction's optimistic draft visible
+        // until a synced write for the key arrives, so a record the server
+        // fills in (a number, a timestamp) reaches the screen only through that
+        // later synced write. A write-back issued from inside the handler lands
+        // while the transaction is still `persisting`; TanStack applies it,
+        // then on completion re-adds the draft as a "confirmed but unsynced"
+        // overlay and waits for a synced write that already happened. If the
+        // realtime echo has ALSO already been consumed (it arrives before the
+        // create resolves under load, and an echo carrying the same `updated`
+        // as the write-back is dropped as stale), nothing ever clears the
+        // overlay: the row shows the draft — minus every server-assigned field
+        // — until a reload. Deferring the write-back to after persistence makes
+        // it the synced write TanStack is waiting for.
+        //
+        // `markConfirmedPresent` still runs immediately: the in-flight fetch
+        // bookkeeping needs to know the rows are confirmed the moment the
+        // server said so, not a tick later.
+        //
+        // The deferred write itself: a no-op until the collection is ready
+        // (writing into the synced store before sync has initialized throws,
+        // and with no live query there is nothing to keep in sync — the next
+        // query fetches the already-persisted state; the transaction can
+        // outlive the last subscriber), and it drops any row the store already
+        // supersedes — a realtime echo may have landed a newer copy while the
+        // transaction was settling, and writing the response over it would
+        // revert the row.
+        function writeBackAfterPersisted(
+            transaction: { isPersisted: { promise: Promise<unknown> } },
+            records: RecordType[]
+        ): void {
+            markConfirmedPresent(records)
+            void transaction.isPersisted.promise.then(
+                () => {
+                    if (!collection.utils || !collection.isReady()) return
+                    const fresh = records.filter(record => !isStaleServerRecord(record))
+                    if (fresh.length === 0) return
+                    writeOwn(() => collection.utils.writeUpsert(fresh))
+                },
+                // A rejected transaction rolled its draft back; there is
+                // nothing to write and nothing to report here.
+                () => undefined
+            )
+        }
 
         // Set while pbtsdb performs its own authoritative writes (mutation-response
         // write-backs and realtime echoes) through collection.utils.*. Those writes
@@ -421,12 +468,10 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // optimistic check. Under on-demand contention a single-row/subset read can
         // resolve with a pre-mutation row and land here after the row already moved on,
         // reverting it. We drop such a synced insert/update when either it targets a key
-        // with a pending optimistic mutation (see the arm below) or it is no newer than
-        // the synced row (out-of-order or post-settle read — equal `updated` included,
-        // since the read can only carry a same-or-older value than the move's write-back
-        // already in synced). pbtsdb's own writes (applyingOwnWrite) skip the optimistic
-        // arm; they are still staleness-filtered upstream by writeServerRecords/isStaleEcho
-        // (which keep the strict `<` so a confirmed same-second value can re-land).
+        // with a pending optimistic mutation (see the arm below) or it is strictly older
+        // than the synced row (an out-of-order read). pbtsdb's own writes
+        // (applyingOwnWrite) skip the optimistic arm; they are staleness-filtered
+        // upstream by writeBackAfterPersisted/isStaleEcho.
         function shouldDropSyncedWrite(op: {
             type: string
             value?: unknown
@@ -451,7 +496,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 })
                 return true
             }
-            if (isStaleServerRecord(op.value, !applyingOwnWrite)) {
+            if (isStaleServerRecord(op.value)) {
                 logger.debug('Dropping stale synced write', { collectionName, id: key })
                 return true
             }
@@ -508,17 +553,15 @@ export function createCollection<Schema extends SchemaDeclaration>(
         // chronological. When either side lacks a comparable timestamp we cannot
         // tell, so we treat the write as fresh and let it through.
         //
-        // `treatEqualAsStale` controls the equal-timestamp case. PocketBase bumps
-        // `updated` on every mutation, so a record carrying the SAME `updated` second
-        // as the synced row holds the same content — it cannot be newer. The default
-        // (strict `<`) lets an own write-back/realtime echo re-land that confirmed
-        // value harmlessly. The query-result path passes `true` (`<=`): a server read
-        // resolving with the same-second value is the post-settle revert race — once
-        // an optimistic move settles, the only thing that put a *fresher* value in
-        // synced is that move's own write-back, and a same-second read would overwrite
-        // it back to the pre-move row. There is nothing newer for an equal-timestamp
-        // query result to legitimately deliver, so dropping it is safe.
-        function isStaleServerRecord(record: unknown, treatEqualAsStale = false): boolean {
+        // Strictly older, never equal. PocketBase stamps `updated` to the
+        // millisecond and bumps it on every write, so an equal timestamp is the
+        // same version of the row: re-landing it changes nothing, and it is what
+        // lets a confirmed value clear a lingering optimistic overlay. (An earlier
+        // `<=` variant on the query-result path guarded against a read carrying
+        // old content under a new timestamp, which a real server cannot produce;
+        // the revert it chased was the write-back racing its own transaction,
+        // fixed in writeBackAfterPersisted.)
+        function isStaleServerRecord(record: unknown): boolean {
             const id = (record as { id?: unknown } | null | undefined)?.id
             if (typeof id !== 'string') return false
             const incoming = recordUpdatedAt(record)
@@ -527,22 +570,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                 collection._state.syncedData.get(id) as RecordType | undefined
             )
             if (current === undefined) return false
-            return treatEqualAsStale ? incoming <= current : incoming < current
-        }
-
-        // Write authoritative server records (mutation responses or realtime echoes)
-        // into the synced store, dropping any that the store already supersedes.
-        // No-op until the collection is ready: writing into the synced store before
-        // sync has initialized throws, and with no live query there is nothing to
-        // keep in sync — the next query fetches the already-persisted state.
-        function writeServerRecords(records: RecordType[]): void {
-            // Even a record the staleness filter below drops proves the server
-            // holds the row — presence is what the mid-flight merge guards.
-            markConfirmedPresent(records)
-            if (!collection.utils || !collection.isReady()) return
-            const fresh = records.filter(record => !isStaleServerRecord(record))
-            if (fresh.length === 0) return
-            writeOwn(() => collection.utils.writeUpsert(fresh))
+            return incoming < current
         }
 
         // Decide whether a realtime echo should be dropped as stale. Under realtime
