@@ -351,7 +351,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                                   return pb.collection(collectionName).create(data)
                               })
                           )
-                          writeServerRecords(created)
+                          writeBackAfterPersisted(transaction, created)
                           return { refetch: refetchOnMutation }
                       })),
             onUpdate:
@@ -367,7 +367,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
                                       .update(recordWithId.id, mutation.changes)
                               })
                           )
-                          writeServerRecords(updated)
+                          writeBackAfterPersisted(transaction, updated)
                           return { refetch: refetchOnMutation }
                       })),
             onDelete:
@@ -384,6 +384,39 @@ export function createCollection<Schema extends SchemaDeclaration>(
                           return { refetch: refetchOnMutation }
                       })),
         })
+
+        // Write the server's copy of a mutation's rows back AFTER the transaction
+        // has persisted — never from inside its handler.
+        //
+        // TanStack DB keeps a completed transaction's optimistic draft visible
+        // until a synced write for the key arrives, so a record the server
+        // fills in (a number, a timestamp) reaches the screen only through that
+        // later synced write. A write-back issued from inside the handler lands
+        // while the transaction is still `persisting`; TanStack applies it,
+        // then on completion re-adds the draft as a "confirmed but unsynced"
+        // overlay and waits for a synced write that already happened. If the
+        // realtime echo has ALSO already been consumed (it arrives before the
+        // create resolves under load, and an echo carrying the same `updated`
+        // as the write-back is dropped as stale), nothing ever clears the
+        // overlay: the row shows the draft — minus every server-assigned field
+        // — until a reload. Deferring the write-back to after persistence makes
+        // it the synced write TanStack is waiting for.
+        //
+        // `markConfirmedPresent` still runs immediately: the in-flight fetch
+        // bookkeeping needs to know the rows are confirmed the moment the
+        // server said so, not a tick later.
+        function writeBackAfterPersisted(
+            transaction: { isPersisted: { promise: Promise<unknown> } },
+            records: RecordType[]
+        ): void {
+            markConfirmedPresent(records)
+            void transaction.isPersisted.promise.then(
+                () => writeServerRecords(records),
+                // A rejected transaction rolled its draft back; there is
+                // nothing to write and nothing to report here.
+                () => undefined
+            )
+        }
 
         // Set while pbtsdb performs its own authoritative writes (mutation-response
         // write-backs and realtime echoes) through collection.utils.*. Those writes

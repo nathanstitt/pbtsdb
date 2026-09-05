@@ -1,8 +1,8 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import { RecordService } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-
 import {
     authenticateTestUser,
     clearAuth,
@@ -224,6 +224,80 @@ describe('Collection - Mutations', () => {
         )
 
         expect(result.current.data.find(b => b.id === newBook.id)).toBeUndefined()
+    }, 15000)
+
+    // The realtime echo for a freshly inserted record can arrive BEFORE the
+    // create request resolves (under load it routinely does). TanStack DB keeps
+    // a completed transaction's draft visible until a synced write for the key
+    // lands after completion; if both the echo and the response write-back are
+    // consumed while the transaction is still persisting, the draft — minus
+    // every server-assigned field — stays on screen until a reload. The
+    // write-back is therefore deferred to after persistence (collection.ts,
+    // writeBackAfterPersisted). This delivers the echo from inside `create`,
+    // which is the worst-case ordering, and asserts the server's fields win.
+    it('shows the server-assigned fields when the realtime echo lands before the insert resolves', async () => {
+        // The SDK builds a fresh RecordService per `pb.collection()` call, so
+        // the spies land on the PROTOTYPE, which every instance shares.
+        const realSubscribe = RecordService.prototype.subscribe
+        let echo: ((event: { action: string; record: Record<string, unknown> }) => void) | null =
+            null
+        vi.spyOn(RecordService.prototype, 'subscribe').mockImplementation(async function (
+            this: RecordService,
+            topic,
+            callback,
+            options
+        ) {
+            if (this.collectionIdOrName === 'books') echo = callback as typeof echo
+            return realSubscribe.call(this, topic, callback, options)
+        })
+
+        const factory = createCollectionFactory(queryClient)
+        const collection = factory.create('books', {
+            omitOnInsert: ['created', 'updated'] as const,
+        })
+        // The subscription starts with the first live query, not on preload.
+        const { unmount } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
+        await waitForSubscription(collection)
+        expect(echo).not.toBeNull()
+
+        const realCreate = RecordService.prototype.create
+        vi.spyOn(RecordService.prototype, 'create').mockImplementation(async function (
+            this: RecordService,
+            data,
+            options
+        ) {
+            const record = await realCreate.call(this, data, options)
+            // The echo, delivered before the create has resolved.
+            echo?.({ action: 'create', record: record as unknown as Record<string, unknown> })
+            return record
+        })
+
+        const authorId = await getTestAuthorId()
+        const newBook = {
+            id: newRecordId(),
+            title: `Echo before response ${Date.now().toString().slice(-8)}`,
+            genre: 'Fiction' as const,
+            isbn: getTestSlug('echo'),
+            author: authorId,
+            published_date: '',
+            page_count: 0,
+        }
+        const tx = collection.insert(newBook)
+        await tx.isPersisted.promise
+
+        // `updated` is server-assigned and omitted from the draft: the visible
+        // row must carry it once the transaction has persisted.
+        await waitFor(() => {
+            const visible = collection.get(newBook.id) as Books | undefined
+            expect(visible?.updated).toBeTruthy()
+        })
+        unmount()
+
+        try {
+            await pb.collection('books').delete(newBook.id)
+        } catch (_error) {
+            // Ignore cleanup errors
+        }
     }, 15000)
 
     describe('refetchOnMutation behavior', () => {
