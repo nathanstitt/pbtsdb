@@ -97,10 +97,15 @@ describe('mergeExpand', () => {
 
     it('compares multi relations element-wise in order', () => {
         const tags = [{ id: 't1' }, { id: 't2' }]
-        const existing = { id: 'b1', tags: ['t1', 't2'], expand: { tags } }
-        expect(mergeExpand({ id: 'b1', tags: ['t1', 't2'] }, existing).expand).toEqual({ tags })
-        expect(mergeExpand({ id: 'b1', tags: ['t2', 't1'] }, existing).expand).toBeUndefined()
-        expect(mergeExpand({ id: 'b1', tags: ['t1'] }, existing).expand).toBeUndefined()
+        type Row = { id: string; tags: string[]; expand?: { tags: typeof tags } }
+        const existing: Row = { id: 'b1', tags: ['t1', 't2'], expand: { tags } }
+        expect(mergeExpand({ id: 'b1', tags: ['t1', 't2'] } as Row, existing).expand).toEqual({
+            tags,
+        })
+        expect(
+            mergeExpand({ id: 'b1', tags: ['t2', 't1'] } as Row, existing).expand
+        ).toBeUndefined()
+        expect(mergeExpand({ id: 'b1', tags: ['t1'] } as Row, existing).expand).toBeUndefined()
     })
 
     it('lets an incoming entry win over the stored one', () => {
@@ -112,7 +117,10 @@ describe('mergeExpand', () => {
 
     it('keeps nested expand inside a carried entry', () => {
         const book = { id: 'b1', author: 'a1', expand: { author } }
-        const existing = { id: 'm1', book: 'b1', expand: { book } }
-        expect(mergeExpand({ id: 'm1', book: 'b1' }, existing).expand).toEqual({ book })
+        type Row = { id: string; book: string; expand?: { book: typeof book } }
+        const existing: Row = { id: 'm1', book: 'b1', expand: { book } }
+        expect(mergeExpand({ id: 'm1', book: 'b1' } as Row, existing).expand).toEqual({
+            book,
+        })
     })
 })
