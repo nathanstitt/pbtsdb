@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mergeExpand } from '../src/expand-merge'
+import { patchEmbedded } from '../src/expand-patch'
 import {
     joinPaths,
     normalizePaths,
@@ -121,6 +122,129 @@ describe('mergeExpand', () => {
         const existing: Row = { id: 'm1', book: 'b1', expand: { book } }
         expect(mergeExpand({ id: 'm1', book: 'b1' } as Row, existing).expand).toEqual({
             book,
+        })
+    })
+})
+
+describe('patchEmbedded', () => {
+    const author = { id: 'a1', name: 'Orwell', updated: '1' }
+    const renamed = { id: 'a1', name: 'George Orwell', updated: '2' }
+
+    describe('update, single relation', () => {
+        it('replaces the embedded copy', () => {
+            const row = { id: 'b1', author: 'a1', expand: { author } }
+            const patched = patchEmbedded(row, 'author', 'update', renamed)
+            expect(patched).toEqual({ id: 'b1', author: 'a1', expand: { author: renamed } })
+            expect(patched).not.toBe(row)
+            expect(row.expand.author).toBe(author)
+        })
+
+        it('returns undefined when the embedded id differs', () => {
+            const row = { id: 'b1', author: 'a1', expand: { author } }
+            expect(patchEmbedded(row, 'author', 'update', { id: 'a2' })).toBeUndefined()
+        })
+
+        it('returns undefined when the row has no embedded copy', () => {
+            expect(
+                patchEmbedded({ id: 'b1', author: 'a1' }, 'author', 'update', renamed)
+            ).toBeUndefined()
+            expect(
+                patchEmbedded({ id: 'b1', author: 'a1', expand: {} }, 'author', 'update', renamed)
+            ).toBeUndefined()
+        })
+
+        it('returns undefined when the record is unchanged', () => {
+            const row = { id: 'b1', author: 'a1', expand: { author } }
+            expect(patchEmbedded(row, 'author', 'update', { ...author })).toBeUndefined()
+        })
+
+        it('treats create like update', () => {
+            const row = { id: 'b1', author: 'a1', expand: { author } }
+            expect(patchEmbedded(row, 'author', 'create', renamed)?.expand.author).toEqual(renamed)
+        })
+
+        it('carries a nested expand the echo lacks', () => {
+            const org = { id: 'o1', name: 'Org' }
+            const embedded = { id: 'a1', name: 'Orwell', org: 'o1', expand: { org } }
+            const row = { id: 'b1', author: 'a1', expand: { author: embedded } }
+            const echo = { id: 'a1', name: 'George Orwell', org: 'o1' }
+            expect(patchEmbedded(row, 'author', 'update', echo)?.expand.author).toEqual({
+                ...echo,
+                expand: { org },
+            })
+        })
+    })
+
+    describe('update, multi relation', () => {
+        const t1 = { id: 't1', name: 'one' }
+        const t2 = { id: 't2', name: 'two' }
+        const t3 = { id: 't3', name: 'three' }
+
+        it('replaces the matching element in place, preserving order', () => {
+            const row = { id: 'b1', tags: ['t1', 't2', 't3'], expand: { tags: [t1, t2, t3] } }
+            const patched = patchEmbedded(row, 'tags', 'update', { id: 't2', name: 'TWO' })
+            expect(patched?.expand.tags).toEqual([t1, { id: 't2', name: 'TWO' }, t3])
+            expect(row.expand.tags[1]).toBe(t2)
+        })
+
+        it('returns undefined when the id is not embedded', () => {
+            const row = { id: 'b1', tags: ['t1'], expand: { tags: [t1] } }
+            expect(patchEmbedded(row, 'tags', 'update', { id: 't9', name: 'x' })).toBeUndefined()
+        })
+
+        it('returns undefined when the element is unchanged', () => {
+            const row = { id: 'b1', tags: ['t1', 't2'], expand: { tags: [t1, t2] } }
+            expect(patchEmbedded(row, 'tags', 'update', { ...t2 })).toBeUndefined()
+        })
+    })
+
+    describe('delete, single relation', () => {
+        it('clears the reference and removes the copy', () => {
+            const row = { id: 'b1', author: 'a1', expand: { author } }
+            const patched = patchEmbedded(row, 'author', 'delete', { id: 'a1' })
+            expect(patched).toEqual({ id: 'b1', author: '', expand: {} })
+            expect(row.author).toBe('a1')
+            expect(row.expand.author).toBe(author)
+        })
+
+        it('clears the reference on a row with no copy', () => {
+            expect(
+                patchEmbedded({ id: 'b1', author: 'a1' }, 'author', 'delete', { id: 'a1' })
+            ).toEqual({
+                id: 'b1',
+                author: '',
+            })
+        })
+
+        it('returns undefined when the row does not reference the id', () => {
+            const row = { id: 'b1', author: 'a2', expand: { author: { id: 'a2' } } }
+            expect(patchEmbedded(row, 'author', 'delete', { id: 'a1' })).toBeUndefined()
+        })
+    })
+
+    describe('delete, multi relation', () => {
+        const t1 = { id: 't1' }
+        const t2 = { id: 't2' }
+
+        it('filters the id out of the field and the copy, preserving order', () => {
+            const row = { id: 'b1', tags: ['t1', 't2'], expand: { tags: [t1, t2] } }
+            const patched = patchEmbedded(row, 'tags', 'delete', { id: 't1' })
+            expect(patched).toEqual({ id: 'b1', tags: ['t2'], expand: { tags: [t2] } })
+            expect(row.tags).toEqual(['t1', 't2'])
+        })
+
+        it('filters the field on a row with no copy', () => {
+            expect(
+                patchEmbedded({ id: 'b1', tags: ['t1', 't2'] }, 'tags', 'delete', { id: 't2' })
+            ).toEqual({
+                id: 'b1',
+                tags: ['t1'],
+            })
+        })
+
+        it('returns undefined when the array lacks the id', () => {
+            const row = { id: 'b1', tags: ['t1'], expand: { tags: [t1] } }
+            expect(patchEmbedded(row, 'tags', 'delete', { id: 't9' })).toBeUndefined()
         })
     })
 })
