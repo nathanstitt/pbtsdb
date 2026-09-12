@@ -100,9 +100,8 @@ export interface ReactProviderResult<CollectionsMap> {
  * const c = createCollection<Schema>(pb, queryClient);
  * const authors = c('authors', {});
  * const books = c('books', {
- *     expand: {
- *         author: authors
- *     }
+ *     relations: { author: authors },
+ *     alwaysExpand: ['author'],
  * });
  *
  * const { Provider, useStore } = createReactProvider({ authors, books });

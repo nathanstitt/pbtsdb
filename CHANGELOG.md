@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 > Releases 0.1.0 through 0.6.3 were reconstructed from git history after the
 > fact, so they summarise each release rather than record it contemporaneously.
 
+## [0.8.0] - 2026-09-11
+
+### Changed
+
+- Collections default to `autoIndex: 'eager'` with `defaultIndexType:
+  BTreeIndex`, restoring lazy paging for `orderBy` + `limit` queries after
+  TanStack DB 0.6 turned auto-indexing off. Override per collection through
+  `collectionOptions`.
+- **Breaking:** the `expand` collection option is replaced by `relations` and
+  `alwaysExpand`. `expand: { author }` becomes
+  `relations: { author }, alwaysExpand: ['author']`.
+- Upgraded to `@tanstack/db` 0.9, `@tanstack/react-db` 0.3, and
+  `@tanstack/query-db-collection` 1.2. Peer ranges are unchanged.
+
+### Added
+
+- Per-query expand: `collection.expand('tags')` returns a view whose live
+  queries fetch with that `expand`, typed on the rows, sharing the base
+  collection's store, realtime subscription, and mutations. Dot paths such as
+  `'book.author'` resolve through the target collection's own `relations`.
+- Expand data on a row survives later writes that lack it, as long as the
+  relation field is unchanged.
+- Relation targets stay subscribed while a query expands into them, and
+  their realtime changes patch the embedded `expand` copies on parent rows
+  in place (nested paths included). Delete echoes clear the reference and
+  the copy. Unchanged echoes never write.
+
+### Fixed
+
+- The realtime subscription now requests every expand path in use, so an echo
+  no longer wipes `expand` from an always-expanded row.
+- `collectionOptions.gcTime` now reaches the TanStack collection;
+  `queryCollectionOptions` consumed it for the query observer only, so
+  collection garbage collection always used the five-minute default.
+
 ## [0.7.3] - 2026-09-05
 
 ### Fixed

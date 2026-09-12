@@ -4,6 +4,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { createCollection } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
@@ -12,6 +13,7 @@ import {
     pb,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Collection - Basic Operations', () => {
     let queryClient: QueryClient
@@ -115,5 +117,28 @@ describe('Collection - Basic Operations', () => {
         expect(result.current.data).toBeUndefined()
 
         unmount()
+    }, 15000)
+
+    it('passes collectionOptions.gcTime through to the underlying TanStack collection', async () => {
+        const authors = createCollection<Schema>(pb, queryClient)('authors', {
+            syncMode: 'on-demand',
+            collectionOptions: { gcTime: 50 },
+        })
+
+        const { result, unmount } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ authors })
+                    .orderBy(({ authors: a }) => a.id)
+                    .limit(1)
+            )
+        )
+        await waitForLoadFinish(result)
+
+        unmount()
+        await waitFor(
+            () => expect((authors as unknown as { status: string }).status).toBe('cleaned-up'),
+            { timeout: 10000 }
+        )
     }, 15000)
 })

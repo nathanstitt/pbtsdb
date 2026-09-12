@@ -1,7 +1,7 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
@@ -94,14 +94,13 @@ describe('Collection - Relations', () => {
         expect(authorName).toBeTypeOf('string')
     }, 15000)
 
-    it('should auto-expand relations when configured with expand option', async () => {
+    it('should auto-expand relations when configured with alwaysExpand', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
-            expand: {
-                author: authorsCollection,
-            },
+            relations: { author: authorsCollection },
+            alwaysExpand: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -124,9 +123,8 @@ describe('Collection - Relations', () => {
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
-            expand: {
-                author: authorsCollection,
-            },
+            relations: { author: authorsCollection },
+            alwaysExpand: ['author'],
         })
 
         // Get an author ID to filter by
@@ -162,42 +160,62 @@ describe('Collection - Relations', () => {
         })
     })
 
-    it('should warn when eager expand target store is not ready', async () => {
+    it('should warn when an eager expand target has not started', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
-            expand: {
-                author: authorsCollection,
-            },
+            relations: { author: authorsCollection },
+            alwaysExpand: ['author'],
+        })
+
+        // preload() loads without a subscriber, so nothing holds the authors
+        // collection live and its sync never starts: the upsert is skipped.
+        await booksCollection.preload()
+        const books = booksCollection.toArray
+        expect(books.length).toBeGreaterThan(0)
+
+        const notReadyWarnings = testLogger.messages.warn.filter(
+            w => w.msg.includes('not syncing') && w.msg.includes('not yet ready')
+        )
+        expect(notReadyWarnings.length).toBeGreaterThan(0)
+        expect(authorsCollection.size).toBe(0)
+
+        // The expand data is still present on the record from PocketBase
+        expect(books[0].expand?.author).toBeDefined()
+    })
+
+    it('should start an eager expand target through a live query and upsert into it', async () => {
+        const factory = createCollectionFactory(queryClient)
+        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
+        const booksCollection = factory.create('books', {
+            syncMode: 'eager',
+            relations: { author: authorsCollection },
+            alwaysExpand: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
 
         await waitForLoadFinish(result)
-        expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
+        const firstBook = result.current.data[0]
+        expect(firstBook.expand?.author).toBeDefined()
 
-        // When an eager store is used as an expand target but isn't ready yet,
-        // we expect a warning to be logged (expand data won't be upserted)
+        // The live query's subscription holds the authors collection live, which
+        // starts its load; the expanded author lands there once it is ready.
+        await waitFor(() => expect(authorsCollection.has(firstBook.author)).toBe(true))
         const notReadyWarnings = testLogger.messages.warn.filter(
             w => w.msg.includes('not syncing') && w.msg.includes('not yet ready')
         )
-        expect(notReadyWarnings.length).toBeGreaterThan(0)
-
-        // The expand data should still be present on the record from PocketBase
-        const firstBook = result.current.data[0]
-        expect(firstBook.expand).toBeDefined()
-        expect(firstBook.expand?.author).toBeDefined()
+        expect(notReadyWarnings).toEqual([])
     })
 
     it('should allow chaining where() and orderBy() with auto-expand', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
-            expand: {
-                author: authorsCollection,
-            },
+            relations: { author: authorsCollection },
+            alwaysExpand: ['author'],
         })
 
         // Get test data
@@ -216,12 +234,6 @@ describe('Collection - Relations', () => {
         await waitForLoadFinish(result)
         expect(result.current.data).toBeDefined()
         expect(result.current.data.length).toBeGreaterThan(0)
-
-        // Warning is expected when eager target store isn't ready
-        const notReadyWarnings = testLogger.messages.warn.filter(
-            w => w.msg.includes('not syncing') && w.msg.includes('not yet ready')
-        )
-        expect(notReadyWarnings.length).toBeGreaterThan(0)
 
         // Verify expand works with filtering
         const firstBook = result.current.data[0]

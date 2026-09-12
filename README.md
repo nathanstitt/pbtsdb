@@ -123,14 +123,19 @@ const queryClient = new QueryClient({
 
 // Create collections with automatic type inference
 const c = createCollection<BlogSchema>(pb, queryClient);
+const users = c('users', {});
 export const { Provider, useStore } = createReactProvider({
+    users,
     posts: c('posts', {
-        omitOnInsert: ['created', 'updated'] as const
+        omitOnInsert: ['created', 'updated'] as const,
+        relations: { author: users },
+        alwaysExpand: ['author'],
     }),
-    users: c('users', {}),
     comments: c('comments', {
-        omitOnInsert: ['created', 'updated'] as const
-    })
+        omitOnInsert: ['created', 'updated'] as const,
+        relations: { author: users },
+        alwaysExpand: ['author'],
+    }),
 });
 
 export function App() {
@@ -320,7 +325,8 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `options` - Optional configuration
 
 **Options:**
-- `expand?: Record<string, Collection>` - Relations to auto-expand and auto-upsert on every fetch
+- `relations?: Record<string, Collection>` - Collections that receive expanded records for each relation; declares what `alwaysExpand` and `collection.expand()` may name
+- `alwaysExpand?: readonly string[]` - Expand paths applied on every fetch (e.g. `['author', 'book.author']`)
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
@@ -339,39 +345,80 @@ const c = createCollection<MySchema>(pb, queryClient);
 const booksCollection = c('books', {});
 ```
 
-With auto-expand relations:
+With always-expanded relations:
 ```typescript
 const c = createCollection<MySchema>(pb, queryClient);
 const authorsCollection = c('authors', {});
 const booksCollection = c('books', {
-    expand: {
-        author: authorsCollection  // Auto-expand and auto-upsert
-    }
+    relations: { author: authorsCollection },  // where expanded authors are upserted
+    alwaysExpand: ['author'],                  // expanded on every fetch
 });
 
-// Expand is automatic on every fetch
 const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
-
-// Expanded records auto-inserted into authorsCollection
+// data[0].expand?.author is typed and populated
 ```
+
+#### Per-query expand
+
+Declare relations once, then ask for expansion per query with `collection.expand()`.
+A view shares the collection's store, realtime subscription, and mutations; only
+its fetches add the `expand` parameter.
+
+```typescript
+const tagsCollection = c('tags', {});
+const booksCollection = c('books', {
+    relations: { author: authorsCollection, tags: tagsCollection },
+});
+
+function BookList() {
+    const [books] = useStore('books');
+    const { data } = useLiveQuery((q) =>
+        q.from({ books: books.expand('tags') })
+         .where(({ books }) => eq(books.genre, 'Fiction'))
+    );
+    // data[0].expand?.tags is Tags[] | undefined; data[0].expand?.author is a type error
+}
+```
+
+Paths can be nested through a target collection's own `relations`:
+
+```typescript
+const metadata = c('book_metadata', { relations: { book: booksCollection } });
+const { data } = useLiveQuery((q) => q.from({ m: metadata.expand('book.author') }));
+// data[0].expand?.book?.expand?.author?.name
+```
+
+Rows fetched through a view keep their `expand` data in the shared store, and the
+realtime subscription requests every relation in use, so echoes keep it populated.
+
+Relation targets stay live too. While a query expands into `tags` (or through
+it into `colors`), those collections keep their realtime subscriptions, and a
+change to a tag or a color updates the embedded copy on affected rows in
+place, so `book.expand?.tags?.[0].name` refreshes without a write to the book.
+While an optimistic mutation is pending on the parent row, TanStack DB shows
+the frozen optimistic snapshot, so a patched `expand` becomes visible once
+that mutation settles. Deleting a related record clears the reference and the
+copy, matching what PocketBase does server-side. Targets are released when
+the last query on the parent unmounts.
 
 #### Collection Options Passthrough
 
 Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:
 
 ```typescript
-import { BasicIndex } from 'pbtsdb';
-
 const c = createCollection<MySchema>(pb, queryClient);
 const booksCollection = c('books', {
     collectionOptions: {
-        autoIndex: 'eager',
-        defaultIndexType: BasicIndex,
         gcTime: 60000,       // 1 minute GC
         startSync: true,     // Start syncing immediately
     }
 });
 ```
+
+pbtsdb defaults `autoIndex` to `'eager'` with `defaultIndexType: BTreeIndex`, so
+`orderBy` + `limit` queries page lazily instead of loading the whole subset (and
+TanStack DB does not warn about a missing index). Pass `autoIndex: 'off'` or a
+different `defaultIndexType` in `collectionOptions` to change that per collection.
 
 The following fields are managed by pbtsdb and excluded from `collectionOptions`: `getKey`, `syncMode`, `onInsert`, `onUpdate`, `onDelete`, `schema`.
 
@@ -890,7 +937,8 @@ Use PocketBase's `expand` to auto-populate a related collection, then use includ
 const authorsCollection = c('authors', { syncMode: 'on-demand' });
 const booksCollection = c('books', {
     syncMode: 'on-demand',
-    expand: { author: authorsCollection },  // Auto-populates authorsCollection
+    relations: { author: authorsCollection },  // Auto-populates authorsCollection
+    alwaysExpand: ['author'],
 });
 
 const { data } = useLiveQuery((q) =>
@@ -944,12 +992,11 @@ const books = c('books', {
     omitOnInsert: ['created', 'updated'] as const
 });
 
-// ✅ Good - with auto-expand relations
+// ✅ Good - with always-expanded relations
 const authors = c('authors', {});
 const books = c('books', {
-    expand: {
-        author: authors
-    }
+    relations: { author: authors },
+    alwaysExpand: ['author'],
 });
 ```
 
@@ -979,16 +1026,16 @@ When using expand collections, create the target collection first:
 const c = createCollection<MySchema>(pb, queryClient);
 const authors = c('authors', {});
 const books = c('books', {
-    expand: {
-        author: authors  // authors is already created
-    }
+    relations: { author: authors },  // authors is already created
+    alwaysExpand: ['author'],
 });
 
 // ❌ Bad - can't reference what doesn't exist yet
 const books = c('books', {
-    expand: {
+    relations: {
         author: ???  // Where is authors?
-    }
+    },
+    alwaysExpand: ['author'],
 });
 ```
 
@@ -1030,9 +1077,8 @@ Use PocketBase's expand feature for better performance:
 const c = createCollection<MySchema>(pb, queryClient);
 const authors = c('authors', {});
 const posts = c('posts', {
-    expand: {
-        author: authors  // Auto-expand on every fetch
-    }
+    relations: { author: authors },
+    alwaysExpand: ['author'],  // Auto-expand on every fetch
 });
 
 const { data } = useLiveQuery((q) => q.from({ posts }));
