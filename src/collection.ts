@@ -45,6 +45,8 @@ export type PbView<
     isSubscribed: () => boolean
     /** @internal relation targets declared through `relations` */
     readonly relationTargets: Record<string, unknown> | undefined
+    /** @internal number of relation targets currently held live */
+    readonly heldRelationTargetCount: () => number
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }

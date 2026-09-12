@@ -596,4 +596,236 @@ describe('Per-query expand', () => {
             }
         }, 20000)
     })
+
+    describe('relation targets stay live', () => {
+        type Internals = {
+            heldRelationTargetCount: () => number
+            subscriberCount: number
+            status: string
+        }
+        const internals = (c: unknown) => c as Internals
+
+        it('holds the target subscription while a view is live and releases it after', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+            const query = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.expand('author') })
+                        .orderBy(({ b }) => b.id)
+                        .limit(1)
+                )
+            )
+            await waitForLoadFinish(query.result, 10000)
+            await books.waitForSubscription(10000)
+            await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+            expect(internals(authors).subscriberCount).toBe(1)
+            expect(internals(books).heldRelationTargetCount()).toBe(1)
+
+            query.unmount()
+            await waitFor(() => expect(books.isSubscribed()).toBe(false), { timeout: 10000 })
+            await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 10000 })
+            expect(internals(authors).subscriberCount).toBe(0)
+            expect(internals(books).heldRelationTargetCount()).toBe(0)
+        }, 20000)
+
+        it('holds every collection along a nested path', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const metadata = c('book_metadata', {
+                syncMode: 'on-demand',
+                relations: { book: books },
+            })
+
+            const query = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ m: metadata.expand('book.author') })
+                        .orderBy(({ m }) => m.id)
+                        .limit(1)
+                )
+            )
+            await waitForLoadFinish(query.result, 10000)
+            await metadata.waitForSubscription(10000)
+            await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
+            await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+            expect(internals(metadata).heldRelationTargetCount()).toBe(2)
+
+            query.unmount()
+            await waitFor(() => expect(metadata.isSubscribed()).toBe(false), { timeout: 10000 })
+            await waitFor(() => expect(books.isSubscribed()).toBe(false), { timeout: 10000 })
+            await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 10000 })
+        }, 20000)
+
+        it('union growth through the restart path adds targets without bouncing existing ones', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const tags = c('tags', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const bookTags = c('book_tags', {
+                syncMode: 'on-demand',
+                relations: { book: books, tag: tags },
+            })
+
+            const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
+            const realSubscribe = pb.collection('books').subscribe.bind(pb.collection('books'))
+            const subscribeSpy = vi
+                .spyOn(pb.collection('books'), 'subscribe')
+                .mockImplementation(async (...args) => {
+                    const unsubscribe = await realSubscribe(...args)
+                    const spy = vi.fn(unsubscribe)
+                    unsubscribeSpies.push(spy)
+                    return spy
+                })
+
+            try {
+                const first = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookTags.expand('book') })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                await waitForLoadFinish(first.result, 10000)
+                await bookTags.waitForSubscription(10000)
+                await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
+                expect(internals(bookTags).heldRelationTargetCount()).toBe(1)
+
+                const second = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookTags.expand('tag') })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                await waitForLoadFinish(second.result, 10000)
+                await waitFor(() => expect(tags.isSubscribed()).toBe(true), { timeout: 10000 })
+
+                const third = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookTags.expand('book.author') })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                await waitForLoadFinish(third.result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+
+                await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(3))
+                expect(internals(books).subscriberCount).toBe(1)
+                expect(internals(tags).subscriberCount).toBe(1)
+                expect(internals(authors).subscriberCount).toBe(1)
+                // books was held from the first view and never released across
+                // the two restarts: exactly one PocketBase subscribe, no unsubscribe.
+                expect(subscribeSpy).toHaveBeenCalledTimes(1)
+                expect(unsubscribeSpies[0]).not.toHaveBeenCalled()
+
+                first.unmount()
+                second.unmount()
+                third.unmount()
+                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+                await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(0))
+                await waitFor(() => expect(unsubscribeSpies[0]).toHaveBeenCalledTimes(1))
+            } finally {
+                subscribeSpy.mockRestore()
+            }
+        }, 30000)
+
+        it('twenty mount/unmount cycles leave nothing held and balanced PocketBase calls', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+            const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
+            const realSubscribe = pb.collection('authors').subscribe.bind(pb.collection('authors'))
+            const subscribeSpy = vi
+                .spyOn(pb.collection('authors'), 'subscribe')
+                .mockImplementation(async (...args) => {
+                    const unsubscribe = await realSubscribe(...args)
+                    const spy = vi.fn(unsubscribe)
+                    unsubscribeSpies.push(spy)
+                    return spy
+                })
+
+            try {
+                for (let cycle = 0; cycle < 20; cycle++) {
+                    const query = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books.expand('author') })
+                                .orderBy(({ b }) => b.id)
+                                .limit(1)
+                        )
+                    )
+                    await waitForLoadFinish(query.result, 10000)
+                    await books.waitForSubscription(10000)
+                    await waitFor(() => expect(authors.isSubscribed()).toBe(true), {
+                        timeout: 10000,
+                    })
+                    query.unmount()
+                    await waitFor(() => expect(books.isSubscribed()).toBe(false), {
+                        timeout: 10000,
+                    })
+                    await waitFor(() => expect(authors.isSubscribed()).toBe(false), {
+                        timeout: 10000,
+                    })
+                    expect(internals(authors).subscriberCount).toBe(0)
+                    expect(internals(books).heldRelationTargetCount()).toBe(0)
+                }
+                expect(subscribeSpy).toHaveBeenCalledTimes(unsubscribeSpies.length)
+                for (const spy of unsubscribeSpies) expect(spy).toHaveBeenCalledTimes(1)
+            } finally {
+                subscribeSpy.mockRestore()
+            }
+        }, 120000)
+
+        it('lets a released target garbage collect', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', {
+                syncMode: 'on-demand',
+                collectionOptions: { gcTime: 50 },
+            })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+            const query = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.expand('author') })
+                        .orderBy(({ b }) => b.id)
+                        .limit(1)
+                )
+            )
+            await waitForLoadFinish(query.result, 10000)
+            await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+
+            query.unmount()
+            await waitFor(() => expect(internals(authors).status).toBe('cleaned-up'), {
+                timeout: 10000,
+            })
+        }, 20000)
+
+        it('creating views holds nothing until one subscribes', () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const tags = c('tags', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const bookTags = c('book_tags', {
+                syncMode: 'on-demand',
+                relations: { book: books, tag: tags },
+            })
+            for (let i = 0; i < 50; i++) {
+                bookTags.expand(i % 2 === 0 ? 'book' : 'tag')
+                bookTags.expand('book', 'tag')
+            }
+            expect(internals(bookTags).heldRelationTargetCount()).toBe(0)
+            expect(internals(books).subscriberCount).toBe(0)
+            expect(internals(tags).subscriberCount).toBe(0)
+        })
+    })
 })

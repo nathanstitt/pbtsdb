@@ -197,6 +197,12 @@ export interface ExpandTargetCollection {
     }
     /** Relation targets of this collection, when it was built by pbtsdb. */
     relationTargets?: Record<string, ExpandTargetCollection>
+    /** Subscribe without requesting data; keeps the target live while held. */
+    subscribeChanges?: (
+        callback: () => void,
+        options: { includeInitialState: false }
+    ) => { unsubscribe: () => void }
+    subscriberCount?: number
 }
 
 /**

@@ -57,6 +57,8 @@ export interface CollectionSubscriptionHelpers {
     isSubscribed: () => boolean
     /** Relation targets declared through `relations` */
     relationTargets: RelationTargets | undefined
+    /** Number of relation targets currently held live */
+    heldRelationTargetCount: () => number
 }
 
 /**
@@ -788,6 +790,57 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return joinPaths([...alwaysExpand, ...requestedExpand])
     }
 
+    // Collections along every active expand path. Held live (below) so their
+    // realtime echoes reach this collection's embedded copies.
+    function activeExpandTargets(): Set<ExpandTargetCollection> {
+        const targets = new Set<ExpandTargetCollection>()
+        for (const path of splitPaths(pendingSubscribeExpand())) {
+            let current: RelationTargets | undefined = relationTargets
+            for (const segment of path.split('.')) {
+                const target: ExpandTargetCollection | undefined = current?.[segment]
+                if (!target) break
+                targets.add(target)
+                current = target.relationTargets
+            }
+        }
+        return targets
+    }
+
+    // The only place held target subscriptions are added or removed, so the
+    // map always mirrors the last desired set exactly.
+    const heldTargetSubscriptions = new Map<ExpandTargetCollection, { unsubscribe: () => void }>()
+
+    function releaseHeldTarget(target: ExpandTargetCollection): void {
+        const held = heldTargetSubscriptions.get(target)
+        if (!held) return
+        heldTargetSubscriptions.delete(target)
+        try {
+            held.unsubscribe()
+        } catch (error) {
+            logger.error('Failed to release relation target subscription', {
+                collectionName,
+                error,
+            })
+        }
+    }
+
+    function holdTarget(target: ExpandTargetCollection): void {
+        if (heldTargetSubscriptions.has(target) || !target.subscribeChanges) return
+        try {
+            const held = target.subscribeChanges(() => {}, { includeInitialState: false })
+            heldTargetSubscriptions.set(target, held)
+        } catch (error) {
+            logger.error('Failed to hold relation target subscription', { collectionName, error })
+        }
+    }
+
+    function syncHeldSubscriptions(desired: Set<ExpandTargetCollection>): void {
+        for (const target of [...heldTargetSubscriptions.keys()]) {
+            if (!desired.has(target)) releaseHeldTarget(target)
+        }
+        for (const target of desired) holdTarget(target)
+    }
+
     // Options for the next (re)subscribe: the expand union above, merged
     // with whatever the factory's own subscribeOptions() supplies rather
     // than overridden by it. Calls the factory callback, so it is invoked
@@ -820,6 +873,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 .subscribe('*', handleRealtimeEvent, realtimeSubscribeOptions())
             isSubscribed = true
             subscribedExpand = pendingExpand
+            syncHeldSubscriptions(activeExpandTargets())
             logger.debug('Subscription started', { collectionName })
             // Resolve the promise to notify waiters
             if (subscriptionResolve) {
@@ -843,8 +897,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // Stop PocketBase real-time subscription. Only ever run through
     // enqueueSubscriptionWork so it never overlaps a start/restart.
-    const doStopSubscription = async () => {
+    const doStopSubscription = async (releaseTargets = true) => {
         if (!isSubscribed || !unsubscribeFn) return
+        if (releaseTargets) syncHeldSubscriptions(new Set())
 
         try {
             await unsubscribeFn()
@@ -868,12 +923,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // next first-subscriber start already picks up the current union.
     const doRestartSubscription = async () => {
         if (!isSubscribed) return
-        await doStopSubscription()
+        await doStopSubscription(false)
         await doStartSubscription()
     }
 
     const startSubscription = () => enqueueSubscriptionWork(doStartSubscription)
-    const stopSubscription = () => enqueueSubscriptionWork(doStopSubscription)
+    const stopSubscription = () => enqueueSubscriptionWork(() => doStopSubscription())
     const restartSubscription = () => enqueueSubscriptionWork(doRestartSubscription)
 
     // Record which expand paths a view has subscribed with at least once.
@@ -964,6 +1019,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         relationTargets,
         waitForSubscription,
         isSubscribed: () => isSubscribed,
+        heldRelationTargetCount: () => heldTargetSubscriptions.size,
         expand,
     })
 
