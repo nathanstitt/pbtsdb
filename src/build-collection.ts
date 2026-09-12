@@ -304,7 +304,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // so the view's `expand` field always reaches the shared store.
     function writeExpandedRows(items: RecordType[]): void {
         if (!collection.utils || !collection.isReady()) return
-        writeOwn(() => collection.utils.writeUpsert(items))
+        // Not writeOwn: writeOwn's optimistic-pending exemption is reserved for
+        // writes already staleness-filtered upstream (writeBackAfterPersisted,
+        // isStaleEcho). A view fetch is an unfiltered server read — exactly what
+        // the optimistic-pending arm of shouldDropSyncedWrite must still catch,
+        // since isStaleServerRecord alone compares against the synced store,
+        // which a pending optimistic overlay does not update.
+        collection.utils.writeUpsert(items)
     }
 
     const collectionOptions = queryCollectionOptions({

@@ -74,4 +74,54 @@ describe('TanStack DB assumptions behind per-query expand', () => {
         ).toBe(true)
         expect(live.toArray.map(row => row.id)).toEqual(['1'])
     })
+
+    it('does not write a row a query newly touches once another query already synced it', async () => {
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        let callCount = 0
+
+        const options = queryCollectionOptions<{ id: string; v: number }>({
+            queryClient,
+            queryKey: (opts: LoadSubsetOptions & { marker?: string }) =>
+                opts.marker ? ['pin3', opts.marker] : ['pin3'],
+            queryFn: async () => {
+                callCount++
+                return [{ id: '1', v: callCount }]
+            },
+            getKey: item => item.id,
+            syncMode: 'on-demand',
+        })
+        const innerSync = options.sync.sync
+        options.sync = {
+            ...options.sync,
+            sync: params => {
+                const res = innerSync(params)
+                if (!res || typeof res === 'function' || !res.loadSubset) return res
+                const { loadSubset } = res
+                return {
+                    ...res,
+                    loadSubset: (opts: LoadSubsetOptions) =>
+                        loadSubset({ ...opts, marker: 'view' } as LoadSubsetOptions),
+                }
+            },
+        }
+        const base = createCollection(options)
+        const view = Object.create(base) as typeof base
+        Object.defineProperties(view, {
+            id: { value: 'pin3?view' },
+            subscribeChanges: {
+                value: (...args: Parameters<typeof base.subscribeChanges>) =>
+                    base.subscribeChanges(...args),
+            },
+        })
+
+        const first = createLiveQueryCollection({ query: q => q.from({ v: base }) })
+        await first.preload()
+        const second = createLiveQueryCollection({ query: q => q.from({ v: view }) })
+        await second.preload()
+
+        expect(
+            base._state.syncedData.get('1')?.v,
+            'Assumption 3 broke: query-db-collection now writes rows an earlier query already synced; writeExpandedRows may be redundant'
+        ).toBe(1)
+    })
 })

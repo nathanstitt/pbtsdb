@@ -1,7 +1,7 @@
 import { eq, useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createCollection } from '../src'
 import {
@@ -9,12 +9,14 @@ import {
     clearAuth,
     createTestLogger,
     createTestQueryClient,
+    getTestAuthorId,
+    getTestSlug,
     pb,
     resetLogger,
     setLogger,
     waitForLoadFinish,
 } from './helpers'
-import type { Schema } from './schema'
+import type { Books, Schema } from './schema'
 
 describe('Per-query expand', () => {
     let queryClient: QueryClient
@@ -37,6 +39,7 @@ describe('Per-query expand', () => {
 
     afterEach(() => {
         queryClient.clear()
+        vi.restoreAllMocks()
     })
 
     describe('alwaysExpand', () => {
@@ -251,6 +254,130 @@ describe('Per-query expand', () => {
                 'books',
                 { filter: 'title = "Animal Farm"', expand: 'author' },
             ])
+        }, 15000)
+
+        it('holds an optimistic update against a view fetch racing it', async () => {
+            const authorId = await getTestAuthorId()
+            const seed = (await pb.collection('books').create({
+                title: `View race ${getTestSlug('vr')}`,
+                isbn: getTestSlug('isbn'),
+                genre: 'Fiction',
+                author: authorId,
+                published_date: '',
+                page_count: 1,
+            })) as unknown as Books
+
+            let releaseUpdate: () => void = () => {}
+            const updateGate = new Promise<void>(resolve => {
+                releaseUpdate = resolve
+            })
+
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', {
+                syncMode: 'on-demand',
+                relations: { author: authors },
+                onUpdate: async ({ transaction }) => {
+                    await updateGate
+                    await Promise.all(
+                        transaction.mutations.map(mutation => {
+                            const original = mutation.original as { id: string }
+                            return pb.collection('books').update(original.id, mutation.changes)
+                        })
+                    )
+                    return { refetch: false }
+                },
+            })
+
+            const syncedTitle = () =>
+                (
+                    books as unknown as {
+                        _state: { syncedData: { get: (k: string) => Books | undefined } }
+                    }
+                )._state.syncedData.get(seed.id)?.title
+
+            // The view's fetch is gated too, so its resolution (a stale,
+            // pre-mutation read) is guaranteed to land while the update above is
+            // still pending, exactly as a racing read would.
+            const realGetFullList = pb.collection('books').getFullList.bind(pb.collection('books'))
+            let releaseView: () => void = () => {}
+            const viewGate = new Promise<void>(resolve => {
+                releaseView = resolve
+            })
+            vi.spyOn(pb.collection('books'), 'getFullList').mockImplementation(
+                async (...args: Parameters<typeof realGetFullList>) => {
+                    const options = args[0] as { filter?: string; expand?: string } | undefined
+                    if ((options?.filter ?? '').includes(seed.id) && options?.expand) {
+                        await viewGate
+                        return [{ ...seed, title: 'Stale' }] as unknown as ReturnType<
+                            typeof realGetFullList
+                        >
+                    }
+                    return realGetFullList(...args)
+                }
+            )
+
+            try {
+                const baseQuery = renderHook(() =>
+                    useLiveQuery(q => q.from({ books }).where(({ books }) => eq(books.id, seed.id)))
+                )
+                await waitForLoadFinish(baseQuery.result, 10000)
+                expect(syncedTitle()).toBe(seed.title)
+
+                const tx = books.update(seed.id, draft => {
+                    draft.title = 'Optimistic'
+                })
+                await waitFor(
+                    () => expect(baseQuery.result.current.data[0]?.title).toBe('Optimistic'),
+                    { timeout: 2000 }
+                )
+                expect(tx.state).toBe('persisting')
+
+                // Mount the view while the mutation above is still pending; its
+                // gated fetch resolves below with the stale row.
+                const view = books.expand('author')
+                const viewQuery = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ books: view }).where(({ books }) => eq(books.id, seed.id))
+                    )
+                )
+
+                releaseView()
+                await waitFor(
+                    () => {
+                        const request = queryClient
+                            .getQueryCache()
+                            .findAll({ queryKey: ['books'] })
+                            .find(query => {
+                                const key = query.queryKey[1] as { expand?: string } | undefined
+                                return key?.expand === 'author'
+                            })
+                        expect(request?.state.status).toBe('success')
+                    },
+                    { timeout: 10000 }
+                )
+                viewQuery.unmount()
+
+                // The guard must have dropped the racing stale write while the
+                // real mutation was still pending: the synced store never shows
+                // the view's pre-mutation 'Stale' read.
+                expect(tx.state).toBe('persisting')
+                expect(syncedTitle()).not.toBe('Stale')
+
+                releaseUpdate()
+                await tx.isPersisted.promise
+                await waitFor(() => expect(books.get(seed.id)?.title).toBe('Optimistic'), {
+                    timeout: 10000,
+                })
+                expect(baseQuery.result.current.data[0]?.title).toBe('Optimistic')
+            } finally {
+                releaseView()
+                releaseUpdate()
+                await pb
+                    .collection('books')
+                    .delete(seed.id)
+                    .catch(() => {})
+            }
         }, 15000)
     })
 })
