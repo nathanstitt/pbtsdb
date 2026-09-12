@@ -11,6 +11,8 @@ import {
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
+import type { RelationTargets } from './expand-paths'
+import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -38,14 +40,6 @@ export interface CreateCollectionFactoryOptions {
 }
 
 /**
- * Extended LoadSubsetOptions that includes PocketBase-specific expand parameter.
- * @internal
- */
-type ExtendedLoadSubsetOptions = LoadSubsetOptions & {
-    pbExpand?: string
-}
-
-/**
  * Subscription helpers added to collection instances.
  * @internal
  */
@@ -56,6 +50,8 @@ export interface CollectionSubscriptionHelpers {
     waitForSubscription: (timeout?: number) => Promise<void>
     /** Check if collection has an active subscription */
     isSubscribed: () => boolean
+    /** Relation targets declared through `relations` */
+    relationTargets: RelationTargets | undefined
 }
 
 /**
@@ -89,24 +85,57 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 ): BuiltCollection<ExtractRecordType<Schema, C>> {
     const { pb, queryClient, factoryOptions, collectionName, options } = input
     type RecordType = ExtractRecordType<Schema, C>
-    const expandStores = options?.relations as Record<string, ExpandTargetCollection> | undefined
-    const expandString = options?.alwaysExpand?.length
-        ? [...options.alwaysExpand].sort().join(',')
-        : undefined
+
+    const relationTargets = options?.relations as RelationTargets | undefined
+    const alwaysExpand = normalizePaths(options?.alwaysExpand ?? [])
+    for (const path of alwaysExpand) validateExpandPath(collectionName, relationTargets, path)
+    const syncMode = options?.syncMode ?? 'eager'
+
+    // Paths requested by views that have subscribed at least once. Eager fetches
+    // read it because they cannot receive per-subset options; the realtime
+    // subscription reads it so echoes carry every relation in use.
+    const requestedExpand = new Set<string>()
+
+    type LoadOptions = LoadSubsetOptions & { expand?: readonly string[] }
+    type PbRequest = { filter?: string; sort?: string; limit?: number; expand?: string }
+
+    function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
+        const request: PbRequest = {}
+        const filter = convertToPocketBaseFilter(opts?.where)
+        const sort = convertToPocketBaseSort(opts?.orderBy)
+        const expand = joinPaths((opts as LoadOptions | undefined)?.expand ?? [])
+        if (filter) request.filter = filter
+        if (sort) request.sort = sort
+        if (opts?.limit) request.limit = opts.limit
+        if (expand) request.expand = expand
+        return request
+    }
+
+    function queryKeyFor(opts?: LoadSubsetOptions): [C] | [C, PbRequest] {
+        const request = toRequest(opts)
+        return Object.keys(request).length === 0 ? [collectionName] : [collectionName, request]
+    }
+
+    function activeExpand(request: PbRequest): string | undefined {
+        return joinPaths([
+            ...alwaysExpand,
+            ...splitPaths(request.expand),
+            ...(syncMode === 'eager' ? requestedExpand : []),
+        ])
+    }
 
     const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
     const refetchOnMutation = options?.refetchOnMutation ?? false
 
-    async function upsertExpandedRelation(
+    async function upsertInto(
         key: string,
-        value: object | object[],
-        stores: Record<string, ExpandTargetCollection>
+        target: ExpandTargetCollection,
+        values: object[]
     ): Promise<void> {
-        const targetStore = stores[key]
-        if (!targetStore.utils) return
-        if (!targetStore.isReady()) {
-            if (targetStore.config?.syncMode === 'on-demand') {
-                await targetStore._sync.startSync()
+        if (!target.utils) return
+        if (!target.isReady()) {
+            if (target.config?.syncMode === 'on-demand') {
+                await target._sync.startSync()
             } else {
                 logger.warn(
                     `not syncing ${key} on ${collectionName} because store is not yet ready`
@@ -114,27 +143,41 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return
             }
         }
-        const values = Array.isArray(value) ? value : [value]
-        targetStore.utils.writeUpsert(values)
+        target.utils.writeUpsert(values)
     }
 
-    async function upsertExpandedRelations(items: RecordType[]): Promise<void> {
-        if (!expandStores) return
-        for (const record of items) {
-            const expandData = (
-                record as RecordType & { expand?: Record<string, object | object[]> }
-            ).expand
+    async function upsertExpandedField(
+        key: string,
+        value: object | object[],
+        targets: RelationTargets
+    ): Promise<void> {
+        const target = targets[key]
+        if (!target) {
+            logger.debug('No relation target for expanded field', { collectionName, key })
+            return
+        }
+        const values = Array.isArray(value) ? value : [value]
+        await upsertInto(key, target, values)
+        await upsertExpanded(values, target.relationTargets)
+    }
+
+    async function upsertExpanded(
+        records: object[],
+        targets: RelationTargets | undefined
+    ): Promise<void> {
+        if (!targets) return
+        for (const record of records) {
+            const expandData = (record as { expand?: Record<string, object | object[]> }).expand
             if (!expandData) continue
             for (const [key, value] of Object.entries(expandData)) {
-                await upsertExpandedRelation(key, value, expandStores)
+                await upsertExpandedField(key, value, targets)
             }
         }
     }
 
-    async function fetchItems(loadOptions?: ExtendedLoadSubsetOptions): Promise<RecordType[]> {
-        const filter = convertToPocketBaseFilter(loadOptions?.where)
-        const sort = convertToPocketBaseSort(loadOptions?.orderBy)
-        const limit = loadOptions?.limit
+    async function fetchItems(request: PbRequest): Promise<RecordType[]> {
+        const { filter, sort, limit } = request
+        const expand = activeExpand(request)
 
         if (limit) {
             // Use getList when limit is specified to avoid fetching all records
@@ -142,7 +185,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 filter,
                 sort,
                 skipTotal: true, // Optimize by skipping total count
-                expand: expandString,
+                expand,
             })
             return result.items as unknown as RecordType[]
         }
@@ -150,7 +193,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return (await pb.collection(collectionName).getFullList({
             filter,
             sort,
-            expand: expandString,
+            expand,
         })) as unknown as RecordType[]
     }
 
@@ -209,15 +252,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     async function fetchRecords(
-        loadOptions?: ExtendedLoadSubsetOptions,
-        queryKey?: readonly unknown[]
+        request: PbRequest,
+        queryKey: readonly unknown[]
     ): Promise<RecordType[]> {
         const confirmedMidFlight = new Set<string>()
         inFlightConfirmedIds.add(confirmedMidFlight)
         try {
             let items: RecordType[]
             try {
-                items = await fetchItems(loadOptions)
+                items = await fetchItems(request)
             } catch (error) {
                 if (
                     ignoreAutoCancellation &&
@@ -233,14 +276,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     // the subset's filter excludes). Re-throwing instead would error the
                     // subset and empty/retry it.
                     return withRowsConfirmedMidFlight(
-                        queryClient.getQueryData<RecordType[]>(queryKey ?? [collectionName]) ?? [],
+                        queryClient.getQueryData<RecordType[]>(queryKey) ?? [],
                         confirmedMidFlight
                     )
                 }
                 throw error
             }
 
-            await upsertExpandedRelations(items)
+            await upsertExpanded(items, relationTargets)
 
             return withRowsConfirmedMidFlight(items, confirmedMidFlight)
         } finally {
@@ -251,13 +294,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const collectionOptions = queryCollectionOptions({
         ...options?.collectionOptions,
         queryClient,
-        queryKey: [collectionName],
-        syncMode: options?.syncMode ?? 'eager',
+        queryKey: queryKeyFor,
+        syncMode,
         queryFn: async (ctx): Promise<RecordType[]> => {
-            return fetchRecords(
-                ctx.meta?.loadSubsetOptions as ExtendedLoadSubsetOptions | undefined,
-                ctx.queryKey
-            )
+            const request = (ctx.queryKey[1] as PbRequest | undefined) ?? {}
+            return fetchRecords(request, ctx.queryKey)
         },
         getKey: (item: RecordType) => {
             const record = item as unknown as Record<string, unknown>
@@ -684,9 +725,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Add collectionName and subscription helpers
     Object.assign(collection, {
         collectionName,
+        relationTargets,
         waitForSubscription,
         isSubscribed: () => isSubscribed,
-        // Task 5 replaces this with a real per-query view; until then a view is the
+        // Task 6 replaces this with a real per-query view; until then a view is the
         // base collection, which still fetches only the alwaysExpand paths.
         expand: () => collection,
     })

@@ -43,6 +43,8 @@ export type PbView<
     waitForSubscription: (timeout?: number) => Promise<void>
     /** Whether the collection has an active real-time subscription */
     isSubscribed: () => boolean
+    /** @internal relation targets declared through `relations` */
+    readonly relationTargets: Record<string, unknown> | undefined
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }

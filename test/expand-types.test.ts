@@ -1,4 +1,4 @@
-import { describe, expectTypeOf, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import { createCollection } from '../src'
 import type { ExpandShape } from '../src/types'
 import { createTestQueryClient, pb } from './helpers'
@@ -16,10 +16,14 @@ describe('expand types', () => {
 
     it('rejects alwaysExpand paths not declared in relations', () => {
         const authors = c('authors', {})
-        // @ts-expect-error nope is not a declared relation
-        c('books', { relations: { author: authors }, alwaysExpand: ['nope'] })
-        // @ts-expect-error alwaysExpand without relations
-        c('books', { alwaysExpand: ['author'] })
+        expect(() =>
+            // @ts-expect-error nope is not a declared relation
+            c('books', { relations: { author: authors }, alwaysExpand: ['nope'] })
+        ).toThrow('Cannot expand "nope" on collection "books"')
+        expect(() =>
+            // @ts-expect-error alwaysExpand without relations
+            c('books', { alwaysExpand: ['author'] })
+        ).toThrow('no relations declared')
     })
 
     it('widens expand on a view and rejects undeclared paths', () => {
