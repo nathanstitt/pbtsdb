@@ -2,66 +2,79 @@ import type { Collection } from '@tanstack/db'
 import type { QueryCollectionUtils } from '@tanstack/query-db-collection'
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
-import {
-    buildCollection,
-    type CollectionSubscriptionHelpers,
-    type CreateCollectionFactoryOptions,
-} from './build-collection'
-import type { CreateCollectionOptions, ExtractRecordType, SchemaDeclaration } from './types'
+import { buildCollection, type CreateCollectionFactoryOptions } from './build-collection'
+import type {
+    AlwaysExpandOf,
+    CreateCollectionOptions,
+    ExpandPath,
+    InsertInputOf,
+    PbMeta,
+    RelationsOf,
+    SchemaDeclaration,
+    WithExpandPaths,
+} from './types'
 
 export type { CreateCollectionFactoryOptions } from './build-collection'
 export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './types'
 
 /**
- * Compute the record type with expand property when expand option is configured.
- * @internal
+ * A pbtsdb collection or view: a TanStack DB collection whose rows carry the
+ * expand paths in `Paths`, plus pbtsdb's subscription helpers.
  */
-type WithExpandFromConfig<
+export type PbView<
     Schema extends SchemaDeclaration,
-    C extends keyof Schema,
+    C extends keyof Schema & string,
     Opts,
-> = Opts extends {
-    expand: infer E
+    Paths extends string,
+> = Collection<
+    WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>,
+    string | number,
+    QueryCollectionUtils<
+        WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>,
+        string | number,
+        WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>
+    >,
+    never,
+    InsertInputOf<Schema, C, Opts>
+> & {
+    /** The PocketBase collection name */
+    readonly collectionName: C
+    /** Wait for the real-time subscription to be established (useful in tests) */
+    waitForSubscription: (timeout?: number) => Promise<void>
+    /** Whether the collection has an active real-time subscription */
+    isSubscribed: () => boolean
+    /** @internal phantom; never present at runtime */
+    readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }
-    ? ExtractRecordType<Schema, C> & {
-          expand?: {
-              [K in keyof E]: K extends keyof import('./types').ExtractRelations<Schema, C>
-                  ? import('./types').ExtractRelations<Schema, C>[K] extends Array<infer U>
-                      ? U[]
-                      : import('./types').ExtractRelations<Schema, C>[K]
-                  : never
-          }
-      }
-    : ExtractRecordType<Schema, C>
 
 /**
- * Inferred collection type from config options.
- * @internal
+ * The collection returned by {@link createCollection}: a {@link PbView} over the
+ * `alwaysExpand` paths, plus `expand()` for per-query views.
  */
-type InferCollectionType<
+export type PbCollection<
     Schema extends SchemaDeclaration,
-    C extends keyof Schema,
-    Opts extends CreateCollectionOptions<Schema, C>,
-> = Collection<
-    WithExpandFromConfig<Schema, C, Opts>,
-    string | number,
-    // TUtils - QueryCollectionUtils from TanStack Query DB Collection
-    QueryCollectionUtils<
-        WithExpandFromConfig<Schema, C, Opts>,
-        string | number,
-        WithExpandFromConfig<Schema, C, Opts>
-    >,
-    // TSchema - we don't use StandardSchema validation
-    never,
-    Opts extends {
-        omitOnInsert: infer O extends readonly import('./types').OmittableFields<
-            ExtractRecordType<Schema, C>
-        >[]
-    }
-        ? import('./types').ComputeInsertType<ExtractRecordType<Schema, C>, O>
-        : ExtractRecordType<Schema, C>
-> &
-    CollectionSubscriptionHelpers
+    C extends keyof Schema & string,
+    Opts,
+> = PbView<Schema, C, Opts, AlwaysExpandOf<Opts>> & {
+    /**
+     * A view of this collection whose queries also expand `paths`. Views share
+     * this collection's store, realtime subscription, and mutations; only the
+     * fetch differs. Paths must resolve through `relations`.
+     *
+     * @example
+     * ```ts
+     * const { data } = useLiveQuery(q => q.from({ books: books.expand('author') }))
+     * data[0].expand?.author?.name
+     * ```
+     */
+    expand<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
+        ...paths: P
+    ): PbView<Schema, C, Opts, AlwaysExpandOf<Opts> | P[number]>
+}
+
+type AlwaysExpandCheck<Opts> = {
+    alwaysExpand?: readonly ExpandPath<RelationsOf<Opts>>[]
+}
 
 /**
  * Creates a type-safe TanStack DB collection backed by PocketBase.
@@ -81,18 +94,27 @@ type InferCollectionType<
  * ```
  *
  * @example
- * With auto-expand relations:
+ * With relations expanded on every fetch:
  * ```ts
  * const authorsCollection = createCollection<Schema>(pb, queryClient)('authors', {});
  * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
- *     expand: {
- *         author: authorsCollection  // Always expand, auto-upsert into authorsCollection
- *     }
+ *     relations: { author: authorsCollection },
+ *     alwaysExpand: ['author'],
  * });
  *
- * // Expand is automatic - no .expand() call needed
  * const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
- * // data[0].expand.author is typed and populated
+ * // data[0].expand?.author is typed and populated
+ * ```
+ *
+ * @example
+ * With a per-query expand view:
+ * ```ts
+ * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
+ *     relations: { author: authorsCollection },
+ * });
+ *
+ * const { data } = useLiveQuery((q) => q.from({ books: booksCollection.expand('author') }));
+ * // data[0].expand?.author is typed and populated for this query only
  * ```
  */
 export function createCollection<Schema extends SchemaDeclaration>(
@@ -100,19 +122,16 @@ export function createCollection<Schema extends SchemaDeclaration>(
     queryClient: QueryClient,
     factoryOptions?: CreateCollectionFactoryOptions
 ) {
-    return <
-        C extends keyof Schema & string,
-        Opts extends CreateCollectionOptions<Schema, C> = CreateCollectionOptions<Schema, C>,
-    >(
+    return <C extends keyof Schema & string, const Opts extends CreateCollectionOptions<Schema, C>>(
         collectionName: C,
-        options?: Opts
-    ): InferCollectionType<Schema, C, Opts> => {
+        options?: Opts & AlwaysExpandCheck<Opts>
+    ): PbCollection<Schema, C, Opts> => {
         return buildCollection<Schema, C>({
             pb,
             queryClient,
             factoryOptions,
             collectionName,
             options,
-        }) as unknown as InferCollectionType<Schema, C, Opts>
+        }) as unknown as PbCollection<Schema, C, Opts>
     }
 }

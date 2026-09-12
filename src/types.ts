@@ -180,29 +180,6 @@ export type RelationAsCollection<T> =
 // biome-ignore-end lint/suspicious/noExplicitAny: see above
 
 /**
- * Configuration for per-collection expand - maps relation field names to their target collections.
- * Relations configured here are automatically expanded on every fetch and auto-upserted into target collections.
- *
- * @example
- * ```ts
- * const authorsCollection = createCollection<Schema>(pb, queryClient)('authors');
- * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
- *     expand: {
- *         author: authorsCollection  // Always expand 'author', upsert into authorsCollection
- *     }
- * });
- * ```
- */
-export type ExpandConfig<Schema extends SchemaDeclaration, CollectionName extends keyof Schema> =
-    ExtractRelations<Schema, CollectionName> extends never
-        ? Record<string, never>
-        : Partial<{
-              [K in keyof ExtractRelations<Schema, CollectionName>]: RelationAsCollection<
-                  ExcludeUndefined<ExtractRelations<Schema, CollectionName>[K]>
-              >
-          }>
-
-/**
  * Runtime representation of a collection that can receive upserted expand data.
  * This is the minimal interface needed for the LoaderHost to insert expanded records.
  * @internal
@@ -223,19 +200,116 @@ export interface ExpandTargetCollection {
 }
 
 /**
- * Maps expandable field names to their target collections for runtime use.
- * Used by LoaderHost to insert expanded records into their respective collections.
- * @internal
+ * Maps relation field names to the collections that receive their expanded records.
  */
-export type ExpandableStoresConfig<
-    Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema,
-> =
+export type RelationsConfig<Schema extends SchemaDeclaration, CollectionName extends keyof Schema> =
     ExtractRelations<Schema, CollectionName> extends never
         ? Record<string, never>
         : Partial<{
-              [K in keyof ExtractRelations<Schema, CollectionName>]: ExpandTargetCollection
+              [K in keyof ExtractRelations<Schema, CollectionName>]: RelationAsCollection<
+                  ExcludeUndefined<ExtractRelations<Schema, CollectionName>[K]>
+              >
           }>
+
+/**
+ * Phantom metadata carried on the type of every pbtsdb collection so that nested
+ * expand paths resolve through the target collection's own relations.
+ * @internal
+ */
+export interface PbMeta<Schema extends SchemaDeclaration, C extends keyof Schema, Relations> {
+    schema: Schema
+    name: C
+    relations: Relations
+}
+
+/** @internal */
+export type MetaOf<T> = T extends { readonly __pbtsdb: infer M } ? M : never
+
+/** @internal */
+export type RelationsOf<Opts> = Opts extends { relations: infer R } ? R : never
+
+/** @internal */
+export type AlwaysExpandOf<Opts> = Opts extends {
+    alwaysExpand: readonly (infer A extends string)[]
+}
+    ? A
+    : never
+
+type RelationsOfMeta<M> = M extends { relations: infer R } ? R : never
+
+type Prev = [never, 0, 1, 2, 3, 4, 5]
+
+/**
+ * Every valid PocketBase expand path for a relations map: each declared relation,
+ * and each relation of a pbtsdb target joined with a dot, to six levels.
+ */
+export type ExpandPath<Relations, Depth extends number = 6> = [Depth] extends [0]
+    ? never
+    : Relations extends object
+      ? {
+            [K in keyof Relations & string]:
+                | K
+                | `${K}.${ExpandPath<RelationsOfMeta<MetaOf<Relations[K]>>, Prev[Depth]>}`
+        }[keyof Relations & string]
+      : never
+
+type PathHead<P extends string> = P extends `${infer H}.${string}` ? H : P
+type PathTail<P extends string, H extends string> = P extends `${H}.${infer R}` ? R : never
+
+type RelationRecord<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema,
+    K,
+> = K extends keyof ExtractRelations<Schema, C>
+    ? ExcludeUndefined<ExtractRelations<Schema, C>[K]>
+    : never
+
+type WrapNested<Rel, Nested> = Rel extends (infer U)[] ? (U & Nested)[] : Rel & Nested
+
+type NestedExpand<Target, Tail extends string> = [Tail] extends [never]
+    ? unknown
+    : MetaOf<Target> extends PbMeta<infer S, infer N, infer R>
+      ? { expand?: ExpandShape<S, N & keyof S, R, Tail> }
+      : unknown
+
+/**
+ * The `expand` object type produced by a set of expand paths.
+ */
+export type ExpandShape<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema,
+    Relations,
+    P extends string,
+> = {
+    [H in PathHead<P>]?: WrapNested<
+        RelationRecord<Schema, C, H>,
+        NestedExpand<H extends keyof Relations ? Relations[H] : never, PathTail<P, H>>
+    >
+}
+
+/**
+ * Record type with an `expand` property for the given paths; the plain record when
+ * there are none.
+ */
+export type WithExpandPaths<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema,
+    Relations,
+    P extends string,
+> = [P] extends [never]
+    ? ExtractRecordType<Schema, C>
+    : ExtractRecordType<Schema, C> & { expand?: ExpandShape<Schema, C, Relations, P> }
+
+/** @internal */
+export type InsertInputOf<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema,
+    Opts,
+> = Opts extends {
+    omitOnInsert: infer O extends readonly OmittableFields<ExtractRecordType<Schema, C>>[]
+}
+    ? ComputeInsertType<ExtractRecordType<Schema, C>, O>
+    : ExtractRecordType<Schema, C>
 
 // ============================================================================
 // Configuration Options
@@ -249,26 +323,29 @@ export interface CreateCollectionOptions<
     CollectionName extends keyof Schema,
 > {
     /**
-     * Configure relations to automatically expand on every fetch.
-     * Maps relation field names to their target collections for auto-upsert.
-     *
-     * Expanded records are automatically inserted into their target collections.
+     * Collections that receive the records PocketBase expands for each relation.
+     * Declaring a relation here makes it available to `alwaysExpand` and to
+     * `collection.expand()`.
      *
      * @example
      * ```ts
-     * const authorsCollection = createCollection<Schema>(pb, queryClient)('authors');
-     * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
-     *     expand: {
-     *         author: authorsCollection  // Always expand, auto-upsert into authorsCollection
-     *     }
-     * });
-     *
-     * // Expand is automatic - no .expand() call needed
-     * const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
-     * // data[0].expand.author is typed and populated
+     * const authors = c('authors', {})
+     * const books = c('books', { relations: { author: authors } })
      * ```
      */
-    expand?: ExpandConfig<Schema, CollectionName>
+    relations?: RelationsConfig<Schema, CollectionName>
+
+    /**
+     * Expand paths applied on every fetch. Each path must resolve through
+     * `relations` (and, for nested paths, the target collection's `relations`).
+     *
+     * @example
+     * ```ts
+     * const books = c('books', { relations: { author: authors }, alwaysExpand: ['author'] })
+     * // data[0].expand?.author is typed and populated on every fetch
+     * ```
+     */
+    alwaysExpand?: readonly string[]
 
     /**
      * Fields that can be omitted during insert operations.

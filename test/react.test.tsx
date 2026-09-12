@@ -251,9 +251,8 @@ describe('createReactProvider', () => {
             const books = c('books', {
                 syncMode: 'eager',
                 omitOnInsert: ['created'],
-                expand: {
-                    author: authors,
-                },
+                relations: { author: authors },
+                alwaysExpand: ['author'],
             })
             const collections = {
                 authors,

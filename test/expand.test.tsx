@@ -40,19 +40,18 @@ describe('Per-Collection Expand Feature', () => {
         queryClient.clear()
     })
 
-    describe('createCollection() with expand config', () => {
-        it('should create collection with expand config', () => {
+    describe('createCollection() with alwaysExpand', () => {
+        it('should create collection with alwaysExpand', () => {
             const authorsCollection = createCollection<Schema>(pb, queryClient)('authors', {})
             const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
-                expand: {
-                    author: authorsCollection,
-                },
+                relations: { author: authorsCollection },
+                alwaysExpand: ['author'],
             })
 
             expect(booksCollection).toBeDefined()
         })
 
-        it('should create collection without expand config', () => {
+        it('should create collection without alwaysExpand', () => {
             const booksCollection = createCollection<Schema>(pb, queryClient)('books', {})
             expect(booksCollection).toBeDefined()
         })
@@ -65,9 +64,8 @@ describe('Per-Collection Expand Feature', () => {
             })
             const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
                 syncMode: 'on-demand',
-                expand: {
-                    author: authorsCollection,
-                },
+                relations: { author: authorsCollection },
+                alwaysExpand: ['author'],
             })
 
             const { result } = renderHook(
@@ -108,9 +106,8 @@ describe('Per-Collection Expand Feature', () => {
         it('should type expanded fields correctly', async () => {
             const authorsCollection = createCollection<Schema>(pb, queryClient)('authors', {})
             const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
-                expand: {
-                    author: authorsCollection,
-                },
+                relations: { author: authorsCollection },
+                alwaysExpand: ['author'],
             })
 
             const { result } = renderHook(
@@ -128,8 +125,8 @@ describe('Per-Collection Expand Feature', () => {
         }, 15000)
     })
 
-    describe('Collection without expand config', () => {
-        it('should not include expand when no expand config', async () => {
+    describe('Collection without alwaysExpand', () => {
+        it('should not include expand when no alwaysExpand', async () => {
             const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
                 syncMode: 'eager',
             })
@@ -160,9 +157,8 @@ describe('Per-Collection Expand Feature', () => {
             const authorsStore = c('authors', { syncMode: 'on-demand' })
             const booksStore = c('books', {
                 syncMode: 'eager',
-                expand: {
-                    author: authorsStore,
-                },
+                relations: { author: authorsStore },
+                alwaysExpand: ['author'],
             })
 
             const { Provider, useStore } = createReactProvider({

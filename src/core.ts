@@ -16,17 +16,26 @@ export type {
 } from '@tanstack/db'
 export { BasicIndex, BTreeIndex, createEffect, ReverseIndex, toArray } from '@tanstack/db'
 export type { RecordSubscribeOptions } from 'pocketbase'
-export { type CreateCollectionFactoryOptions, createCollection } from './collection'
+export {
+    type CreateCollectionFactoryOptions,
+    createCollection,
+    type PbCollection,
+    type PbView,
+} from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export type {
     CreateCollectionOptions,
     ExcludeUndefined,
+    ExpandPath,
+    ExpandShape,
     ExtractRecordType,
     ExtractRelations,
     OmittableFields,
     ParseExpandFields,
     RelationAsCollection,
+    RelationsConfig,
     SchemaDeclaration,
     WithExpand,
+    WithExpandPaths,
 } from './types'
 export { newRecordId } from './util'

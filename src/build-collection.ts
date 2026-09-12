@@ -89,8 +89,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 ): BuiltCollection<ExtractRecordType<Schema, C>> {
     const { pb, queryClient, factoryOptions, collectionName, options } = input
     type RecordType = ExtractRecordType<Schema, C>
-    const expandStores = options?.expand as Record<string, ExpandTargetCollection> | undefined
-    const expandString = expandStores ? Object.keys(expandStores).sort().join(',') : undefined
+    const expandStores = options?.relations as Record<string, ExpandTargetCollection> | undefined
+    const expandString = options?.alwaysExpand?.length
+        ? [...options.alwaysExpand].sort().join(',')
+        : undefined
 
     const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
     const refetchOnMutation = options?.refetchOnMutation ?? false
@@ -684,6 +686,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         collectionName,
         waitForSubscription,
         isSubscribed: () => isSubscribed,
+        // Task 5 replaces this with a real per-query view; until then a view is the
+        // base collection, which still fetches only the alwaysExpand paths.
+        expand: () => collection,
     })
 
     return collection as unknown as BuiltCollection<RecordType>
