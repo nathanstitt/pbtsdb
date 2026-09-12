@@ -356,13 +356,15 @@ describe('Per-query expand', () => {
                     },
                     { timeout: 10000 }
                 )
-                viewQuery.unmount()
-
                 // The guard must have dropped the racing stale write while the
                 // real mutation was still pending: the synced store never shows
-                // the view's pre-mutation 'Stale' read.
+                // the view's pre-mutation 'Stale' read, and a user looking
+                // through either the base or the view still sees the optimistic
+                // value held.
                 expect(tx.state).toBe('persisting')
                 expect(syncedTitle()).not.toBe('Stale')
+                expect(baseQuery.result.current.data[0]?.title).toBe('Optimistic')
+                expect(viewQuery.result.current.data[0]?.title).toBe('Optimistic')
 
                 releaseUpdate()
                 await tx.isPersisted.promise
@@ -370,6 +372,8 @@ describe('Per-query expand', () => {
                     timeout: 10000,
                 })
                 expect(baseQuery.result.current.data[0]?.title).toBe('Optimistic')
+                expect(viewQuery.result.current.data[0]?.title).toBe('Optimistic')
+                viewQuery.unmount()
             } finally {
                 releaseView()
                 releaseUpdate()
