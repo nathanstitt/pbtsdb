@@ -23,11 +23,18 @@ All notable changes to this project will be documented in this file.
   `'book.author'` resolve through the target collection's own `relations`.
 - Expand data on a row survives later writes that lack it, as long as the
   relation field is unchanged.
+- Relation targets stay subscribed while a query expands into them, and
+  their realtime changes patch the embedded `expand` copies on parent rows
+  in place (nested paths included). Delete echoes clear the reference and
+  the copy. Unchanged echoes never write.
 
 ### Fixed
 
 - The realtime subscription now requests every expand path in use, so an echo
   no longer wipes `expand` from an always-expanded row.
+- `collectionOptions.gcTime` now reaches the TanStack collection;
+  `queryCollectionOptions` consumed it for the query observer only, so
+  collection garbage collection always used the five-minute default.
 
 ## [0.7.3] - 2026-09-05
 

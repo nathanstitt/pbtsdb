@@ -296,6 +296,9 @@ expanded data for every relation in use, and expanded records in echoes are
 upserted into their targets. This also fixes the existing behaviour where an
 echo into an always-expand collection wiped `expand` from the row.
 
+Relation targets are held live and their echoes patch embedded copies; see
+`2026-09-11-relation-targets-live-design.md`.
+
 ### Mutations
 
 Views inherit `insert`, `update`, and `delete`. There is one optimistic

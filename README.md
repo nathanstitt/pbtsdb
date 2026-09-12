@@ -391,6 +391,16 @@ const { data } = useLiveQuery((q) => q.from({ m: metadata.expand('book.author') 
 Rows fetched through a view keep their `expand` data in the shared store, and the
 realtime subscription requests every relation in use, so echoes keep it populated.
 
+Relation targets stay live too. While a query expands into `tags` (or through
+it into `colors`), those collections keep their realtime subscriptions, and a
+change to a tag or a color updates the embedded copy on affected rows in
+place, so `book.expand?.tags?.[0].name` refreshes without a write to the book.
+While an optimistic mutation is pending on the parent row, TanStack DB shows
+the frozen optimistic snapshot, so a patched `expand` becomes visible once
+that mutation settles. Deleting a related record clears the reference and the
+copy, matching what PocketBase does server-side. Targets are released when
+the last query on the parent unmounts.
+
 #### Collection Options Passthrough
 
 Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:

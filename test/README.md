@@ -73,12 +73,12 @@ Real-time subscription and live data updates.
 ---
 
 #### `expand-views.test.tsx`
-Per-query expand views, nested paths, shared-store coherence, eager refetch, realtime expand.
+Per-query expand views, nested paths, shared-store coherence, eager refetch, realtime expand, held target subscriptions and echo patching.
 
 ---
 
 #### `expand-helpers.test.ts`
-Pure helpers for expand paths and expand merging.
+Pure helpers for expand paths, expand merging, and `patchEmbedded` propagation.
 
 ---
 
