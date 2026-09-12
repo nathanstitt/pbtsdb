@@ -406,18 +406,19 @@ the last query on the parent unmounts.
 Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:
 
 ```typescript
-import { BasicIndex } from 'pbtsdb';
-
 const c = createCollection<MySchema>(pb, queryClient);
 const booksCollection = c('books', {
     collectionOptions: {
-        autoIndex: 'eager',
-        defaultIndexType: BasicIndex,
         gcTime: 60000,       // 1 minute GC
         startSync: true,     // Start syncing immediately
     }
 });
 ```
+
+pbtsdb defaults `autoIndex` to `'eager'` with `defaultIndexType: BTreeIndex`, so
+`orderBy` + `limit` queries page lazily instead of loading the whole subset (and
+TanStack DB does not warn about a missing index). Pass `autoIndex: 'off'` or a
+different `defaultIndexType` in `collectionOptions` to change that per collection.
 
 The following fields are managed by pbtsdb and excluded from `collectionOptions`: `getKey`, `syncMode`, `onInsert`, `onUpdate`, `onDelete`, `schema`.
 

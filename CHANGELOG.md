@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Collections default to `autoIndex: 'eager'` with `defaultIndexType:
+  BTreeIndex`, restoring lazy paging for `orderBy` + `limit` queries after
+  TanStack DB 0.6 turned auto-indexing off. Override per collection through
+  `collectionOptions`.
 - **Breaking:** the `expand` collection option is replaced by `relations` and
   `alwaysExpand`. `expand: { author }` becomes
   `relations: { author }, alwaysExpand: ['author']`.

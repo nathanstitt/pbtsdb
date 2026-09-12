@@ -597,6 +597,38 @@ describe('Per-query expand', () => {
         }, 20000)
     })
 
+    describe('indexes', () => {
+        it('orders with a limit on a view without the missing-index warning', async () => {
+            const warn = vi.spyOn(console, 'warn')
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+            const { result } = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.expand('author') })
+                        .orderBy(({ b }) => b.title)
+                        .limit(2)
+                )
+            )
+            await waitForLoadFinish(result, 10000)
+            expect(result.current.data.length).toBeGreaterThan(0)
+
+            const indexWarnings = warn.mock.calls.filter(call =>
+                String(call[0]).includes('requires an index')
+            )
+            expect(indexWarnings).toEqual([])
+            expect(books.indexes.size).toBeGreaterThan(0)
+        }, 15000)
+
+        it('lets collectionOptions turn auto-indexing off', () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const books = c('books', { collectionOptions: { autoIndex: 'off' } })
+            expect(books.config.autoIndex).toBe('off')
+        })
+    })
+
     describe('relation targets stay live', () => {
         type Internals = {
             heldRelationTargetCount: () => number

@@ -204,6 +204,9 @@ export interface ExpandTargetCollection {
         options: { includeInitialState: false }
     ) => { unsubscribe: () => void }
     subscriberCount?: number
+    status?: string
+    /** Resolves once the collection's first load is ready (eager mode). */
+    preload?: () => Promise<void>
     collectionName?: string
     /** Collections that declared this one in their `relations`. */
     relationDependents?: RelationDependent[]
@@ -578,13 +581,15 @@ export interface CreateCollectionOptions<
      * Fields managed by pbtsdb (`getKey`, `syncMode`, `onInsert`, `onUpdate`,
      * `onDelete`, `schema`) are excluded from the type.
      *
+     * pbtsdb defaults `autoIndex` to `'eager'` with `defaultIndexType: BTreeIndex`
+     * so `orderBy` + `limit` queries page lazily; both can be overridden here.
+     *
      * @example
      * ```ts
      * import { BasicIndex } from 'pbtsdb'
      * const collection = createCollection<Schema>(pb, queryClient)('books', {
      *     collectionOptions: {
-     *         autoIndex: 'eager',
-     *         defaultIndexType: BasicIndex,
+     *         autoIndex: 'off',
      *         gcTime: 60000,
      *     }
      * });

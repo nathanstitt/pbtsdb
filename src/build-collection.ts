@@ -1,4 +1,5 @@
 import {
+    BTreeIndex,
     type Collection,
     createCollection as createTanStackCollection,
     type LoadSubsetOptions,
@@ -145,6 +146,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
     const refetchOnMutation = options?.refetchOnMutation ?? false
 
+    function eagerSyncInFlight(target: ExpandTargetCollection): boolean {
+        return (
+            target.status !== undefined &&
+            target.status !== 'idle' &&
+            target.status !== 'cleaned-up'
+        )
+    }
+
     async function upsertInto(
         key: string,
         target: ExpandTargetCollection,
@@ -154,6 +163,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!target.isReady()) {
             if (target.config?.syncMode === 'on-demand') {
                 await target._sync.startSync()
+            } else if (target.preload && eagerSyncInFlight(target)) {
+                // An eager target whose full load is already running (a held
+                // subscription started it) becomes ready shortly; wait rather
+                // than drop the records or race the load.
+                await target.preload()
             } else {
                 logger.warn(
                     `not syncing ${key} on ${collectionName} because store is not yet ready`
@@ -390,7 +404,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
+    // TanStack DB 0.6 turned auto-indexing off by default; without an index an
+    // orderBy+limit query loads the whole subset instead of paging lazily and
+    // warns on every compile. Restore the earlier default; callers can override
+    // both settings through collectionOptions.
     const queryCollectionConfig = queryCollectionOptions({
+        autoIndex: 'eager',
+        defaultIndexType: BTreeIndex,
         ...options?.collectionOptions,
         queryClient,
         queryKey: queryKeyFor,
