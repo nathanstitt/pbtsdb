@@ -384,4 +384,136 @@ describe('Per-query expand', () => {
             }
         }, 15000)
     })
+
+    describe('shared store coherence', () => {
+        async function createBook(authorId: string) {
+            const book = await pb.collection('books').create({
+                title: `Expand ${Date.now().toString().slice(-8)}`,
+                genre: 'Fiction',
+                isbn: `exp-${Date.now().toString().slice(-8)}`,
+                author: authorId,
+            })
+            return book.id as string
+        }
+
+        it('keeps expand on a row when a plain fetch overwrites it, and drops it when the relation changes', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const allAuthors = await pb.collection('authors').getFullList()
+            const bookId = await createBook(allAuthors[0].id)
+            try {
+                const expanded = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(expanded.result, 10000)
+                expect(expanded.result.current.data[0].expand?.author?.id).toBe(allAuthors[0].id)
+
+                const plain = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .where(({ b }) => eq(b.id, bookId))
+                            .orderBy(({ b }) => b.title)
+                    )
+                )
+                await waitForLoadFinish(plain.result, 10000)
+                expect(expanded.result.current.data[0].expand?.author?.id).toBe(allAuthors[0].id)
+
+                await books.waitForSubscription()
+                await pb.collection('books').update(bookId, { author: allAuthors[1].id })
+                await waitFor(() =>
+                    expect(expanded.result.current.data[0].author).toBe(allAuthors[1].id)
+                )
+                await waitFor(() =>
+                    expect(expanded.result.current.data[0].expand?.author?.id).toBe(
+                        allAuthors[1].id
+                    )
+                )
+            } finally {
+                await pb.collection('books').delete(bookId)
+            }
+        }, 20000)
+
+        it('eager: a view created after load refetches and rows gain expand', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'eager', relations: { author: authors } })
+
+            const plain = renderHook(() => useLiveQuery(q => q.from({ books })))
+            await waitForLoadFinish(plain.result, 10000)
+            expect((plain.result.current.data[0] as { expand?: unknown }).expand).toBeUndefined()
+
+            const expanded = renderHook(() =>
+                useLiveQuery(q => q.from({ books: books.expand('author') }))
+            )
+            await waitForLoadFinish(expanded.result, 10000)
+            await waitFor(() =>
+                expect(expanded.result.current.data[0].expand?.author?.name).toBeTypeOf('string')
+            )
+            await waitFor(() => expect(authors.size).toBeGreaterThan(0))
+        }, 15000)
+
+        it('subscribes realtime with the expand union so an echo keeps expand populated', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const authorId = (await pb.collection('authors').getFirstListItem('')).id
+            const bookId = await createBook(authorId)
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await books.waitForSubscription()
+
+                await pb.collection('books').update(bookId, { title: 'Echoed' })
+                await waitFor(() => expect(result.current.data[0].title).toBe('Echoed'))
+                expect(result.current.data[0].expand?.author?.id).toBe(authorId)
+            } finally {
+                await pb.collection('books').delete(bookId)
+            }
+        }, 20000)
+
+        it('a mutation through a view is visible through the base immediately', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const authorId = (await pb.collection('authors').getFirstListItem('')).id
+            const bookId = await createBook(authorId)
+            try {
+                const view = books.expand('author')
+                const viaView = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: view }).where(({ b }) => eq(b.id, bookId)))
+                )
+                const viaBase = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.id, bookId)))
+                )
+                await waitForLoadFinish(viaView.result, 10000)
+                await waitForLoadFinish(viaBase.result, 10000)
+
+                const viaViewTx = view.update(bookId, draft => {
+                    draft.title = 'Optimistic via view'
+                })
+                await waitFor(() =>
+                    expect(viaBase.result.current.data[0].title).toBe('Optimistic via view')
+                )
+                await viaViewTx.isPersisted.promise
+
+                const viaBaseTx = books.update(bookId, draft => {
+                    draft.title = 'Optimistic via base'
+                })
+                await waitFor(() =>
+                    expect(viaView.result.current.data[0].title).toBe('Optimistic via base')
+                )
+                await viaBaseTx.isPersisted.promise
+            } finally {
+                await pb.collection('books').delete(bookId)
+            }
+        }, 20000)
+    })
 })

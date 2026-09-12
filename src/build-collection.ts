@@ -11,6 +11,7 @@ import {
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
+import { mergeExpand } from './expand-merge'
 import type { RelationTargets } from './expand-paths'
 import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
 import { logger } from './logger'
@@ -509,6 +510,20 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return paths ? { ...opts, expand: paths } : opts
     }
 
+    // Merge a synced insert/update's value with any `expand` already stored for its
+    // key, so a later write that omits `expand` (e.g. a plain fetch of the same row)
+    // does not wipe an entry another query's view put there. Called only for an
+    // insert/update carrying an object value; returns the value unchanged (by
+    // identity) when there is nothing to carry.
+    function mergedWriteValue(op: { type: string; value?: unknown; key?: unknown }): RecordType {
+        const key = syncedWriteKey(op)
+        const existing =
+            key === null
+                ? undefined
+                : (collection._state.syncedData.get(key) as RecordType | undefined)
+        return mergeExpand(op.value as RecordType, existing)
+    }
+
     // Wrap the sync factory so every synced `write` flows through the guard above,
     // and every loadSubset/unloadSubset call is tagged with a view's expand paths.
     // @tanstack/db invokes sync.sync with the write primitives; we hand back the
@@ -518,12 +533,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         ...collectionOptions.sync,
         sync: (params: Parameters<typeof innerSync>[0]) => {
             const guardedWrite: typeof params.write = message => {
+                const op = message as { type: string; value?: unknown; key?: unknown }
+                if (shouldDropSyncedWrite(op)) return
                 if (
-                    shouldDropSyncedWrite(
-                        message as { type: string; value?: unknown; key?: unknown }
-                    )
+                    (op.type === 'insert' || op.type === 'update') &&
+                    op.value &&
+                    typeof op.value === 'object'
                 ) {
-                    return
+                    const merged = mergedWriteValue(op)
+                    if (merged !== op.value) return params.write({ ...message, value: merged })
                 }
                 return params.write(message)
             }
@@ -545,10 +563,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const collection = createTanStackCollection(collectionOptions)
 
     const views = new Map<string, object>()
-
-    function noteViewSubscribed(paths: string[]): void {
-        for (const path of paths) requestedExpand.add(path)
-    }
 
     function createView(paths: string[]): object {
         const view = Object.create(collection)
@@ -723,6 +737,24 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 throw error
             }
         }
+
+        if (event.action !== 'delete') {
+            upsertExpanded([event.record], relationTargets).catch(error =>
+                logger.error('Failed to upsert expanded records from realtime echo', {
+                    collectionName,
+                    error,
+                })
+            )
+        }
+    }
+
+    // The expand paths to request on the next (re)subscribe: alwaysExpand,
+    // every path a view has requested, and whatever the factory's own
+    // subscribeOptions() supplies, merged rather than overridden.
+    function realtimeSubscribeOptions(): RecordSubscribeOptions | undefined {
+        const base = factoryOptions?.subscribeOptions?.()
+        const expand = joinPaths([...alwaysExpand, ...requestedExpand, ...splitPaths(base?.expand)])
+        return expand ? { ...base, expand } : base
     }
 
     // Start PocketBase real-time subscription
@@ -739,7 +771,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         try {
             unsubscribeFn = await pb
                 .collection(collectionName)
-                .subscribe('*', handleRealtimeEvent, factoryOptions?.subscribeOptions?.())
+                .subscribe('*', handleRealtimeEvent, realtimeSubscribeOptions())
             isSubscribed = true
             logger.debug('Subscription started', { collectionName })
             // Resolve the promise to notify waiters
@@ -768,6 +800,41 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 collectionName,
                 error,
             })
+        }
+    }
+
+    // Restart the live subscription, e.g. after the requested expand union grows.
+    const restartSubscription = async () => {
+        await stopSubscription()
+        await startSubscription()
+    }
+
+    // Record which expand paths a view has subscribed with at least once.
+    // Eager collections cannot request per-subset options, so a wider union
+    // needs a refetch to pick up the new expand; a live realtime subscription
+    // needs restarting so its own expand union grows too.
+    function noteViewSubscribed(paths: string[]): void {
+        let grew = false
+        for (const path of paths) {
+            if (requestedExpand.has(path)) continue
+            requestedExpand.add(path)
+            grew = true
+        }
+        if (!grew) return
+        if (
+            syncMode === 'eager' &&
+            collection.status !== 'idle' &&
+            collection.status !== 'cleaned-up'
+        ) {
+            void collection.utils.refetch()
+        }
+        if (isSubscribed) {
+            restartSubscription().catch(error =>
+                logger.error('Failed to restart subscription with wider expand', {
+                    collectionName,
+                    error,
+                })
+            )
         }
     }
 
