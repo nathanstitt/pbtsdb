@@ -737,6 +737,137 @@ describe('Per-query expand', () => {
             }
         }, 30000)
 
+        it('releases held targets when a restart subscribe fails', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const tags = c('tags', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const bookTags = c('book_tags', {
+                syncMode: 'on-demand',
+                relations: { book: books, tag: tags },
+            })
+
+            const realSubscribe = pb
+                .collection('book_tags')
+                .subscribe.bind(pb.collection('book_tags'))
+            let failNext = false
+            const subscribeSpy = vi
+                .spyOn(pb.collection('book_tags'), 'subscribe')
+                .mockImplementation(async (...args) => {
+                    if (failNext) {
+                        failNext = false
+                        throw new Error('subscribe rejected')
+                    }
+                    return realSubscribe(...args)
+                })
+
+            try {
+                const first = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookTags.expand('book') })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                await waitForLoadFinish(first.result, 10000)
+                await bookTags.waitForSubscription(10000)
+                await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
+                expect(internals(bookTags).heldRelationTargetCount()).toBe(1)
+
+                // The union grows, forcing a restart whose subscribe() rejects.
+                failNext = true
+                const second = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookTags.expand('tag') })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+
+                first.unmount()
+                second.unmount()
+
+                // The real stop must still release every held target, even though
+                // the failed restart already cleared isSubscribed/unsubscribeFn.
+                await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(0), {
+                    timeout: 10000,
+                })
+                await waitFor(() => expect(internals(books).subscriberCount).toBe(0), {
+                    timeout: 10000,
+                })
+                expect(internals(tags).subscriberCount).toBe(0)
+                expect(internals(authors).subscriberCount).toBe(0)
+            } finally {
+                subscribeSpy.mockRestore()
+            }
+        }, 30000)
+
+        it('re-holds targets after a throwing unsubscribe', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+            const realSubscribe = pb.collection('books').subscribe.bind(pb.collection('books'))
+            let throwNextUnsubscribe = true
+            const subscribeSpy = vi
+                .spyOn(pb.collection('books'), 'subscribe')
+                .mockImplementation(async (...args) => {
+                    const unsubscribe = await realSubscribe(...args)
+                    return async () => {
+                        await unsubscribe()
+                        if (throwNextUnsubscribe) {
+                            throwNextUnsubscribe = false
+                            throw new Error('unsubscribe failed')
+                        }
+                    }
+                })
+
+            const mount = () =>
+                renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.expand('author') })
+                            .orderBy(({ b }) => b.id)
+                            .limit(1)
+                    )
+                )
+
+            try {
+                const first = mount()
+                await waitForLoadFinish(first.result, 10000)
+                await books.waitForSubscription(10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                expect(internals(books).heldRelationTargetCount()).toBe(1)
+
+                first.unmount()
+                await waitFor(() => expect(books.isSubscribed()).toBe(false), { timeout: 10000 })
+                await waitFor(() => expect(internals(books).heldRelationTargetCount()).toBe(0), {
+                    timeout: 10000,
+                })
+
+                // A failed unsubscribe must not wedge the state machine: the next
+                // first subscriber starts a fresh subscription and re-holds authors.
+                const second = mount()
+                await waitForLoadFinish(second.result, 10000)
+                await books.waitForSubscription(10000)
+                await waitFor(() => expect(internals(books).heldRelationTargetCount()).toBe(1), {
+                    timeout: 10000,
+                })
+                await waitFor(() => expect(internals(authors).subscriberCount).toBe(1), {
+                    timeout: 10000,
+                })
+                second.unmount()
+                await waitFor(() => expect(internals(books).heldRelationTargetCount()).toBe(0), {
+                    timeout: 10000,
+                })
+            } finally {
+                subscribeSpy.mockRestore()
+            }
+        }, 30000)
+
         it('twenty mount/unmount cycles leave nothing held and balanced PocketBase calls', async () => {
             const c = createCollection<Schema>(pb, queryClient)
             const authors = c('authors', { syncMode: 'on-demand' })

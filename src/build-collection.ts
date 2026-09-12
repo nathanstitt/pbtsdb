@@ -969,23 +969,29 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Stop PocketBase real-time subscription. Only ever run through
     // enqueueSubscriptionWork so it never overlaps a start/restart.
     const doStopSubscription = async (releaseTargets = true) => {
-        if (!isSubscribed || !unsubscribeFn) return
+        // Before the guard below: a restart whose subscribe() threw leaves
+        // isSubscribed false with targets still held, and this real stop is
+        // the only remaining chance to release them.
         if (releaseTargets) syncHeldSubscriptions(new Set())
+        if (!isSubscribed || !unsubscribeFn) return
 
         try {
             await unsubscribeFn()
-            unsubscribeFn = null
-            isSubscribed = false
-            subscribedExpand = undefined
-            // Reset promise for next subscription cycle
-            subscriptionPromise = null
-            subscriptionResolve = null
             logger.debug('Subscription stopped', { collectionName })
         } catch (error) {
             logger.debug('Unsubscribe failed (expected if connection closed)', {
                 collectionName,
                 error,
             })
+        } finally {
+            // Unconditional: a throwing unsubscribe must not leave the state
+            // machine believing it is still subscribed after targets were
+            // released, or the next start would return early and never re-hold.
+            unsubscribeFn = null
+            isSubscribed = false
+            subscribedExpand = undefined
+            subscriptionPromise = null
+            subscriptionResolve = null
         }
     }
 
