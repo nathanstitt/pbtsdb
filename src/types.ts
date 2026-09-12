@@ -218,6 +218,8 @@ export interface ExpandTargetCollection {
     config?: {
         syncMode?: 'eager' | 'on-demand'
     }
+    /** Relation targets of this collection, when it was built by pbtsdb. */
+    relationTargets?: Record<string, ExpandTargetCollection>
 }
 
 /**
