@@ -347,9 +347,10 @@ suite, except the pinning test.
     `expand.book.expand.author`; the books and authors collections both
     receive upserts; a realtime update to the metadata row keeps the nested
     expand.
-12. Nested through a target with no `relations` map: the first level is
-    upserted, the second is skipped with a debug log, and the row still
-    carries the nested data.
+12. Nested through a target that declares no `relations`: `expand()` throws
+    naming the second segment, so the path never reaches PocketBase. (The
+    upsert recursion's no-map branch is defensive only; validation makes it
+    unreachable through the public API.)
 13. Type assertions with `expectTypeOf`: `expand.author` is
     `Authors | undefined`; `expand.book.expand.author` on the nested view is
     `Authors | undefined`; `expand.nope`, `books.expand('nope')`,
