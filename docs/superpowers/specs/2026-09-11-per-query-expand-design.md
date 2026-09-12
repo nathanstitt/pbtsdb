@@ -92,33 +92,83 @@ const books = c('books', {
   declares which collection receives upserted records for each relation. Keys
   must be relations of the collection in the Schema. Same constraint the
   removed `expand` option had.
-- `alwaysExpand?: readonly (keyof Opts['relations'])[]` names relations
-  expanded on every fetch. Naming a relation absent from `relations` is a type
-  error and a runtime `Error`. Declaring `alwaysExpand` without `relations` is
-  a type error and a runtime `Error`.
+- `alwaysExpand?: readonly ExpandPath<...>[]` names expand paths applied on
+  every fetch. A path not declared through `relations` (see Expand paths) is
+  a type error and a runtime `Error`. Declaring `alwaysExpand` without
+  `relations` is a type error and a runtime `Error`.
 
 Migration: `expand: { author }` becomes
 `relations: { author }, alwaysExpand: ['author']`.
 
+### Expand paths
+
+An expand path is a PocketBase dot path such as `'author'` or
+`'book.author'`. It is valid when each segment is a key of the `relations`
+map of the collection reached by the previous segments. The first segment
+is looked up in this collection's `relations`; the target collection there
+must itself be a pbtsdb collection, and its own `relations` map resolves the
+next segment. PocketBase caps depth at six levels; pbtsdb inherits that cap
+and does not enforce its own.
+
+Both `alwaysExpand` and `expand()` accept paths. Chained `.expand()` calls
+are not supported: `books.expand('tags').expand('color')` would be ambiguous
+about which collection `color` belongs to, and views are leaves.
+
+```ts
+const authors = c('authors', {})
+const books = c('books', { relations: { author: authors } })
+const metadata = c('book_metadata', { relations: { book: books } })
+
+metadata.expand('book.author') // ok
+metadata.expand('book.nope')   // type error and runtime Error
+```
+
 ### Views
 
-`collection.expand(...fields)`:
+`collection.expand(...paths)`:
 
-- Variadic over `keyof relations`. Top-level relations only.
+- Variadic over valid expand paths of this collection.
 - Return type is the base collection type with `expand` widened to the union
-  of `alwaysExpand` and the requested fields. Insert input type, utils,
+  of `alwaysExpand` and the requested paths. Insert input type, utils,
   `collectionName`, `waitForSubscription`, and `isSubscribed` are unchanged.
-- With no arguments, or only fields already in `alwaysExpand`, returns the
+- With no arguments, or only paths already in `alwaysExpand`, returns the
   base collection itself.
 - Views have no `expand` method in their type. At runtime the method throws
   an `Error` saying a view cannot be expanded further.
-- An undeclared field throws an `Error` naming the collection and the field.
+- An invalid path throws an `Error` naming the collection, the path, and the
+  segment that failed to resolve. Validation walks the path through the
+  relation maps once, at the call site, so a bad path never reaches
+  PocketBase.
 
 ### Row shape
 
-Unchanged. `expand` is an optional object whose entries are optional, because
-PocketBase omits entries for empty relations. Single relations are typed as
-the record, multi relations as an array.
+`expand` is an optional object whose entries are optional, because PocketBase
+omits entries for empty relations. Single relations are typed as the record,
+multi relations as an array. A nested path types the nested record the same
+way, so `'book.author'` yields:
+
+```ts
+expand?: { book?: Books & { expand?: { author?: Authors } } }
+```
+
+Paths sharing a prefix merge: `'book.author'` and `'book.tags'` produce one
+`book` entry whose nested `expand` has both keys.
+
+### Types
+
+Two helpers carry the path work, and both mirror the runtime lookup rather
+than searching the Schema for a collection by record type:
+
+- The collection type pbtsdb returns carries its `relations` map as a
+  phantom type parameter. A path segment resolves by indexing that map, then
+  the map of the target, and so on. A relation whose target is not a pbtsdb
+  collection has no map, so any path continuing through it is a type error,
+  which matches the runtime skip.
+- A template literal type splits a path into head and rest. The result shape
+  groups the requested paths by head, wraps each head's target record (array
+  or single) and recurses on the rests. The same helper serves
+  `alwaysExpand`, `expand()`, and the row type, so field-only and nested
+  paths share one implementation.
 
 ## Runtime architecture
 
@@ -134,23 +184,35 @@ move, not a rewrite.
 
 `createCollection` builds one query collection per PocketBase collection, as
 today. Its `queryFn` reads the request shape from `ctx.queryKey` (see Query
-keys), unions the request's `expand` with `alwaysExpand`, and passes the
-joined string to `getList` or `getFullList`. Expanded records are upserted
-into their targets from the `relations` map, as today.
+keys), unions the request's `expand` paths with `alwaysExpand`, and passes
+the joined string to `getList` or `getFullList`. PocketBase accepts dot
+paths in that string as-is.
+
+Each built collection exposes its `relations` map on the instance (an
+internal property alongside `collectionName`). Upserting expanded records
+recurses along it: for each entry in a record's `expand`, the record or
+records are upserted into the target named by this collection's map, and
+then the same routine runs on those records against the target's own map.
+A target that has no map, or no entry for the next segment, ends the
+recursion for that branch with a debug log; the parent record is still
+upserted with its nested `expand` intact.
 
 ### Views
 
-`books.expand(...fields)` normalizes the fields (merge with `alwaysExpand`,
-dedupe, sort). If nothing is added beyond `alwaysExpand`, it returns the base.
-Otherwise it returns a cached object, keyed by the normalized fields in a
+`books.expand(...paths)` validates each path against the relation maps,
+then normalizes the list (merge with `alwaysExpand`, dedupe, sort). A path
+implied by a longer one (`'book'` next to `'book.author'`) is kept; PocketBase
+handles the overlap. If nothing is added beyond `alwaysExpand`, it returns
+the base.
+Otherwise it returns a cached object, keyed by the normalized paths in a
 `Map` held in the base's closure, created with `Object.create(base)` and
 owning exactly two properties:
 
-- `id`: `${collectionName}?expand=${fields.join(',')}`, so a base and a view
+- `id`: `${collectionName}?expand=${paths.join(',')}`, so a base and a view
   can appear in the same query. TanStack keys live-query sources by `id`.
 - `subscribeChanges`: calls the base's `subscribeChanges`, records the
   returned subscription in a module-level `WeakMap<Subscription, string[]>`
-  against the view's fields, applies the eager handling below, and returns
+  against the view's paths, applies the eager handling below, and returns
   the subscription.
 
 Everything else (store, optimistic layer, realtime, utils, mutations) is
@@ -165,7 +227,7 @@ The cache never evicts. TanStack lets a `cleaned-up` collection return to
 pbtsdb wraps the sync config's `loadSubset` and `unloadSubset` (the existing
 `collectionOptions.sync` wrapper already intercepts `sync`). Each wrapper
 looks up `options.subscription` in the `WeakMap`. On a hit it forwards a
-shallow copy of the options with `expand` set to the view's fields. On a miss
+shallow copy of the options with `expand` set to the view's paths. On a miss
 it forwards the options untouched. The subscription keeps its own original
 options object, so its unload bookkeeping is unaffected. Because
 `unloadSubset` applies the same lookup, load and unload produce the same key.
@@ -173,9 +235,9 @@ options object, so its unload bookkeeping is unaffected. Because
 ### Eager fetches
 
 TanStack bypasses `loadSubset` in eager mode, so a view's `subscribeChanges`
-adds its fields to a per-collection "eager expand set" that the eager
+adds its paths to a per-collection "eager expand set" that the eager
 `queryFn` reads. If the collection's sync has not started, the initial full
-fetch includes the fields. If it has, the view calls `utils.refetch()` and
+fetch includes the paths. If it has, the view calls `utils.refetch()` and
 rows gain their expand data when the refetch lands. The set only grows. Eager
 mode is one fetch for the whole table, so expand there is per collection by
 nature.
@@ -213,6 +275,8 @@ gains a merge step for synced inserts and updates:
   copy of the incoming row. Otherwise it is dropped, because it would
   describe the wrong record.
 - An incoming `expand` entry always wins over the stored one.
+- Nested `expand` objects ride inside their top-level entry and are carried
+  or dropped with it; the rule is not applied recursively.
 - The incoming object is never mutated.
 
 This covers plain subset fetches, mutation write-backs, and realtime echoes.
@@ -220,7 +284,7 @@ This covers plain subset fetches, mutation write-backs, and realtime echoes.
 ### Realtime
 
 One subscription per collection, as today. Its `expand` option is the union
-of `alwaysExpand` and the fields of every view created so far, merged with
+of `alwaysExpand` and the paths of every view created so far, merged with
 any `expand` from the factory's `subscribeOptions` (split on commas, union,
 sort, rejoin; other keys pass through). If a view is created while the
 subscription is live and widens the union, the subscription is stopped and
@@ -266,7 +330,7 @@ suite, except the pinning test.
    collection receives the upsert, for both sync modes.
 2. Same view requested twice returns the same instance. Different field
    order or duplicates return the same instance.
-3. `expand()` with only `alwaysExpand` fields returns the base.
+3. `expand()` with only `alwaysExpand` paths returns the base.
 4. A live query on the base sees rows fetched through a view, and those rows
    carry `expand` in the shared store.
 5. Base and view of the same collection in one query, joined, both resolve.
@@ -277,10 +341,21 @@ suite, except the pinning test.
 8. A realtime update to a book keeps `expand.author` populated.
 9. A mutation issued through a view is visible optimistically through the
    base, and vice versa.
-10. Runtime throws for an undeclared field and for expanding a view.
-11. Type assertions with `expectTypeOf`: `expand.author` is
-    `Authors | undefined`; `expand.nope`, `books.expand('nope')`, and
-    `alwaysExpand: ['nope']` are type errors.
+10. Runtime throws for an undeclared field, for a nested path whose second
+    segment is undeclared, and for expanding a view.
+11. Nested: `metadata.expand('book.author')` rows carry
+    `expand.book.expand.author`; the books and authors collections both
+    receive upserts; a realtime update to the metadata row keeps the nested
+    expand.
+12. Nested through a target with no `relations` map: the first level is
+    upserted, the second is skipped with a debug log, and the row still
+    carries the nested data.
+13. Type assertions with `expectTypeOf`: `expand.author` is
+    `Authors | undefined`; `expand.book.expand.author` on the nested view is
+    `Authors | undefined`; `expand.nope`, `books.expand('nope')`,
+    `metadata.expand('book.nope')`, and `alwaysExpand: ['nope']` are type
+    errors; `'book.author'` and `'book.tags'` together yield one `book` entry
+    with both nested keys.
 
 `test/tanstack-internals.test.ts` (pinning test, no PocketBase): builds a
 plain TanStack query collection and a view over it, runs a live query through
@@ -297,14 +372,15 @@ Existing expand.test.tsx and README examples migrate from `expand:` to
 - README: the options list under `createCollection()` swaps `expand` for
   `relations` and `alwaysExpand`; the auto-expand examples are rewritten; a
   new "Per-query expand" subsection follows them showing
-  `books.expand('tags')`. llms.txt gets the same treatment.
+  `books.expand('tags')` and a nested path. llms.txt gets the same
+  treatment.
 - JSDoc on `CreateCollectionOptions` and on `expand()` carries the examples.
 - Version 0.8.0 (breaking: `expand` option removed). CHANGELOG names the
   removal, the migration, the TanStack upgrade, and the realtime fix.
 
 ## Out of scope
 
-- Nested expand paths such as `'author.org'`.
+- Chained `.expand()` on views.
 - Back-relations such as `'book_tags_via_book'`. Untested here, not blocked.
 - Shrinking the eager expand set or the realtime expand union when views go
   idle.
