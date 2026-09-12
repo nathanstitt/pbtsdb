@@ -66,7 +66,8 @@ once at creation, never per subscribe or per view, because the relation is a
 static fact. `parent` exposes one internal method:
 
 ```ts
-applyRelatedChange(field: string, action: 'create' | 'update' | 'delete',
+applyRelatedChange(fields: readonly string[],
+                   action: 'create' | 'update' | 'delete',
                    record: { id: string }, visited: Set<string>): void
 ```
 
@@ -77,13 +78,20 @@ applied (a delete echo whose record was already gone counts too: embedded
 copies may still exist), it calls each dependent:
 
 ```ts
-for (const { field, parent } of relationDependents)
-    parent.applyRelatedChange(field, event.action, event.record, new Set())
+for (const [parent, fields] of fieldsByParent(relationDependents))
+    parent.applyRelatedChange(fields, event.action, event.record, new Set())
 ```
 
 wrapped so a throw logs with `logger.error` and neither escapes the handler
 nor prevents the target's own write. Create, update, and delete all go
 through; a create that nothing embeds yet is a no-op scan.
+
+Dependents are grouped by parent first, registration order preserved for both
+the parents and each parent's fields, so a collection that declares two
+relations onto the same target (`author` and `editor` both pointing at
+`authors`) receives both fields in one call. This is required by the per-row
+`visited` key: a second call for the same row would be skipped and the second
+field would stay stale forever.
 
 ### Patching
 
@@ -101,10 +109,16 @@ Create and update:
 - Single relation: if the embedded copy's `id` differs, return `undefined`.
   Otherwise the new entry is `mergeExpand(record, embedded)`, so a nested
   `expand` the echo lacks is carried from the old copy when its relation
-  field is unchanged.
+  field is unchanged, and a nested copy the old row holds at a newer
+  `updated` is kept.
 - Multi relation: find the element by `id`; if none, return `undefined`.
   Otherwise replace that element with `mergeExpand(record, element)`,
   preserving order.
+- `mergeExpand` also protects a landed patch from a stale write: when the
+  incoming and stored rows both hold an entry for the same relation and the
+  same record id, and both carry a string `updated`, the newer one is kept.
+  This is what stops a parent fetch that was already in flight when the echo
+  arrived from reverting the patched copy on arrival.
 - If the new entry is `deepEquals` (from `@tanstack/db`) to the existing
   one, return `undefined`. This is what makes redelivered or unchanged echoes
   produce no write.
@@ -132,10 +146,12 @@ staleness arm, and lands as a no-op or a confirmation:
 
 1. If the parent's store is not ready, return.
 2. Scan `_state.syncedData`; for each row not in `visited` (keyed
-   `${collectionName}:${id}`), call `patchEmbedded`; collect patched rows and
-   add their keys to `visited`. For an update, the scan can skip rows with
-   no `expand`; for a delete it must look at every row, because a reference
-   without a copy still has to be cleared.
+   `${collectionName}:${id}`), call `patchEmbedded` once per field in
+   `fields`, feeding each result into the next, and collect the row if any
+   field changed; add its key to `visited`. Handling every field in one call
+   is what keeps the per-row key valid. For an update, the scan can skip
+   rows with no `expand`; for a delete it must look at every row, because a
+   reference without a copy still has to be cleared.
 3. If none, return.
 4. Write them in one `writeOwn(() => utils.writeUpsert(patched))`. The
    authoritative path is right: the row is the current synced row with only
@@ -204,8 +220,12 @@ bumps. Internal counters needed to observe behaviour are exposed as
    the unit tests above. The integration check is the storm side: deleting
    an author no row references produces zero parent writes.
 5. A pending optimistic update on a book (held with a controlled deferred)
-   survives an author echo: the view shows the optimistic title and the
-   patched author name.
+   survives an author echo: the patch lands in `syncedData` mid-flight
+   without disturbing the pending title, and once the mutation settles the
+   view shows both the optimistic title and the patched author name.
+   (TanStack DB shows the frozen optimistic snapshot for a key with a
+   pending mutation, so the patch cannot be visible through the live query
+   mid-flight.)
 6. Union growth: with a `book_tags` base query live, mounting
    `book_tags.expand('tag')` grows the union through the restart path and
    starts the tags subscription.

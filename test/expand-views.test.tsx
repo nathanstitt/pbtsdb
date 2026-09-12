@@ -600,6 +600,7 @@ describe('Per-query expand', () => {
     describe('relation targets stay live', () => {
         type Internals = {
             heldRelationTargetCount: () => number
+            relationDependents: readonly { field: string; parent: unknown }[]
             subscriberCount: number
             status: string
         }
@@ -957,6 +958,8 @@ describe('Per-query expand', () => {
             expect(internals(bookTags).heldRelationTargetCount()).toBe(0)
             expect(internals(books).subscriberCount).toBe(0)
             expect(internals(tags).subscriberCount).toBe(0)
+            // Registration happens once when bookTags is created, never per view.
+            expect(internals(books).relationDependents).toHaveLength(1)
         })
 
         function patchBatchesFor(spy: { mock: { calls: unknown[][] } }, id: string): unknown[][] {
@@ -1161,15 +1164,15 @@ describe('Per-query expand', () => {
                 const apply = (
                     books as unknown as {
                         applyRelatedChange: (
-                            field: string,
+                            fields: readonly string[],
                             action: 'update',
                             record: Record<string, unknown> & { id: string },
                             visited: Set<string>
                         ) => void
                     }
                 ).applyRelatedChange
-                apply('author', 'update', { ...record, name: 'Twice' }, new Set())
-                apply('author', 'update', { ...record, name: 'Twice' }, new Set())
+                apply(['author'], 'update', { ...record, name: 'Twice' }, new Set())
+                apply(['author'], 'update', { ...record, name: 'Twice' }, new Set())
                 expect(booksWrites).toHaveBeenCalledTimes(1)
                 await waitFor(() =>
                     expect(result.current.data[0]?.expand?.author?.name).toBe('Twice')
@@ -1185,7 +1188,7 @@ describe('Per-query expand', () => {
             const c = createCollection<Schema>(pb, queryClient)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
-            const { result } = renderHook(() =>
+            const query = renderHook(() =>
                 useLiveQuery(q =>
                     q
                         .from({ b: books.expand('author') })
@@ -1193,15 +1196,19 @@ describe('Per-query expand', () => {
                         .limit(2)
                 )
             )
-            await waitForLoadFinish(result, 10000)
-            await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
-            await authors.waitForSubscription(10000)
+            try {
+                await waitForLoadFinish(query.result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
 
-            const booksWrites = vi.spyOn(books.utils, 'writeUpsert')
-            const authorsDeletes = vi.spyOn(authors.utils, 'writeDelete')
-            await pb.collection('authors').delete(authorId)
-            await waitFor(() => expect(authorsDeletes).toHaveBeenCalled(), { timeout: 10000 })
-            expect(booksWrites).not.toHaveBeenCalled()
+                const booksWrites = vi.spyOn(books.utils, 'writeUpsert')
+                const authorsDeletes = vi.spyOn(authors.utils, 'writeDelete')
+                await pb.collection('authors').delete(authorId)
+                await waitFor(() => expect(authorsDeletes).toHaveBeenCalled(), { timeout: 10000 })
+                expect(booksWrites).not.toHaveBeenCalled()
+            } finally {
+                query.unmount()
+            }
         }, 20000)
 
         it('keeps a pending optimistic update while the author is patched', async () => {

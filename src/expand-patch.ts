@@ -1,7 +1,7 @@
 import { deepEquals } from '@tanstack/db'
 import { mergeExpand } from './expand-merge'
 import { logger } from './logger'
-import type { ExpandTargetCollection } from './types'
+import type { ExpandTargetCollection, RelationDependent } from './types'
 
 export type RelatedAction = 'create' | 'update' | 'delete'
 
@@ -75,6 +75,22 @@ export function patchEmbedded<T extends object>(
     return patched as T | undefined
 }
 
+// Dependents grouped by parent, registration order preserved both for the
+// parents and for each parent's fields. One parent may declare several
+// relations onto the same target; all of its fields must reach it in a single
+// call, because `visited` is keyed per row and the first call marks the row.
+function fieldsByParent(
+    dependents: readonly RelationDependent[]
+): Map<ExpandTargetCollection, string[]> {
+    const grouped = new Map<ExpandTargetCollection, string[]>()
+    for (const { field, parent } of dependents) {
+        const fields = grouped.get(parent)
+        if (fields) fields.push(field)
+        else grouped.set(parent, [field])
+    }
+    return grouped
+}
+
 /**
  * Fan a relation target's change out to every collection that embeds it.
  * Each dependent patches its own rows and recurses with the same `visited`
@@ -87,14 +103,14 @@ export function propagateRelatedChange(
     record: Record<string, unknown> & { id: string },
     visited: Set<string>
 ): void {
-    for (const { field, parent } of source.relationDependents ?? []) {
+    for (const [parent, fields] of fieldsByParent(source.relationDependents ?? [])) {
         try {
-            parent.applyRelatedChange?.(field, action, record, visited)
+            parent.applyRelatedChange?.(fields, action, record, visited)
         } catch (error) {
             logger.error('Failed to patch a relation dependent', {
                 collectionName: source.collectionName,
                 dependent: parent.collectionName,
-                field,
+                fields,
                 error,
             })
         }

@@ -65,7 +65,7 @@ export interface CollectionSubscriptionHelpers {
     relationDependents: RelationDependent[]
     /** Patch this collection's rows for a change in a relation target */
     applyRelatedChange: (
-        field: string,
+        fields: readonly string[],
         action: RelatedAction,
         record: Record<string, unknown> & { id: string },
         visited: Set<string>
@@ -329,12 +329,25 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         collection.utils.writeUpsert(items)
     }
 
-    // Patch this collection's rows for a change in a relation target. Runs
-    // synchronously from the target's realtime handler; writes go through the
-    // authoritative path because the rows are the current synced rows with only
-    // `expand` (or, on delete, the reference) changed.
+    // Every field this collection declares onto the changed target is patched in
+    // one pass, so a collection with two relations to the same target (author and
+    // editor both pointing at authors) updates both embedded copies per echo.
+    function patchRowFields(
+        row: RecordType,
+        fields: readonly string[],
+        action: RelatedAction,
+        record: Record<string, unknown> & { id: string }
+    ): RecordType | undefined {
+        let current: RecordType | undefined
+        for (const field of fields) {
+            const next = patchEmbedded(current ?? row, field, action, record)
+            if (next) current = next
+        }
+        return current
+    }
+
     function patchedRows(
-        field: string,
+        fields: readonly string[],
         action: RelatedAction,
         record: Record<string, unknown> & { id: string },
         visited: Set<string>
@@ -345,7 +358,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (typeof id !== 'string') continue
             const key = `${collectionName}:${id}`
             if (visited.has(key)) continue
-            const next = patchEmbedded(row as RecordType, field, action, record)
+            const next = patchRowFields(row as RecordType, fields, action, record)
             if (!next) continue
             visited.add(key)
             patched.push(next)
@@ -353,14 +366,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return patched
     }
 
+    // Patch this collection's rows for a change in a relation target. Runs
+    // synchronously from the target's realtime handler; writes go through the
+    // authoritative path because the rows are the current synced rows with only
+    // `expand` (or, on delete, the reference) changed.
     function applyRelatedChange(
-        field: string,
+        fields: readonly string[],
         action: RelatedAction,
         record: Record<string, unknown> & { id: string },
         visited: Set<string>
     ): void {
         if (!collection.utils || !collection.isReady()) return
-        const patched = patchedRows(field, action, record, visited)
+        const patched = patchedRows(fields, action, record, visited)
         if (patched.length === 0) return
         writeOwn(() => collection.utils.writeUpsert(patched))
         for (const row of patched) {

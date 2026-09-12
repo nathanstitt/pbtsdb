@@ -207,9 +207,9 @@ export interface ExpandTargetCollection {
     collectionName?: string
     /** Collections that declared this one in their `relations`. */
     relationDependents?: RelationDependent[]
-    /** Patch this collection's rows for a change in the relation target under `field`. */
+    /** Patch this collection's rows for a change in the relation target under `fields`. */
     applyRelatedChange?: (
-        field: string,
+        fields: readonly string[],
         action: RelatedAction,
         record: Record<string, unknown> & { id: string },
         visited: Set<string>

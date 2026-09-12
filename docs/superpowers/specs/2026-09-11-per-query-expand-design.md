@@ -276,7 +276,13 @@ gains a merge step for synced inserts and updates:
   element-wise in order for arrays), the entry is carried over onto a shallow
   copy of the incoming row. Otherwise it is dropped, because it would
   describe the wrong record.
-- An incoming `expand` entry always wins over the stored one.
+- An incoming `expand` entry wins over the stored one, except when both
+  describe the same record (same `id`; element-wise by `id` for arrays) and
+  both carry a string `updated` that is newer on the stored side — then the
+  stored entry is kept. An in-flight parent fetch issued before a relation
+  target's echo can otherwise resolve after it and revert the patch with its
+  older embedded copy, with no later parent write to heal it. On a tie, or
+  when either entry lacks `updated`, the incoming entry wins.
 - Nested `expand` objects ride inside their top-level entry and are carried
   or dropped with it; the rule is not applied recursively.
 - The incoming object is never mutated.

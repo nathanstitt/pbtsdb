@@ -51,7 +51,7 @@ export type PbView<
     readonly relationDependents: readonly { field: string; parent: unknown }[]
     /** @internal patch rows for a relation target change; used by the target's realtime handler */
     readonly applyRelatedChange: (
-        field: string,
+        fields: readonly string[],
         action: 'create' | 'update' | 'delete',
         record: { id: string },
         visited: Set<string>
