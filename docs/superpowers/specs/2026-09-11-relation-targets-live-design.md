@@ -94,27 +94,48 @@ patchEmbedded<T extends object>(row: T, field: string,
     action: 'create' | 'update' | 'delete', record: { id: string }): T | undefined
 ```
 
+Create and update:
+
 - If `row.expand?.[field]` is absent, return `undefined`: rows that never
   embedded the relation are untouched.
 - Single relation: if the embedded copy's `id` differs, return `undefined`.
-  On delete, the new entry is absent. Otherwise the new entry is
-  `mergeExpand(record, embedded)`, so a nested `expand` the echo lacks is
-  carried from the old copy when its relation field is unchanged.
-- Multi relation: find the element by `id`; if none, return `undefined`. On
-  delete, filter it out. Otherwise replace that element with
-  `mergeExpand(record, element)`, preserving order.
+  Otherwise the new entry is `mergeExpand(record, embedded)`, so a nested
+  `expand` the echo lacks is carried from the old copy when its relation
+  field is unchanged.
+- Multi relation: find the element by `id`; if none, return `undefined`.
+  Otherwise replace that element with `mergeExpand(record, element)`,
+  preserving order.
 - If the new entry is `deepEquals` (from `@tanstack/db`) to the existing
   one, return `undefined`. This is what makes redelivered or unchanged echoes
   produce no write.
-- Otherwise return a new row with a new `expand` object (the key deleted
-  when the entry is absent). Never mutate `row`.
+- Otherwise return a new row with a new `expand` object. Never mutate `row`.
+
+Delete removes the reference as well as the copy, mirroring what PocketBase
+does server-side (it clears the deleted id out of every optional relation
+field that references it, then sends an update echo for the parent; it
+refuses the delete when a required relation references the record without
+cascade). The local patch puts the client in the state the server is about
+to confirm; the later parent echo carries a newer `updated`, passes the
+staleness arm, and lands as a no-op or a confirmation:
+
+- If `row[field]` does not reference `record.id` (string equality, or array
+  includes), return `undefined`. This applies whether or not the row has an
+  embedded copy.
+- Single relation: set `row[field]` to `''`, PocketBase's empty value for a
+  single relation, and delete `expand[field]` if present.
+- Multi relation: filter `record.id` out of `row[field]`, and out of
+  `expand[field]` if present, preserving order.
+- Return a new row (and a new `expand` object when it changed). Never mutate
+  `row`.
 
 `applyRelatedChange` on the parent:
 
 1. If the parent's store is not ready, return.
 2. Scan `_state.syncedData`; for each row not in `visited` (keyed
    `${collectionName}:${id}`), call `patchEmbedded`; collect patched rows and
-   add their keys to `visited`.
+   add their keys to `visited`. For an update, the scan can skip rows with
+   no `expand`; for a delete it must look at every row, because a reference
+   without a copy still has to be cleared.
 3. If none, return.
 4. Write them in one `writeOwn(() => utils.writeUpsert(patched))`. The
    authoritative path is right: the row is the current synced row with only
@@ -154,12 +175,18 @@ bumps. Internal counters needed to observe behaviour are exposed as
 
 `test/expand-helpers.test.ts` (pure, no server), for `patchEmbedded`:
 
-- single: replace; remove on delete; id mismatch returns `undefined`; absent
-  `expand` returns `undefined`; unchanged record returns `undefined`.
-- multi: replace in place preserving order; filter on delete; id not present
-  returns `undefined`.
-- nested `expand` carried across from the old copy.
-- input row never mutated.
+- update, single: replace; id mismatch returns `undefined`; absent `expand`
+  returns `undefined`; unchanged record returns `undefined`.
+- update, multi: replace in place preserving order; id not present returns
+  `undefined`.
+- delete, single: `row[field]` becomes `''` and `expand[field]` is removed;
+  a row referencing the id with no `expand` still gets its field cleared; a
+  row not referencing the id returns `undefined`.
+- delete, multi: the id is filtered out of both `row[field]` and
+  `expand[field]`, order preserved; a row whose array lacks the id returns
+  `undefined`.
+- nested `expand` carried across from the old copy on update.
+- input row never mutated, in every branch.
 
 `test/expand-views.test.tsx`, new block `relation targets stay live`:
 
@@ -171,7 +198,11 @@ bumps. Internal counters needed to observe behaviour are exposed as
 3. Nested: `book_metadata.expand('book.author')` sees
    `expand.book.expand.author.name` change after an author update.
 4. A book row fetched through the plain base (never embedded `author`) is
-   untouched by an author echo, checked in the synced store.
+   untouched by an author update echo, checked in the synced store.
+4b. Every relation in the test schema is required, so PocketBase refuses to
+   delete a referenced author, book, or tag; the delete branch is covered by
+   the unit tests above. The integration check is the storm side: deleting
+   an author no row references produces zero parent writes.
 5. A pending optimistic update on a book (held with a controlled deferred)
    survives an author echo: the view shows the optimistic title and the
    patched author name.
