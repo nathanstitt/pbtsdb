@@ -47,6 +47,15 @@ export type PbView<
     readonly relationTargets: Record<string, unknown> | undefined
     /** @internal number of relation targets currently held live */
     readonly heldRelationTargetCount: () => number
+    /** @internal collections that declared this one in their `relations` */
+    readonly relationDependents: readonly { field: string; parent: unknown }[]
+    /** @internal patch rows for a relation target change; used by the target's realtime handler */
+    readonly applyRelatedChange: (
+        field: string,
+        action: 'create' | 'update' | 'delete',
+        record: { id: string },
+        visited: Set<string>
+    ) => void
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }

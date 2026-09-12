@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mergeExpand } from '../src/expand-merge'
-import { patchEmbedded } from '../src/expand-patch'
+import { patchEmbedded, propagateRelatedChange } from '../src/expand-patch'
 import {
     joinPaths,
     normalizePaths,
@@ -8,6 +8,7 @@ import {
     splitPaths,
     validateExpandPath,
 } from '../src/expand-paths'
+import type { ExpandTargetCollection, RelationDependent } from '../src/types'
 
 function target(relationTargets?: RelationTargets) {
     return {
@@ -246,5 +247,79 @@ describe('patchEmbedded', () => {
             const row = { id: 'b1', tags: ['t1'], expand: { tags: [t1] } }
             expect(patchEmbedded(row, 'tags', 'delete', { id: 't9' })).toBeUndefined()
         })
+    })
+})
+
+describe('propagateRelatedChange', () => {
+    function fakeCollection(name: string) {
+        const calls: Array<{ field: string; id: string }> = []
+        const target: ExpandTargetCollection & { calls: typeof calls } = {
+            calls,
+            collectionName: name,
+            isReady: () => true,
+            _sync: { startSync: async () => undefined },
+            relationDependents: [],
+            applyRelatedChange: (field, action, record, visited) => {
+                const key = `${name}:${record.id}`
+                if (visited.has(key)) return
+                visited.add(key)
+                calls.push({ field, id: record.id })
+                // a patched row of this collection fans out to its own dependents
+                propagateRelatedChange(target, action, { id: `${name}-row` }, visited)
+            },
+        }
+        return target
+    }
+
+    it('fans out to every dependent once and terminates on a cycle', () => {
+        const a = fakeCollection('a')
+        const b = fakeCollection('b')
+        const deps = (parent: ExpandTargetCollection, field: string): RelationDependent => ({
+            field,
+            parent,
+        })
+        a.relationDependents = [deps(b, 'a')]
+        b.relationDependents = [deps(a, 'b')]
+
+        propagateRelatedChange(a, 'update', { id: 'x' }, new Set())
+
+        // x -> b patches (b:x) -> b-row -> a patches (a:b-row) -> a-row -> b
+        // patches (b:a-row) -> b-row -> a: (a:b-row) already visited, stop.
+        // Returning at all proves termination; the lists prove each
+        // (collection, row) pair was patched exactly once.
+        expect(b.calls).toEqual([
+            { field: 'a', id: 'x' },
+            { field: 'a', id: 'a-row' },
+        ])
+        expect(a.calls).toEqual([{ field: 'b', id: 'b-row' }])
+    })
+
+    it('never calls back into the source for the originating record', () => {
+        const a = fakeCollection('a')
+        const b = fakeCollection('b')
+        a.relationDependents = [{ field: 'a', parent: b }]
+        b.relationDependents = []
+        propagateRelatedChange(a, 'delete', { id: 'x' }, new Set())
+        expect(a.calls).toEqual([])
+        expect(b.calls).toEqual([{ field: 'a', id: 'x' }])
+    })
+
+    it('logs and continues when one dependent throws', () => {
+        const a = fakeCollection('a')
+        const bad: ExpandTargetCollection = {
+            collectionName: 'bad',
+            isReady: () => true,
+            _sync: { startSync: async () => undefined },
+            applyRelatedChange: () => {
+                throw new Error('boom')
+            },
+        }
+        const b = fakeCollection('b')
+        a.relationDependents = [
+            { field: 'a', parent: bad },
+            { field: 'a', parent: b },
+        ]
+        expect(() => propagateRelatedChange(a, 'update', { id: 'x' }, new Set())).not.toThrow()
+        expect(b.calls).toEqual([{ field: 'a', id: 'x' }])
     })
 })

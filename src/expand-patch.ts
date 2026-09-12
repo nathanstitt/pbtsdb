@@ -1,5 +1,7 @@
 import { deepEquals } from '@tanstack/db'
 import { mergeExpand } from './expand-merge'
+import { logger } from './logger'
+import type { ExpandTargetCollection } from './types'
 
 export type RelatedAction = 'create' | 'update' | 'delete'
 
@@ -71,4 +73,30 @@ export function patchEmbedded<T extends object>(
             ? patchDelete(current, field, record.id)
             : patchUpdate(current, field, record)
     return patched as T | undefined
+}
+
+/**
+ * Fan a relation target's change out to every collection that embeds it.
+ * Each dependent patches its own rows and recurses with the same `visited`
+ * set, so a cyclic relation graph terminates and a row is patched at most
+ * once per originating echo.
+ */
+export function propagateRelatedChange(
+    source: ExpandTargetCollection,
+    action: RelatedAction,
+    record: Record<string, unknown> & { id: string },
+    visited: Set<string>
+): void {
+    for (const { field, parent } of source.relationDependents ?? []) {
+        try {
+            parent.applyRelatedChange?.(field, action, record, visited)
+        } catch (error) {
+            logger.error('Failed to patch a relation dependent', {
+                collectionName: source.collectionName,
+                dependent: parent.collectionName,
+                field,
+                error,
+            })
+        }
+    }
 }

@@ -827,5 +827,347 @@ describe('Per-query expand', () => {
             expect(internals(books).subscriberCount).toBe(0)
             expect(internals(tags).subscriberCount).toBe(0)
         })
+
+        function patchBatchesFor(spy: { mock: { calls: unknown[][] } }, id: string): unknown[][] {
+            return spy.mock.calls.filter(call =>
+                (call[0] as Array<{ id: string }>).some(row => row.id === id)
+            )
+        }
+
+        async function createAuthor() {
+            const record = await pb.collection('authors').create({
+                name: `Live ${getTestSlug('au')}`,
+                email: `${getTestSlug('live')}@example.com`,
+            })
+            return record.id as string
+        }
+
+        async function createBook(authorId: string) {
+            const record = await pb.collection('books').create({
+                title: `Live ${getTestSlug('bk')}`,
+                isbn: getTestSlug('isbn'),
+                genre: 'Fiction',
+                author: authorId,
+                published_date: '',
+                page_count: 1,
+            })
+            return record.id as string
+        }
+
+        it('patches the embedded author when the author changes, with no book write', async () => {
+            const authorId = await createAuthor()
+            const bookId = await createBook(authorId)
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await books.waitForSubscription(10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
+
+                const before = result.current.data[0]
+                await pb.collection('authors').update(authorId, { name: 'Renamed Author' })
+                await waitFor(
+                    () =>
+                        expect(result.current.data[0]?.expand?.author?.name).toBe('Renamed Author'),
+                    { timeout: 10000 }
+                )
+                expect(result.current.data[0]?.updated).toBe(before.updated)
+            } finally {
+                await pb.collection('books').delete(bookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 20000)
+
+        it('patches a nested copy two hops away', async () => {
+            const authorId = await createAuthor()
+            const bookId = await createBook(authorId)
+            const metadataId = (
+                await pb.collection('book_metadata').create({
+                    book: bookId,
+                    genre: 'Fiction',
+                    language: 'en',
+                    summary: '',
+                    rating: 3,
+                })
+            ).id as string
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const metadata = c('book_metadata', {
+                syncMode: 'on-demand',
+                relations: { book: books },
+            })
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ m: metadata.expand('book.author') })
+                            .where(({ m }) => eq(m.id, metadataId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
+
+                await pb.collection('authors').update(authorId, { name: 'Nested Rename' })
+                await waitFor(
+                    () =>
+                        expect(result.current.data[0]?.expand?.book?.expand?.author?.name).toBe(
+                            'Nested Rename'
+                        ),
+                    { timeout: 10000 }
+                )
+            } finally {
+                await pb.collection('book_metadata').delete(metadataId)
+                await pb.collection('books').delete(bookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 20000)
+
+        it('leaves a row that never embedded the relation untouched, and writes exactly once per echo', async () => {
+            const authorId = await createAuthor()
+            const embeddedBookId = await createBook(authorId)
+            const plainBookId = await createBook(authorId)
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            try {
+                const expanded = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.expand('author') })
+                            .where(({ b }) => eq(b.id, embeddedBookId))
+                    )
+                )
+                const plain = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.id, plainBookId)))
+                )
+                await waitForLoadFinish(expanded.result, 10000)
+                await waitForLoadFinish(plain.result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
+
+                const booksWrites = vi.spyOn(books.utils, 'writeUpsert')
+                const authorsWrites = vi.spyOn(authors.utils, 'writeUpsert')
+                let notifications = 0
+                const subscription = books.subscribeChanges(() => {
+                    notifications++
+                })
+                try {
+                    await pb.collection('authors').update(authorId, { name: 'Once' })
+                    await waitFor(
+                        () =>
+                            expect(expanded.result.current.data[0]?.expand?.author?.name).toBe(
+                                'Once'
+                            ),
+                        { timeout: 10000 }
+                    )
+                    const store = (
+                        books as unknown as {
+                            _state: { syncedData: Map<string, { expand?: unknown }> }
+                        }
+                    )._state.syncedData
+                    expect(store.get(plainBookId)?.expand).toBeUndefined()
+
+                    // exactly one patch batch containing only the embedded row
+                    const patchBatches = patchBatchesFor(booksWrites, embeddedBookId)
+                    expect(patchBatches).toHaveLength(1)
+                    expect((patchBatches[0][0] as Array<{ id: string }>).map(r => r.id)).toEqual([
+                        embeddedBookId,
+                    ])
+                    expect(authorsWrites).toHaveBeenCalledTimes(1)
+                    expect(notifications).toBe(1)
+
+                    // Quiet after settle, proven by ordering rather than a
+                    // sleep: a second echo must be the very next write. Any
+                    // loop spinning after the first patch would have pushed
+                    // these counts past 2 before the second name lands.
+                    await pb.collection('authors').update(authorId, { name: 'Once again' })
+                    await waitFor(
+                        () =>
+                            expect(expanded.result.current.data[0]?.expand?.author?.name).toBe(
+                                'Once again'
+                            ),
+                        { timeout: 10000 }
+                    )
+                    expect(patchBatchesFor(booksWrites, embeddedBookId)).toHaveLength(2)
+                    expect(authorsWrites).toHaveBeenCalledTimes(2)
+                    expect(notifications).toBe(2)
+                } finally {
+                    subscription.unsubscribe()
+                }
+            } finally {
+                await pb.collection('books').delete(embeddedBookId)
+                await pb.collection('books').delete(plainBookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 30000)
+
+        it('a redelivered echo produces no second write', async () => {
+            const authorId = await createAuthor()
+            const bookId = await createBook(authorId)
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+
+                const record = await pb.collection('authors').getOne(authorId)
+                const booksWrites = vi.spyOn(books.utils, 'writeUpsert')
+                const apply = (
+                    books as unknown as {
+                        applyRelatedChange: (
+                            field: string,
+                            action: 'update',
+                            record: Record<string, unknown> & { id: string },
+                            visited: Set<string>
+                        ) => void
+                    }
+                ).applyRelatedChange
+                apply('author', 'update', { ...record, name: 'Twice' }, new Set())
+                apply('author', 'update', { ...record, name: 'Twice' }, new Set())
+                expect(booksWrites).toHaveBeenCalledTimes(1)
+                await waitFor(() =>
+                    expect(result.current.data[0]?.expand?.author?.name).toBe('Twice')
+                )
+            } finally {
+                await pb.collection('books').delete(bookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 20000)
+
+        it('deleting an unreferenced author produces no parent writes', async () => {
+            const authorId = await createAuthor()
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const { result } = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.expand('author') })
+                        .orderBy(({ b }) => b.id)
+                        .limit(2)
+                )
+            )
+            await waitForLoadFinish(result, 10000)
+            await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+            await authors.waitForSubscription(10000)
+
+            const booksWrites = vi.spyOn(books.utils, 'writeUpsert')
+            const authorsDeletes = vi.spyOn(authors.utils, 'writeDelete')
+            await pb.collection('authors').delete(authorId)
+            await waitFor(() => expect(authorsDeletes).toHaveBeenCalled(), { timeout: 10000 })
+            expect(booksWrites).not.toHaveBeenCalled()
+        }, 20000)
+
+        it('keeps a pending optimistic update while the author is patched', async () => {
+            const authorId = await createAuthor()
+            const bookId = await createBook(authorId)
+            let releaseUpdate: () => void = () => {}
+            const updateGate = new Promise<void>(resolve => {
+                releaseUpdate = resolve
+            })
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', {
+                syncMode: 'on-demand',
+                relations: { author: authors },
+                onUpdate: async ({ transaction }) => {
+                    await updateGate
+                    await Promise.all(
+                        transaction.mutations.map(mutation => {
+                            const original = mutation.original as { id: string }
+                            return pb.collection('books').update(original.id, mutation.changes)
+                        })
+                    )
+                    return { refetch: false }
+                },
+            })
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
+
+                const tx = books.update(bookId, draft => {
+                    draft.title = 'Optimistic'
+                })
+                await waitFor(() => expect(result.current.data[0]?.title).toBe('Optimistic'))
+
+                // The pending mutation's optimistic overlay is the visible row until
+                // the transaction settles, so the patched `expand` is invisible until
+                // then — but the underlying synced write must have landed (and must
+                // not have reverted the pending `title`), which the post-settle
+                // assertions below confirm.
+                await pb.collection('authors').update(authorId, { name: 'While Pending' })
+                const synced = (
+                    books as unknown as {
+                        _state: {
+                            syncedData: Map<string, { expand?: { author?: { name?: string } } }>
+                        }
+                    }
+                )._state.syncedData
+                await waitFor(
+                    () => expect(synced.get(bookId)?.expand?.author?.name).toBe('While Pending'),
+                    { timeout: 10000 }
+                )
+                expect(result.current.data[0]?.title).toBe('Optimistic')
+
+                releaseUpdate()
+                await tx.isPersisted.promise
+                await waitFor(() => expect(result.current.data[0]?.title).toBe('Optimistic'))
+                expect(result.current.data[0]?.expand?.author?.name).toBe('While Pending')
+            } finally {
+                releaseUpdate()
+                await pb.collection('books').delete(bookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 30000)
+
+        it('runs the target handler once per event while dependents are patched', async () => {
+            const authorId = await createAuthor()
+            const bookId = await createBook(authorId)
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 10000 })
+                await authors.waitForSubscription(10000)
+
+                const authorsWrites = vi.spyOn(authors.utils, 'writeUpsert')
+                await pb.collection('authors').update(authorId, { name: 'Handler Once' })
+                await waitFor(
+                    () => expect(result.current.data[0]?.expand?.author?.name).toBe('Handler Once'),
+                    { timeout: 10000 }
+                )
+                expect(authorsWrites).toHaveBeenCalledTimes(1)
+            } finally {
+                await pb.collection('books').delete(bookId)
+                await pb.collection('authors').delete(authorId)
+            }
+        }, 20000)
     })
 })

@@ -12,6 +12,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { mergeExpand } from './expand-merge'
+import { patchEmbedded, propagateRelatedChange, type RelatedAction } from './expand-patch'
 import type { RelationTargets } from './expand-paths'
 import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
 import { logger } from './logger'
@@ -20,6 +21,7 @@ import type {
     CreateCollectionOptions,
     ExpandTargetCollection,
     ExtractRecordType,
+    RelationDependent,
     SchemaDeclaration,
 } from './types'
 
@@ -59,6 +61,15 @@ export interface CollectionSubscriptionHelpers {
     relationTargets: RelationTargets | undefined
     /** Number of relation targets currently held live */
     heldRelationTargetCount: () => number
+    /** Collections that declared this one in their `relations` */
+    relationDependents: RelationDependent[]
+    /** Patch this collection's rows for a change in a relation target */
+    applyRelatedChange: (
+        field: string,
+        action: RelatedAction,
+        record: Record<string, unknown> & { id: string },
+        visited: Set<string>
+    ) => void
 }
 
 /**
@@ -316,6 +327,50 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // since isStaleServerRecord alone compares against the synced store,
         // which a pending optimistic overlay does not update.
         collection.utils.writeUpsert(items)
+    }
+
+    // Patch this collection's rows for a change in a relation target. Runs
+    // synchronously from the target's realtime handler; writes go through the
+    // authoritative path because the rows are the current synced rows with only
+    // `expand` (or, on delete, the reference) changed.
+    function patchedRows(
+        field: string,
+        action: RelatedAction,
+        record: Record<string, unknown> & { id: string },
+        visited: Set<string>
+    ): RecordType[] {
+        const patched: RecordType[] = []
+        for (const row of collection._state.syncedData.values()) {
+            const id = (row as { id?: unknown }).id
+            if (typeof id !== 'string') continue
+            const key = `${collectionName}:${id}`
+            if (visited.has(key)) continue
+            const next = patchEmbedded(row as RecordType, field, action, record)
+            if (!next) continue
+            visited.add(key)
+            patched.push(next)
+        }
+        return patched
+    }
+
+    function applyRelatedChange(
+        field: string,
+        action: RelatedAction,
+        record: Record<string, unknown> & { id: string },
+        visited: Set<string>
+    ): void {
+        if (!collection.utils || !collection.isReady()) return
+        const patched = patchedRows(field, action, record, visited)
+        if (patched.length === 0) return
+        writeOwn(() => collection.utils.writeUpsert(patched))
+        for (const row of patched) {
+            propagateRelatedChange(
+                collection as unknown as ExpandTargetCollection,
+                'update',
+                row as { id: string },
+                visited
+            )
+        }
     }
 
     const queryCollectionConfig = queryCollectionOptions({
@@ -577,6 +632,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     const collection = createTanStackCollection(collectionOptions)
 
+    const relationDependents: RelationDependent[] = []
+    for (const [field, target] of Object.entries(relationTargets ?? {})) {
+        target.relationDependents ??= []
+        target.relationDependents.push({
+            field,
+            parent: collection as unknown as ExpandTargetCollection,
+        })
+    }
+
     const views = new Map<string, object>()
 
     function createView(paths: string[]): object {
@@ -780,6 +844,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 })
             )
         }
+
+        propagateRelatedChange(
+            collection as unknown as ExpandTargetCollection,
+            event.action as RelatedAction,
+            event.record as { id: string },
+            new Set()
+        )
     }
 
     // The union of expand paths the next (re)subscribe should carry:
@@ -1021,6 +1092,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         isSubscribed: () => isSubscribed,
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
         expand,
+        relationDependents,
+        applyRelatedChange,
     })
 
     return collection as unknown as BuiltCollection<RecordType>
