@@ -316,7 +316,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         collection.utils.writeUpsert(items)
     }
 
-    const collectionOptions = queryCollectionOptions({
+    const queryCollectionConfig = queryCollectionOptions({
         ...options?.collectionOptions,
         queryClient,
         queryKey: queryKeyFor,
@@ -384,6 +384,17 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                       return { refetch: refetchOnMutation }
                   })),
     })
+
+    // queryCollectionOptions consumes `gcTime` for the underlying react-query
+    // observer and never forwards it to the collection options it returns, so
+    // the DB collection's own lifecycle GC (what controls when an idle
+    // collection reaches 'cleaned-up') would silently fall back to its
+    // 5-minute default. Re-apply it explicitly so a caller-supplied value
+    // reaches both layers.
+    const collectionOptions =
+        options?.collectionOptions?.gcTime === undefined
+            ? queryCollectionConfig
+            : { ...queryCollectionConfig, gcTime: options.collectionOptions.gcTime }
 
     // Write the server's copy of a mutation's rows back AFTER the transaction
     // has persisted — never from inside its handler.
