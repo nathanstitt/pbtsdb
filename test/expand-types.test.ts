@@ -32,10 +32,14 @@ describe('expand types', () => {
         const view = books.expand('author')
         type Row = NonNullable<ReturnType<typeof view.get>>
         expectTypeOf<Row['expand']>().toEqualTypeOf<{ author?: Authors } | undefined>()
-        // @ts-expect-error nope is not a declared relation
-        books.expand('nope')
-        // @ts-expect-error views are leaves
-        view.expand('author')
+        expect(() =>
+            // @ts-expect-error nope is not a declared relation
+            books.expand('nope')
+        ).toThrow('Cannot expand "nope" on collection "books"')
+        expect(() =>
+            // @ts-expect-error views are leaves
+            view.expand('author')
+        ).toThrow('view of "books" cannot be expanded further')
     })
 
     it('types nested paths through the target collection', () => {
@@ -47,15 +51,19 @@ describe('expand types', () => {
         expectTypeOf<Row['expand']>().toEqualTypeOf<
             { book?: Books & { expand?: { author?: Authors } } } | undefined
         >()
-        // @ts-expect-error nope is not a relation of books
-        metadata.expand('book.nope')
+        expect(() =>
+            // @ts-expect-error nope is not a relation of books
+            metadata.expand('book.nope')
+        ).toThrow('Cannot expand "book.nope" on collection "book_metadata"')
     })
 
     it('rejects a nested path when the target declares no relations', () => {
         const books = c('books', {})
         const metadata = c('book_metadata', { relations: { book: books } })
-        // @ts-expect-error books declares no relations
-        metadata.expand('book.author')
+        expect(() =>
+            // @ts-expect-error books declares no relations
+            metadata.expand('book.author')
+        ).toThrow('Cannot expand "book.author" on collection "book_metadata"')
     })
 
     it('merges paths that share a head', () => {

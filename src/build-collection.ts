@@ -22,6 +22,10 @@ import type {
     SchemaDeclaration,
 } from './types'
 
+// Subscriptions created through a view, mapped to the view's expand paths. Keyed
+// by the subscription object TanStack hands back to loadSubset/unloadSubset.
+const viewPaths = new WeakMap<object, string[]>()
+
 /**
  * Options applied to every collection built by a {@link createCollection} factory.
  */
@@ -284,11 +288,23 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             }
 
             await upsertExpanded(items, relationTargets)
+            if (request.expand) writeExpandedRows(items)
 
             return withRowsConfirmedMidFlight(items, confirmedMidFlight)
         } finally {
             inFlightConfirmedIds.delete(confirmedMidFlight)
         }
+    }
+
+    // query-db-collection only calls its synced `write` for a row a query newly
+    // "owns" in the synced store — a query whose result includes a row another
+    // query already put there is treated as a no-op, even though this fetch may
+    // be the only one carrying `expand` data for that row (e.g. a base and a view
+    // of the same collection joined in one live query). Write such rows directly
+    // so the view's `expand` field always reaches the shared store.
+    function writeExpandedRows(items: RecordType[]): void {
+        if (!collection.utils || !collection.isReady()) return
+        writeOwn(() => collection.utils.writeUpsert(items))
     }
 
     const collectionOptions = queryCollectionOptions({
@@ -470,7 +486,25 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return false
     }
 
-    // Wrap the sync factory so every synced `write` flows through the guard above.
+    // A view's subscription is tagged in viewPaths (see createView below); this
+    // adds the view's expand paths to load options for a tagged subscription so
+    // loadSubset/unloadSubset fetch (and later untrack) with the right `expand`.
+    // A subscription's initial snapshot loads synchronously inside
+    // collection.subscribeChanges, before that call returns the subscription
+    // object a view tags in viewPaths — so that first loadSubset cannot yet be
+    // looked up by identity. While a view's subscribeChanges call is on the
+    // stack, its paths are used for load options with no tagged subscription;
+    // every later call (untracked demand growth, unloadSubset) is tagged by then.
+    let subscribingViewPaths: string[] | undefined
+
+    function withViewExpand(opts: LoadSubsetOptions): LoadOptions {
+        const paths =
+            (opts.subscription && viewPaths.get(opts.subscription)) ?? subscribingViewPaths
+        return paths ? { ...opts, expand: paths } : opts
+    }
+
+    // Wrap the sync factory so every synced `write` flows through the guard above,
+    // and every loadSubset/unloadSubset call is tagged with a view's expand paths.
     // @tanstack/db invokes sync.sync with the write primitives; we hand back the
     // same params with a filtered `write`. begin/commit/markReady/etc. pass through.
     const innerSync = collectionOptions.sync.sync
@@ -487,11 +521,67 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 }
                 return params.write(message)
             }
-            return innerSync({ ...params, write: guardedWrite })
+            const res = innerSync({ ...params, write: guardedWrite })
+            if (!res || typeof res === 'function') return res
+            const { loadSubset, unloadSubset } = res
+            return {
+                ...res,
+                loadSubset: loadSubset
+                    ? (opts: LoadSubsetOptions) => loadSubset(withViewExpand(opts))
+                    : undefined,
+                unloadSubset: unloadSubset
+                    ? (opts: LoadSubsetOptions) => unloadSubset(withViewExpand(opts))
+                    : undefined,
+            }
         },
     }
 
     const collection = createTanStackCollection(collectionOptions)
+
+    const views = new Map<string, object>()
+
+    function noteViewSubscribed(paths: string[]): void {
+        for (const path of paths) requestedExpand.add(path)
+    }
+
+    function createView(paths: string[]): object {
+        const view = Object.create(collection)
+        Object.defineProperties(view, {
+            id: { value: `${collectionName}?expand=${paths.join(',')}` },
+            subscribeChanges: {
+                value: (...args: Parameters<typeof collection.subscribeChanges>) => {
+                    noteViewSubscribed(paths)
+                    subscribingViewPaths = paths
+                    try {
+                        const subscription = collection.subscribeChanges(...args)
+                        viewPaths.set(subscription, paths)
+                        return subscription
+                    } finally {
+                        subscribingViewPaths = undefined
+                    }
+                },
+            },
+            expand: {
+                value: () => {
+                    throw new Error(`A view of "${collectionName}" cannot be expanded further`)
+                },
+            },
+        })
+        return view
+    }
+
+    function expand(...paths: string[]): object {
+        for (const path of paths) validateExpandPath(collectionName, relationTargets, path)
+        const all = normalizePaths([...alwaysExpand, ...paths])
+        if (all.every(path => alwaysExpand.includes(path))) return collection
+        const key = all.join(',')
+        let view = views.get(key)
+        if (!view) {
+            view = createView(all)
+            views.set(key, view)
+        }
+        return view
+    }
 
     // True when the key has an in-flight (not yet settled) optimistic mutation.
     // While pending, the optimistic overlay — not syncedData — is the visible value,
@@ -728,9 +818,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         relationTargets,
         waitForSubscription,
         isSubscribed: () => isSubscribed,
-        // Task 6 replaces this with a real per-query view; until then a view is the
-        // base collection, which still fetches only the alwaysExpand paths.
-        expand: () => collection,
+        expand,
     })
 
     return collection as unknown as BuiltCollection<RecordType>
