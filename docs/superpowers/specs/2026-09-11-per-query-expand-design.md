@@ -247,8 +247,10 @@ nature.
 The collection's `queryKey` becomes a function of the load options returning
 `[collectionName, request]`, where `request` is the PocketBase request shape
 pbtsdb already derives: `filter` (from `convertToPocketBaseFilter`), `sort`
-(from `convertToPocketBaseSort`), `limit`, and `expand` (union of the request
-expand and `alwaysExpand`, sorted), omitting empty fields. With no options it
+(from `convertToPocketBaseSort`), `limit`, and `expand` (the request's own
+expand paths, sorted; `alwaysExpand` is folded in at fetch time rather than
+keyed, since a per-collection constant cannot cause key collisions),
+omitting empty fields. With no options it
 returns `[collectionName]`, the base key, so prefix invalidation and
 `refetchOnMutation` keep working. In eager mode the key is always
 `[collectionName]`; the eager `queryFn` reads the eager expand set at fetch

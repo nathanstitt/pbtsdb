@@ -304,6 +304,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // of the same collection joined in one live query). Write such rows directly
     // so the view's `expand` field always reaches the shared store.
     function writeExpandedRows(items: RecordType[]): void {
+        // On a collection's first fetch the store is empty, so
+        // applySuccessfulResult inserts the rows itself; nothing to do here yet.
         if (!collection.utils || !collection.isReady()) return
         // Not writeOwn: writeOwn's optimistic-pending exemption is reserved for
         // writes already staleness-filtered upstream (writeBackAfterPersisted,
@@ -671,6 +673,25 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     let isSubscribed = false
     let subscriptionPromise: Promise<void> | null = null
     let subscriptionResolve: (() => void) | null = null
+    // The `expand` string sent with the currently live subscription, so a
+    // caller that widened requestedExpand mid-flight can tell whether the
+    // subscription that just landed already covers it.
+    let subscribedExpand: string | undefined
+
+    // All start/stop/restart work is serialized onto this promise tail so
+    // overlapping callers (two views created back-to-back, a reconnect
+    // racing a widened expand) never run startSubscription/stopSubscription
+    // concurrently — the tail is what lets a later caller's restart observe
+    // the outcome of an earlier caller's in-flight start. Errors are caught
+    // and logged so a failed step never poisons the tail for later work.
+    let subscriptionWork: Promise<void> = Promise.resolve()
+    function enqueueSubscriptionWork(fn: () => Promise<void>): Promise<void> {
+        const run = subscriptionWork.then(fn, fn).catch(error => {
+            logger.error('Subscription work failed', { collectionName, error })
+        })
+        subscriptionWork = run
+        return run
+    }
 
     // Handle real-time events from PocketBase.
     //
@@ -748,17 +769,30 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    // The expand paths to request on the next (re)subscribe: alwaysExpand,
-    // every path a view has requested, and whatever the factory's own
-    // subscribeOptions() supplies, merged rather than overridden.
+    // The union of expand paths the next (re)subscribe should carry:
+    // alwaysExpand plus every path a view has requested. Pure and
+    // side-effect-free (unlike realtimeSubscribeOptions below), so it is
+    // safe to call more than once per subscribe attempt to detect drift.
+    function pendingSubscribeExpand(): string | undefined {
+        return joinPaths([...alwaysExpand, ...requestedExpand])
+    }
+
+    // Options for the next (re)subscribe: the expand union above, merged
+    // with whatever the factory's own subscribeOptions() supplies rather
+    // than overridden by it. Calls the factory callback, so it is invoked
+    // exactly once per subscribe attempt (never re-derived afterward).
     function realtimeSubscribeOptions(): RecordSubscribeOptions | undefined {
         const base = factoryOptions?.subscribeOptions?.()
-        const expand = joinPaths([...alwaysExpand, ...requestedExpand, ...splitPaths(base?.expand)])
+        const expand = joinPaths([
+            ...splitPaths(pendingSubscribeExpand()),
+            ...splitPaths(base?.expand),
+        ])
         return expand ? { ...base, expand } : base
     }
 
-    // Start PocketBase real-time subscription
-    const startSubscription = async () => {
+    // Start PocketBase real-time subscription. Only ever run through
+    // enqueueSubscriptionWork so it never overlaps a stop/restart.
+    const doStartSubscription = async () => {
         if (isSubscribed) return
 
         // Create promise before starting so waiters can await it
@@ -768,11 +802,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             })
         }
 
+        const pendingExpand = pendingSubscribeExpand()
         try {
             unsubscribeFn = await pb
                 .collection(collectionName)
                 .subscribe('*', handleRealtimeEvent, realtimeSubscribeOptions())
             isSubscribed = true
+            subscribedExpand = pendingExpand
             logger.debug('Subscription started', { collectionName })
             // Resolve the promise to notify waiters
             if (subscriptionResolve) {
@@ -781,16 +817,29 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         } catch (error) {
             logger.error('Failed to start subscription', { collectionName, error })
         }
+
+        // requestedExpand can grow while the subscribe() call above was in
+        // flight (a view mounted mid-round-trip sees no live subscription
+        // yet, and would otherwise never schedule a restart). Comparing
+        // against the pure expand union (not realtimeSubscribeOptions,
+        // which would re-invoke the factory's own subscribeOptions()
+        // callback) lets this check run after every start with no
+        // observable side effect.
+        if (pendingSubscribeExpand() !== subscribedExpand) {
+            enqueueSubscriptionWork(doRestartSubscription).catch(() => {})
+        }
     }
 
-    // Stop PocketBase real-time subscription
-    const stopSubscription = async () => {
+    // Stop PocketBase real-time subscription. Only ever run through
+    // enqueueSubscriptionWork so it never overlaps a start/restart.
+    const doStopSubscription = async () => {
         if (!isSubscribed || !unsubscribeFn) return
 
         try {
             await unsubscribeFn()
             unsubscribeFn = null
             isSubscribed = false
+            subscribedExpand = undefined
             // Reset promise for next subscription cycle
             subscriptionPromise = null
             subscriptionResolve = null
@@ -803,11 +852,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    // Restart the live subscription, e.g. after the requested expand union grows.
-    const restartSubscription = async () => {
-        await stopSubscription()
-        await startSubscription()
+    // Restart the live subscription, e.g. after the requested expand union
+    // grows. A no-op when there is no live subscription to restart — the
+    // next first-subscriber start already picks up the current union.
+    const doRestartSubscription = async () => {
+        if (!isSubscribed) return
+        await doStopSubscription()
+        await doStartSubscription()
     }
+
+    const startSubscription = () => enqueueSubscriptionWork(doStartSubscription)
+    const stopSubscription = () => enqueueSubscriptionWork(doStopSubscription)
+    const restartSubscription = () => enqueueSubscriptionWork(doRestartSubscription)
 
     // Record which expand paths a view has subscribed with at least once.
     // Eager collections cannot request per-subset options, so a wider union
@@ -826,16 +882,22 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             collection.status !== 'idle' &&
             collection.status !== 'cleaned-up'
         ) {
-            void collection.utils.refetch()
-        }
-        if (isSubscribed) {
-            restartSubscription().catch(error =>
-                logger.error('Failed to restart subscription with wider expand', {
+            void collection.utils.refetch().catch(error =>
+                logger.error('Failed to refetch after widening expand', {
                     collectionName,
                     error,
                 })
             )
         }
+        // Enqueued unconditionally (not gated on isSubscribed): the tail
+        // guarantees this runs after any in-flight start/stop, and
+        // doRestartSubscription itself no-ops when nothing is live.
+        restartSubscription().catch(error =>
+            logger.error('Failed to restart subscription with wider expand', {
+                collectionName,
+                error,
+            })
+        )
     }
 
     // Wait for subscription to be established (for testing)

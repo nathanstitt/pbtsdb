@@ -515,5 +515,85 @@ describe('Per-query expand', () => {
                 await pb.collection('books').delete(bookId)
             }
         }, 20000)
+
+        it('serializes overlapping restarts so two views created back-to-back leave one live subscription with the unioned expand', async () => {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const tags = c('tags', { syncMode: 'on-demand' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            const bookTags = c('book_tags', {
+                syncMode: 'on-demand',
+                relations: { book: books, tag: tags },
+            })
+
+            // Wrap each unsubscribe function the real subscribe() resolves
+            // with in its own spy, so production calling it can be counted
+            // without this test invoking a PocketBase unsubscribe itself.
+            const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
+            const realSubscribe = pb
+                .collection('book_tags')
+                .subscribe.bind(pb.collection('book_tags'))
+            const subscribeSpy = vi
+                .spyOn(pb.collection('book_tags'), 'subscribe')
+                .mockImplementation(async (...args) => {
+                    const unsubscribe = await realSubscribe(...args)
+                    const spy = vi.fn(unsubscribe)
+                    unsubscribeSpies.push(spy)
+                    return spy
+                })
+
+            try {
+                const bookView = bookTags.expand('book')
+                const tagView = bookTags.expand('tag')
+
+                // Mount both views back-to-back, with no await between them, so
+                // their subscriptions race rather than serialize naturally.
+                const bookQuery = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: bookView })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+                const tagQuery = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ bt: tagView })
+                            .orderBy(({ bt }) => bt.id)
+                            .limit(1)
+                    )
+                )
+
+                await waitForLoadFinish(bookQuery.result, 10000)
+                await waitForLoadFinish(tagQuery.result, 10000)
+                await bookTags.waitForSubscription(10000)
+
+                // Any restart still working its way through the serialized
+                // subscription queue settles once the queue drains; the queue
+                // only ever schedules more work while the union keeps
+                // growing, so waiting for the last subscribe call to carry
+                // the full union is sufficient (no arbitrary sleep needed).
+                await waitFor(
+                    () => {
+                        const last = subscribeSpy.mock.calls.at(-1)
+                        const options = last?.[2] as { expand?: string } | undefined
+                        expect(options?.expand).toBe('book,tag')
+                    },
+                    { timeout: 10000 }
+                )
+
+                // No orphaned subscription: every subscribe call except the
+                // last one must have had its unsubscribe invoked.
+                await waitFor(() => {
+                    const settledUnsubscribes = unsubscribeSpies
+                        .slice(0, -1)
+                        .filter(spy => spy.mock.calls.length > 0)
+                    expect(settledUnsubscribes.length).toBe(unsubscribeSpies.length - 1)
+                })
+            } finally {
+                subscribeSpy.mockRestore()
+            }
+        }, 20000)
     })
 })
