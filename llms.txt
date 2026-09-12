@@ -202,22 +202,26 @@ function BooksList() {
 const c = createCollection<Schema>(pb, queryClient);
 const authors = c('authors', {});
 const books = c('books', {
-    expand: {
-        author: authors  // Auto-expand and auto-upsert
-    }
+    relations: { author: authors },  // where expanded authors are upserted
+    alwaysExpand: ['author'],        // expanded on every fetch
 });
 
-// Expand is automatic - no .expand() call needed
 const { data } = useLiveQuery((q) => q.from({ books }));
-
-// Expanded records automatically inserted into authors collection
-// data[0].expand?.author is typed!
+// data[0].expand?.author is typed and populated
 ```
 
 **When to use Auto-Expand:**
 - You want expanded records to populate their own collections automatically
 - Performance: Single server query with server-side expand
 - Related data always available when fetching parent records
+
+**Per-query expand**
+```typescript
+const books = c('books', { relations: { author: authors, tags } });
+const { data } = useLiveQuery((q) => q.from({ books: books.expand('tags') }));
+// data[0].expand?.tags typed; nested paths like 'book.author' resolve through
+// the target collection's own relations. Views share the base store.
+```
 
 **Approach 2: TanStack Joins**
 ```typescript

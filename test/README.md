@@ -72,6 +72,21 @@ Real-time subscription and live data updates.
 
 ---
 
+#### `expand-views.test.tsx`
+Per-query expand views, nested paths, shared-store coherence, eager refetch, realtime expand.
+
+---
+
+#### `expand-helpers.test.ts`
+Pure helpers for expand paths and expand merging.
+
+---
+
+#### `tanstack-internals.test.ts`
+Pins the two undocumented TanStack DB behaviours per-query expand relies on. If this fails after an upgrade, read the assertion message before touching anything else.
+
+---
+
 ### Supporting Files
 
 #### `helpers.ts`
