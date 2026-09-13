@@ -1197,6 +1197,7 @@ describe('Fetch relations', () => {
                         )
                     )
                     expect(counter.filters).toEqual([])
+                    expect(bookTags.loadedSubsetCount()).toBeGreaterThanOrEqual(1)
                 } finally {
                     counter.restore()
                 }
@@ -1242,6 +1243,7 @@ describe('Fetch relations', () => {
                     useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.id, bookId)))
                 )
                 await waitForLoadFinish(base.result, 10000)
+                expect(bookTags.loadedSubsetCount()).toBe(0)
                 const counter = countRequestsTo('/collections/book_tags/records')
                 try {
                     const include = tagsFor(bookTags, bookId)
@@ -1326,6 +1328,7 @@ describe('Fetch relations', () => {
                 await waitFor(() => expect(bookTags.isSubscribed()).toBe(true), { timeout: 10000 })
                 parent.unmount()
                 await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+                expect(bookTags.loadedSubsetCount()).toBe(0)
                 const counter = countRequestsTo('/collections/book_tags/records')
                 try {
                     const include = tagsFor(bookTags, bookId)
@@ -1335,6 +1338,14 @@ describe('Fetch relations', () => {
                     counter.restore()
                 }
             }, 20000)
+
+            it('cleanup clears every mark', async () => {
+                const { bookTags } = makeBooks()
+                bookTags.markSubsetLoaded('book', 'x')
+                expect(bookTags.loadedSubsetCount()).toBe(1)
+                await bookTags.cleanup()
+                await waitFor(() => expect(bookTags.loadedSubsetCount()).toBe(0))
+            }, 15000)
 
             it('serves a back-relation filed by a different parent (tags)', async () => {
                 const junction = (await pb.collection('book_tags').getList(1, 1))

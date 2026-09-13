@@ -76,6 +76,33 @@ async function awaitPendingFiling(target: object, field: string): Promise<void> 
 }
 
 /**
+ * Minimal shape of the two collection events that invalidate every loaded-subset
+ * mark: `status:change` (cleared on reaching `cleaned-up`) and `truncate`
+ * (cleared unconditionally). Extracted so the wiring itself is unit-testable
+ * against a fake emitter, independent of a real `Collection` instance.
+ * @internal
+ */
+export type MarkInvalidatingCollection = {
+    onStatusChange: (callback: (event: { status: string }) => void) => () => void
+    onTruncate: (callback: () => void) => () => void
+}
+
+/**
+ * Without a live subscription, back-relation children can appear server-side
+ * unseen, so every mark is stale once the collection cleans up or truncates.
+ * @internal
+ */
+export function registerMarkInvalidationEvents(
+    collection: MarkInvalidatingCollection,
+    clearMarks: () => void
+): void {
+    collection.onStatusChange(event => {
+        if (event.status === 'cleaned-up') clearMarks()
+    })
+    collection.onTruncate(() => clearMarks())
+}
+
+/**
  * Options applied to every collection built by a {@link createCollection} factory.
  */
 export interface CreateCollectionFactoryOptions {
@@ -249,12 +276,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         })
     }
 
+    // Returns whether a write actually happened. A silent no-op (no utils, or
+    // not ready with no way to become ready) must never be treated as a filing:
+    // the caller uses this to decide whether the values just upserted can be
+    // trusted to mark a subset complete.
     async function upsertInto(
         key: string,
         target: ExpandTargetCollection,
         values: object[]
-    ): Promise<void> {
-        if (!target.utils) return
+    ): Promise<boolean> {
+        if (!target.utils) return false
         if (!target.isReady()) {
             if (target.config?.syncMode === 'on-demand') {
                 await target._sync.startSync()
@@ -267,10 +298,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 logger.warn(
                     `not syncing ${key} on ${collectionName} because store is not yet ready`
                 )
-                return
+                return false
             }
         }
         target.utils.writeUpsert(withoutExpand(values))
+        return true
     }
 
     async function upsertExpandedField(
@@ -285,9 +317,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             return
         }
         const values = Array.isArray(value) ? value : [value]
-        await upsertInto(key, target, values)
+        const filed = await upsertInto(key, target, values)
         await upsertExpanded(values, target.relationTargets)
-        if (parentId !== undefined) markFiledSubset(target, key, values, parentId)
+        if (filed && parentId !== undefined) markFiledSubset(target, key, values, parentId)
     }
 
     async function upsertExpanded(
@@ -441,11 +473,17 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (served) return served
         // A same-tick parent fetch may be about to file and mark exactly this
         // subset (see pendingFilings above); give it the chance before fetching.
-        // Mirrors servedFromStore's own expand gate: a request carrying its own
-        // expand can never be served from the store, so waiting here could only
-        // stall — and two collections each awaiting the other's back-relation
-        // filing (each fetching with the other's via expand) would deadlock.
-        if (request.subset && request.subset.field !== 'id' && !request.expand) {
+        // Invariant: a registering fetch never waits. This fetch's own active
+        // expand (alwaysFetchRelations included, not just request.expand) may
+        // itself register pending filings on other targets (backRelationTargetsFor
+        // below, in fetchRecords); waiting here too would let two mutually
+        // back-related collections each register before either awaits, and then
+        // await each other forever.
+        if (
+            request.subset &&
+            request.subset.field !== 'id' &&
+            backRelationTargetsFor(request).length === 0
+        ) {
             await awaitPendingFiling(collection, request.subset.field)
             const servedAfterFiling = servedFromStore(request)
             if (servedAfterFiling) return servedAfterFiling
@@ -1271,10 +1309,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     )
 
-    collection.on('status:change', (event: { status: string }) => {
-        if (event.status === 'cleaned-up') loadedSubsets.clear()
-    })
-    collection.on('truncate', () => loadedSubsets.clear())
+    registerMarkInvalidationEvents(
+        {
+            onStatusChange: callback => collection.on('status:change', callback),
+            onTruncate: callback => collection.on('truncate', callback),
+        },
+        () => loadedSubsets.clear()
+    )
 
     // Add collectionName and subscription helpers
     Object.assign(collection, {

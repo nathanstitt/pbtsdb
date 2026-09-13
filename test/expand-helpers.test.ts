@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+    type MarkInvalidatingCollection,
+    registerMarkInvalidationEvents,
+} from '../src/build-collection'
+import {
     BACK_RELATION_EXPAND_CAP,
     joinPaths,
     markFiledSubset,
@@ -137,5 +141,58 @@ describe('markFiledSubset', () => {
         expect(() =>
             markFiledSubset(target, 'comments_via_card', [{ id: 'x' }], 'c1')
         ).not.toThrow()
+    })
+})
+
+describe('registerMarkInvalidationEvents', () => {
+    // A minimal fake of the two collection events real TanStack DB collections
+    // emit (per node_modules/@tanstack/db's Collection.on): status:change and
+    // truncate. query-db-collection never calls the sync `truncate()` primitive,
+    // so a real collection built by pbtsdb has no reachable way to trigger a
+    // `truncate` event; this fake lets the wiring itself be verified directly.
+    function fakeCollection(): MarkInvalidatingCollection & {
+        emitStatusChange: (status: string) => void
+        emitTruncate: () => void
+    } {
+        let onStatusChange: ((event: { status: string }) => void) | undefined
+        let onTruncate: (() => void) | undefined
+        return {
+            onStatusChange: callback => {
+                onStatusChange = callback
+                return () => {
+                    onStatusChange = undefined
+                }
+            },
+            onTruncate: callback => {
+                onTruncate = callback
+                return () => {
+                    onTruncate = undefined
+                }
+            },
+            emitStatusChange: status => onStatusChange?.({ status }),
+            emitTruncate: () => onTruncate?.(),
+        }
+    }
+
+    it('clears marks when status reaches cleaned-up', () => {
+        const collection = fakeCollection()
+        let cleared = 0
+        registerMarkInvalidationEvents(collection, () => {
+            cleared += 1
+        })
+        collection.emitStatusChange('loading')
+        expect(cleared).toBe(0)
+        collection.emitStatusChange('cleaned-up')
+        expect(cleared).toBe(1)
+    })
+
+    it('clears marks on truncate', () => {
+        const collection = fakeCollection()
+        let cleared = 0
+        registerMarkInvalidationEvents(collection, () => {
+            cleared += 1
+        })
+        collection.emitTruncate()
+        expect(cleared).toBe(1)
     })
 })
