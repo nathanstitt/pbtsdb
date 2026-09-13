@@ -46,8 +46,10 @@ const pendingFilings = new WeakMap<object, Map<string, Promise<void>[]>>()
 // Called by a PARENT collection's own fetch, on the relation TARGET instance,
 // to register that it might mark `field` once that fetch's upsertExpanded
 // settles. The target's own fetchItems awaits these (see awaitPendingFiling)
-// before issuing a request for a not-yet-loaded subset on that field.
-function registerPendingFiling(target: object, field: string, settles: Promise<void>): void {
+// before issuing a request for a not-yet-loaded subset on that field. Returns
+// an unregister function the caller runs once its fetch settles, so a
+// long-lived target never accumulates promises for fetches that finished.
+function registerPendingFiling(target: object, field: string, settles: Promise<void>): () => void {
     let byField = pendingFilings.get(target)
     if (!byField) {
         byField = new Map()
@@ -59,6 +61,12 @@ function registerPendingFiling(target: object, field: string, settles: Promise<v
         byField.set(field, pending)
     }
     pending.push(settles)
+    return () => {
+        const index = pending.indexOf(settles)
+        if (index !== -1) pending.splice(index, 1)
+        if (pending.length === 0) byField.delete(field)
+        if (byField.size === 0) pendingFilings.delete(target)
+    }
 }
 
 async function awaitPendingFiling(target: object, field: string): Promise<void> {
@@ -326,34 +334,51 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return marked !== undefined && values.every(value => marked.has(value))
     }
 
-    function forgetMarkedValue(marked: Set<string>, value: unknown): boolean {
-        if (typeof value === 'string') return marked.delete(value)
-        if (!Array.isArray(value)) return false
-        let removed = false
-        for (const item of value)
-            if (typeof item === 'string' && marked.delete(item)) removed = true
-        return removed
+    function forgetMarkedValue(marked: Set<string>, value: unknown): string[] {
+        if (typeof value === 'string') return marked.delete(value) ? [value] : []
+        if (!Array.isArray(value)) return []
+        return value.filter(item => typeof item === 'string' && marked.delete(item))
     }
 
-    // A row leaving the store other than by a server-confirmed delete means the
-    // subsets it belonged to are no longer complete. A currently-observed subset
-    // query already resolved successfully is served from query-db-collection's
-    // own cache on the next mount regardless of our own marks (see
-    // createQueryFromOpts's `state.observers`/`isSuccess` fast path), so an
-    // actual forget also refetches every currently tracked subset to clear it.
-    function forgetMarksFor(row: unknown): void {
-        if (!row || typeof row !== 'object') return
-        let forgot = false
-        for (const [field, marked] of loadedSubsets) {
-            if (forgetMarkedValue(marked, (row as Record<string, unknown>)[field])) forgot = true
-        }
-        if (forgot) {
-            void collection.utils.refetch().catch(error =>
-                logger.error('Failed to refetch after forgetting a mark', {
+    // A subset query that already resolved successfully is served from
+    // query-db-collection's own observer cache on the next mount regardless of
+    // our own marks, so forgetting a mark must also invalidate that cached
+    // query for a fresh fetch to actually happen.
+    function invalidateForgottenSubset(field: string, values: readonly string[]): void {
+        void queryClient
+            .invalidateQueries({
+                predicate: query => {
+                    if (query.queryKey[0] !== collectionName) return false
+                    const request = query.queryKey[1] as PbRequest | undefined
+                    const subset = request?.subset
+                    return (
+                        subset !== undefined &&
+                        subset.field === field &&
+                        subset.values.some(value => values.includes(value))
+                    )
+                },
+            })
+            .catch(error =>
+                logger.error('Failed to invalidate queries after forgetting a mark', {
                     collectionName,
                     error,
                 })
             )
+    }
+
+    // A row leaving the store other than by a server-confirmed delete means the
+    // subsets it belonged to are no longer complete. Deferred with
+    // queueMicrotask: this runs inside the guarded sync write, i.e. inside
+    // TanStack's write batch, and invalidateQueries can start a queryFn
+    // synchronously up to its first await — which must not re-enter
+    // fetchRecords/registerPendingFiling mid-batch.
+    function forgetMarksFor(row: unknown): void {
+        if (!row || typeof row !== 'object') return
+        for (const [field, marked] of loadedSubsets) {
+            const forgotten = forgetMarkedValue(marked, (row as Record<string, unknown>)[field])
+            if (forgotten.length > 0) {
+                queueMicrotask(() => invalidateForgottenSubset(field, forgotten))
+            }
         }
     }
 
@@ -416,7 +441,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (served) return served
         // A same-tick parent fetch may be about to file and mark exactly this
         // subset (see pendingFilings above); give it the chance before fetching.
-        if (request.subset && request.subset.field !== 'id') {
+        // Mirrors servedFromStore's own expand gate: a request carrying its own
+        // expand can never be served from the store, so waiting here could only
+        // stall — and two collections each awaiting the other's back-relation
+        // filing (each fetching with the other's via expand) would deadlock.
+        if (request.subset && request.subset.field !== 'id' && !request.expand) {
             await awaitPendingFiling(collection, request.subset.field)
             const servedAfterFiling = servedFromStore(request)
             if (servedAfterFiling) return servedAfterFiling
@@ -512,9 +541,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const filed = new Promise<void>(resolve => {
             settleFiling = resolve
         })
-        for (const { target, field } of backRelationTargetsFor(request)) {
+        const unregisterFilings = backRelationTargetsFor(request).map(({ target, field }) =>
             registerPendingFiling(target, field, filed)
-        }
+        )
         try {
             let items: RecordType[]
             try {
@@ -549,6 +578,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         } finally {
             inFlightConfirmedIds.delete(confirmedMidFlight)
             settleFiling()
+            for (const unregister of unregisterFilings) unregister()
         }
     }
 
