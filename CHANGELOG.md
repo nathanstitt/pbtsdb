@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 > Releases 0.1.0 through 0.6.3 were reconstructed from git history after the
 > fact, so they summarise each release rather than record it contemporaneously.
 
+## [Unreleased]
+
+### Added
+
+- Child subsets filed by a back-relation expand (`comments_via_card`) are
+  served from the store: a child query filtered by that foreign key makes no
+  request while the subset is marked complete.
+
 ## [0.9.0] - 2026-09-13
 
 ### Changed

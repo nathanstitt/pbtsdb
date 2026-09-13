@@ -431,6 +431,32 @@ Paths can be nested through a target collection's own `relations`
 (`'book.author'`). While a query fetches into a target, that target keeps its
 realtime subscription, so `get()` reads stay fresh.
 
+Back-relations work the same way and go one step further. PocketBase names them
+`<collection>_via_<field>`; fetching one files every child that references the
+parent, and pbtsdb records that the child subset for that parent is complete,
+so a child query filtered by the foreign key is served from the store:
+
+```typescript
+const comments = c('comments', { syncMode: 'on-demand', relations: { card: cards } });
+const cards = c('cards', { syncMode: 'on-demand', relations: { comments_via_card: comments } });
+
+const { data } = useLiveQuery((q) =>
+    q.from({ card: cards.fetchRelations('comments_via_card') })
+     .where(({ card }) => eq(card.id, cardId))
+     .select(({ card }) => ({
+         ...card,
+         comments: materialize(q.from({ cm: comments }).where(({ cm }) => eq(cm.card, card.id))),
+     }))
+);
+// one request; the comments include reads from the store
+```
+
+A subset stays marked while the child collection is subscribed (the parent holds
+it live) and is forgotten when a child row is pruned from the store, when the
+child's realtime subscription stops, or when the collection is cleaned up.
+PocketBase caps a back-relation expand at 1000 records, and a capped expand is
+never treated as complete.
+
 #### Collection Options Passthrough
 
 Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:

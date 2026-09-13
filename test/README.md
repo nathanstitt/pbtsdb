@@ -75,6 +75,14 @@ Real-time subscription and live data updates.
 #### `fetch-relations.test.tsx`
 Fetching and filing relations, stripping, views, held targets, keyed loads from the store.
 
+**`loaded subsets`**: a back-relation subset (`book_tags_via_book`) served from
+the store once the parent has filed it, one request when nothing filed it, a
+plain base query does not mark the subset, a second child
+(`book_metadata_via_book`), invalidation when a child row is pruned
+(`writeDelete`), invalidation when the target's realtime subscription stops,
+a back-relation filed by a different parent (`book_tags_via_tag`, from the
+tags collection), and cleanup clearing every mark.
+
 ---
 
 #### `keyed-where.test.ts`
@@ -251,12 +259,14 @@ The local server includes three interrelated test collections demonstrating diff
 - **Fields**: title, isbn, published_date, page_count, author
 - **Relations**:
   - `author` → Authors (many books → one author)
-  - One-to-one with BookMetadata via unique constraint
+  - One-to-one with BookMetadata by seed data (no unique index; PocketBase
+    expands `book_metadata_via_book` as an array)
 - **Purpose**: Demonstrates one-to-many relationships
 
 #### BookMetadata (One-to-One)
 - **Fields**: book, summary, genre, language, rating
-- **Relations**: `book` → Books (unique constraint ensures one-to-one)
+- **Relations**: `book` → Books (one-to-one by seed data, not by index; the
+  back-relation `book_metadata_via_book` expands as an array)
 - **Purpose**: Demonstrates one-to-one relationships
 
 #### TestTags (Many-to-Many Base)
