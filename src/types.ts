@@ -255,8 +255,8 @@ export type MetaOf<T> = T extends { readonly __pbtsdb: infer M } ? M : never
 export type RelationsOf<Opts> = Opts extends { relations: infer R } ? R : never
 
 /** @internal */
-export type AlwaysExpandOf<Opts> = Opts extends {
-    alwaysExpand: readonly (infer A extends string)[]
+export type AlwaysFetchRelationsOf<Opts> = Opts extends {
+    alwaysFetchRelations: readonly (infer A extends string)[]
 }
     ? A
     : never
@@ -350,8 +350,8 @@ export interface CreateCollectionOptions<
 > {
     /**
      * Collections that receive the records PocketBase expands for each relation.
-     * Declaring a relation here makes it available to `alwaysExpand` and to
-     * `collection.expand()`.
+     * Declaring a relation here makes it available to `alwaysFetchRelations` and to
+     * `collection.fetchRelations()`.
      *
      * @example
      * ```ts
@@ -362,16 +362,16 @@ export interface CreateCollectionOptions<
     relations?: RelationsConfig<Schema, CollectionName>
 
     /**
-     * Expand paths applied on every fetch. Each path must resolve through
-     * `relations` (and, for nested paths, the target collection's `relations`).
+     * Expand paths fetched with every request. The expanded records are filed
+     * into the collections named in `relations`; they are not kept on the row.
      *
      * @example
      * ```ts
-     * const books = c('books', { relations: { author: authors }, alwaysExpand: ['author'] })
+     * const books = c('books', { relations: { author: authors }, alwaysFetchRelations: ['author'] })
      * // data[0].expand?.author is typed and populated on every fetch
      * ```
      */
-    alwaysExpand?: readonly string[]
+    alwaysFetchRelations?: readonly string[]
 
     /**
      * Fields that can be omitted during insert operations.

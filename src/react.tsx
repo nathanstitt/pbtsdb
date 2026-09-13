@@ -101,7 +101,7 @@ export interface ReactProviderResult<CollectionsMap> {
  * const authors = c('authors', {});
  * const books = c('books', {
  *     relations: { author: authors },
- *     alwaysExpand: ['author'],
+ *     alwaysFetchRelations: ['author'],
  * });
  *
  * const { Provider, useStore } = createReactProvider({ authors, books });

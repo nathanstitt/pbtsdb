@@ -94,13 +94,13 @@ describe('Collection - Relations', () => {
         expect(authorName).toBeTypeOf('string')
     }, 15000)
 
-    it('should auto-expand relations when configured with alwaysExpand', async () => {
+    it('should auto-expand relations when configured with alwaysFetchRelations', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -124,7 +124,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // Get an author ID to filter by
@@ -166,7 +166,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // preload() loads without a subscriber, so nothing holds the authors
@@ -191,7 +191,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -215,7 +215,7 @@ describe('Collection - Relations', () => {
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // Get test data

@@ -122,7 +122,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
         const booksCollection = c('books', {
             syncMode: 'on-demand',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
         const bookTagsCollection = c('book_tags', { syncMode: 'eager' })
         const tagsCollection = c('tags', { syncMode: 'eager' })

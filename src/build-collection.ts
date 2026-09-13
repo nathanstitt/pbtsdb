@@ -106,8 +106,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     type RecordType = ExtractRecordType<Schema, C>
 
     const relationTargets = options?.relations as RelationTargets | undefined
-    const alwaysExpand = normalizePaths(options?.alwaysExpand ?? [])
-    for (const path of alwaysExpand) validateExpandPath(collectionName, relationTargets, path)
+    const alwaysFetch = normalizePaths(options?.alwaysFetchRelations ?? [])
+    for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
 
     // Paths requested by views that have subscribed at least once. Eager fetches
@@ -137,7 +137,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     function activeExpand(request: PbRequest): string | undefined {
         return joinPaths([
-            ...alwaysExpand,
+            ...alwaysFetch,
             ...splitPaths(request.expand),
             ...(syncMode === 'eager' ? requestedExpand : []),
         ])
@@ -697,19 +697,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     }
                 },
             },
-            expand: {
+            fetchRelations: {
                 value: () => {
-                    throw new Error(`A view of "${collectionName}" cannot be expanded further`)
+                    throw new Error(`A view of "${collectionName}" cannot fetch further relations`)
                 },
             },
         })
         return view
     }
 
-    function expand(...paths: string[]): object {
+    function fetchRelations(...paths: string[]): object {
         for (const path of paths) validateExpandPath(collectionName, relationTargets, path)
-        const all = normalizePaths([...alwaysExpand, ...paths])
-        if (all.every(path => alwaysExpand.includes(path))) return collection
+        const all = normalizePaths([...alwaysFetch, ...paths])
+        if (all.every(path => alwaysFetch.includes(path))) return collection
         const key = all.join(',')
         let view = views.get(key)
         if (!view) {
@@ -891,11 +891,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     // The union of expand paths the next (re)subscribe should carry:
-    // alwaysExpand plus every path a view has requested. Pure and
+    // alwaysFetch plus every path a view has requested. Pure and
     // side-effect-free (unlike realtimeSubscribeOptions below), so it is
     // safe to call more than once per subscribe attempt to detect drift.
     function pendingSubscribeExpand(): string | undefined {
-        return joinPaths([...alwaysExpand, ...requestedExpand])
+        return joinPaths([...alwaysFetch, ...requestedExpand])
     }
 
     // Collections along every active expand path. Held live (below) so their
@@ -1134,7 +1134,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         waitForSubscription,
         isSubscribed: () => isSubscribed,
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
-        expand,
+        fetchRelations,
         relationDependents,
         applyRelatedChange,
     })

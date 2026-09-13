@@ -7,53 +7,56 @@ import type { Authors, Books, Schema } from './schema'
 const c = createCollection<Schema>(pb, createTestQueryClient())
 
 describe('expand types', () => {
-    it('types alwaysExpand on the base rows', () => {
+    it('types alwaysFetchRelations on the base rows', () => {
         const authors = c('authors', {})
-        const books = c('books', { relations: { author: authors }, alwaysExpand: ['author'] })
+        const books = c('books', {
+            relations: { author: authors },
+            alwaysFetchRelations: ['author'],
+        })
         type Row = NonNullable<ReturnType<typeof books.get>>
         expectTypeOf<Row['expand']>().toEqualTypeOf<{ author?: Authors } | undefined>()
     })
 
-    it('rejects alwaysExpand paths not declared in relations', () => {
+    it('rejects alwaysFetchRelations paths not declared in relations', () => {
         const authors = c('authors', {})
         expect(() =>
             // @ts-expect-error nope is not a declared relation
-            c('books', { relations: { author: authors }, alwaysExpand: ['nope'] })
+            c('books', { relations: { author: authors }, alwaysFetchRelations: ['nope'] })
         ).toThrow('Cannot expand "nope" on collection "books"')
         expect(() =>
-            // @ts-expect-error alwaysExpand without relations
-            c('books', { alwaysExpand: ['author'] })
+            // @ts-expect-error alwaysFetchRelations without relations
+            c('books', { alwaysFetchRelations: ['author'] })
         ).toThrow('no relations declared')
     })
 
     it('widens expand on a view and rejects undeclared paths', () => {
         const authors = c('authors', {})
         const books = c('books', { relations: { author: authors } })
-        const view = books.expand('author')
+        const view = books.fetchRelations('author')
         type Row = NonNullable<ReturnType<typeof view.get>>
         expectTypeOf<Row['expand']>().toEqualTypeOf<{ author?: Authors } | undefined>()
         expect(() =>
             // @ts-expect-error nope is not a declared relation
-            books.expand('nope')
+            books.fetchRelations('nope')
         ).toThrow('Cannot expand "nope" on collection "books"')
         expect(() =>
             // @ts-expect-error views are leaves
-            view.expand('author')
-        ).toThrow('view of "books" cannot be expanded further')
+            view.fetchRelations('author')
+        ).toThrow('view of "books" cannot fetch further relations')
     })
 
     it('types nested paths through the target collection', () => {
         const authors = c('authors', {})
         const books = c('books', { relations: { author: authors } })
         const metadata = c('book_metadata', { relations: { book: books } })
-        const view = metadata.expand('book.author')
+        const view = metadata.fetchRelations('book.author')
         type Row = NonNullable<ReturnType<typeof view.get>>
         expectTypeOf<Row['expand']>().toEqualTypeOf<
             { book?: Books & { expand?: { author?: Authors } } } | undefined
         >()
         expect(() =>
             // @ts-expect-error nope is not a relation of books
-            metadata.expand('book.nope')
+            metadata.fetchRelations('book.nope')
         ).toThrow('Cannot expand "book.nope" on collection "book_metadata"')
     })
 
@@ -62,7 +65,7 @@ describe('expand types', () => {
         const metadata = c('book_metadata', { relations: { book: books } })
         expect(() =>
             // @ts-expect-error books declares no relations
-            metadata.expand('book.author')
+            metadata.fetchRelations('book.author')
         ).toThrow('Cannot expand "book.author" on collection "book_metadata"')
     })
 
@@ -91,7 +94,7 @@ describe('expand types', () => {
             relations: { author: authors },
             omitOnInsert: ['created', 'updated'],
         })
-        const view = books.expand('author')
+        const view = books.fetchRelations('author')
         expectTypeOf(view.collectionName).toEqualTypeOf<'books'>()
         expectTypeOf(view.waitForSubscription).toBeFunction()
         type Insert = Parameters<typeof view.insert>[0]

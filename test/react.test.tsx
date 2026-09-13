@@ -252,7 +252,7 @@ describe('createReactProvider', () => {
                 syncMode: 'eager',
                 omitOnInsert: ['created'],
                 relations: { author: authors },
-                alwaysExpand: ['author'],
+                alwaysFetchRelations: ['author'],
             })
             const collections = {
                 authors,

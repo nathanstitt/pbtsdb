@@ -129,12 +129,12 @@ export const { Provider, useStore } = createReactProvider({
     posts: c('posts', {
         omitOnInsert: ['created', 'updated'] as const,
         relations: { author: users },
-        alwaysExpand: ['author'],
+        alwaysFetchRelations: ['author'],
     }),
     comments: c('comments', {
         omitOnInsert: ['created', 'updated'] as const,
         relations: { author: users },
-        alwaysExpand: ['author'],
+        alwaysFetchRelations: ['author'],
     }),
 });
 
@@ -325,8 +325,8 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `options` - Optional configuration
 
 **Options:**
-- `relations?: Record<string, Collection>` - Collections that receive expanded records for each relation; declares what `alwaysExpand` and `collection.expand()` may name
-- `alwaysExpand?: readonly string[]` - Expand paths applied on every fetch (e.g. `['author', 'book.author']`)
+- `relations?: Record<string, Collection>` - Collections that receive expanded records for each relation; declares what `alwaysFetchRelations` and `collection.fetchRelations()` may name
+- `alwaysFetchRelations?: readonly string[]` - Expand paths applied on every fetch (e.g. `['author', 'book.author']`)
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
@@ -351,7 +351,7 @@ const c = createCollection<MySchema>(pb, queryClient);
 const authorsCollection = c('authors', {});
 const booksCollection = c('books', {
     relations: { author: authorsCollection },  // where expanded authors are upserted
-    alwaysExpand: ['author'],                  // expanded on every fetch
+    alwaysFetchRelations: ['author'],                  // expanded on every fetch
 });
 
 const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
@@ -360,7 +360,7 @@ const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
 
 #### Per-query expand
 
-Declare relations once, then ask for expansion per query with `collection.expand()`.
+Declare relations once, then ask for expansion per query with `collection.fetchRelations()`.
 A view shares the collection's store, realtime subscription, and mutations; only
 its fetches add the `expand` parameter.
 
@@ -373,7 +373,7 @@ const booksCollection = c('books', {
 function BookList() {
     const [books] = useStore('books');
     const { data } = useLiveQuery((q) =>
-        q.from({ books: books.expand('tags') })
+        q.from({ books: books.fetchRelations('tags') })
          .where(({ books }) => eq(books.genre, 'Fiction'))
     );
     // data[0].expand?.tags is Tags[] | undefined; data[0].expand?.author is a type error
@@ -384,7 +384,7 @@ Paths can be nested through a target collection's own `relations`:
 
 ```typescript
 const metadata = c('book_metadata', { relations: { book: booksCollection } });
-const { data } = useLiveQuery((q) => q.from({ m: metadata.expand('book.author') }));
+const { data } = useLiveQuery((q) => q.from({ m: metadata.fetchRelations('book.author') }));
 // data[0].expand?.book?.expand?.author?.name
 ```
 
@@ -938,7 +938,7 @@ const authorsCollection = c('authors', { syncMode: 'on-demand' });
 const booksCollection = c('books', {
     syncMode: 'on-demand',
     relations: { author: authorsCollection },  // Auto-populates authorsCollection
-    alwaysExpand: ['author'],
+    alwaysFetchRelations: ['author'],
 });
 
 const { data } = useLiveQuery((q) =>
@@ -996,7 +996,7 @@ const books = c('books', {
 const authors = c('authors', {});
 const books = c('books', {
     relations: { author: authors },
-    alwaysExpand: ['author'],
+    alwaysFetchRelations: ['author'],
 });
 ```
 
@@ -1027,7 +1027,7 @@ const c = createCollection<MySchema>(pb, queryClient);
 const authors = c('authors', {});
 const books = c('books', {
     relations: { author: authors },  // authors is already created
-    alwaysExpand: ['author'],
+    alwaysFetchRelations: ['author'],
 });
 
 // ❌ Bad - can't reference what doesn't exist yet
@@ -1035,7 +1035,7 @@ const books = c('books', {
     relations: {
         author: ???  // Where is authors?
     },
-    alwaysExpand: ['author'],
+    alwaysFetchRelations: ['author'],
 });
 ```
 
@@ -1078,7 +1078,7 @@ const c = createCollection<MySchema>(pb, queryClient);
 const authors = c('authors', {});
 const posts = c('posts', {
     relations: { author: authors },
-    alwaysExpand: ['author'],  // Auto-expand on every fetch
+    alwaysFetchRelations: ['author'],  // Auto-expand on every fetch
 });
 
 const { data } = useLiveQuery((q) => q.from({ posts }));

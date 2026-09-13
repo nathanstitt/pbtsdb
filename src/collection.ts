@@ -4,7 +4,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import { buildCollection, type CreateCollectionFactoryOptions } from './build-collection'
 import type {
-    AlwaysExpandOf,
+    AlwaysFetchRelationsOf,
     CreateCollectionOptions,
     ExpandPath,
     InsertInputOf,
@@ -62,31 +62,31 @@ export type PbView<
 
 /**
  * The collection returned by {@link createCollection}: a {@link PbView} over the
- * `alwaysExpand` paths, plus `expand()` for per-query views.
+ * `alwaysFetchRelations` paths, plus `fetchRelations()` for per-query views.
  */
 export type PbCollection<
     Schema extends SchemaDeclaration,
     C extends keyof Schema & string,
     Opts,
-> = PbView<Schema, C, Opts, AlwaysExpandOf<Opts>> & {
+> = PbView<Schema, C, Opts, AlwaysFetchRelationsOf<Opts>> & {
     /**
-     * A view of this collection whose queries also expand `paths`. Views share
-     * this collection's store, realtime subscription, and mutations; only the
-     * fetch differs. Paths must resolve through `relations`.
+     * A view of this collection whose queries also fetch `paths` and file the
+     * expanded records into their target collections. Rows are unchanged; read
+     * the related records through `materialize()`, a join, or the target's `get()`.
      *
      * @example
      * ```ts
-     * const { data } = useLiveQuery(q => q.from({ books: books.expand('author') }))
+     * const { data } = useLiveQuery(q => q.from({ books: books.fetchRelations('author') }))
      * data[0].expand?.author?.name
      * ```
      */
-    expand<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
+    fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
         ...paths: P
-    ): PbView<Schema, C, Opts, AlwaysExpandOf<Opts> | P[number]>
+    ): PbView<Schema, C, Opts, AlwaysFetchRelationsOf<Opts> | P[number]>
 }
 
-type AlwaysExpandCheck<Opts> = {
-    alwaysExpand?: readonly ExpandPath<RelationsOf<Opts>>[]
+type AlwaysFetchRelationsCheck<Opts> = {
+    alwaysFetchRelations?: readonly ExpandPath<RelationsOf<Opts>>[]
 }
 
 /**
@@ -107,12 +107,12 @@ type AlwaysExpandCheck<Opts> = {
  * ```
  *
  * @example
- * With relations expanded on every fetch:
+ * With relations fetched on every request:
  * ```ts
  * const authorsCollection = createCollection<Schema>(pb, queryClient)('authors', {});
  * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
  *     relations: { author: authorsCollection },
- *     alwaysExpand: ['author'],
+ *     alwaysFetchRelations: ['author'],
  * });
  *
  * const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
@@ -120,13 +120,14 @@ type AlwaysExpandCheck<Opts> = {
  * ```
  *
  * @example
- * With a per-query expand view:
+ * With a per-query fetchRelations view:
  * ```ts
  * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
  *     relations: { author: authorsCollection },
  * });
  *
- * const { data } = useLiveQuery((q) => q.from({ books: booksCollection.expand('author') }));
+ * const view = booksCollection.fetchRelations('author');
+ * const { data } = useLiveQuery((q) => q.from({ books: view }));
  * // data[0].expand?.author is typed and populated for this query only
  * ```
  */
@@ -137,7 +138,7 @@ export function createCollection<Schema extends SchemaDeclaration>(
 ) {
     return <C extends keyof Schema & string, const Opts extends CreateCollectionOptions<Schema, C>>(
         collectionName: C,
-        options?: Opts & AlwaysExpandCheck<Opts>
+        options?: Opts & AlwaysFetchRelationsCheck<Opts>
     ): PbCollection<Schema, C, Opts> => {
         return buildCollection<Schema, C>({
             pb,

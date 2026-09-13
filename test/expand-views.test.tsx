@@ -42,16 +42,18 @@ describe('Per-query expand', () => {
         vi.restoreAllMocks()
     })
 
-    describe('alwaysExpand', () => {
+    describe('alwaysFetchRelations', () => {
         it('rejects an undeclared path at creation', () => {
             const c = createCollection<Schema>(pb, queryClient)
             const authors = c('authors', {})
             expect(() =>
                 // @ts-expect-error runtime check of an undeclared path
-                c('books', { relations: { author: authors }, alwaysExpand: ['nope'] })
+                c('books', { relations: { author: authors }, alwaysFetchRelations: ['nope'] })
             ).toThrow('Cannot expand "nope" on collection "books"')
             // @ts-expect-error runtime check without relations
-            expect(() => c('books', { alwaysExpand: ['author'] })).toThrow('no relations declared')
+            expect(() => c('books', { alwaysFetchRelations: ['author'] })).toThrow(
+                'no relations declared'
+            )
         })
 
         it('expands nested paths and upserts each level into its target', async () => {
@@ -61,7 +63,7 @@ describe('Per-query expand', () => {
             const metadata = c('book_metadata', {
                 syncMode: 'on-demand',
                 relations: { book: books },
-                alwaysExpand: ['book.author'],
+                alwaysFetchRelations: ['book.author'],
             })
 
             const { result } = renderHook(() => useLiveQuery(q => q.from({ m: metadata })))
@@ -93,7 +95,7 @@ describe('Per-query expand', () => {
             const books = c('books', {
                 syncMode: 'on-demand',
                 relations: { author: authors },
-                alwaysExpand: ['author'],
+                alwaysFetchRelations: ['author'],
             })
 
             const { result } = renderHook(() =>
@@ -133,7 +135,7 @@ describe('Per-query expand', () => {
 
         it('expands per query and upserts into the target', async () => {
             const { authors, books } = make()
-            const view = books.expand('author')
+            const view = books.fetchRelations('author')
 
             const { result } = renderHook(() =>
                 useLiveQuery(q =>
@@ -149,25 +151,28 @@ describe('Per-query expand', () => {
 
         it('returns the same instance for the same normalized paths', () => {
             const { bookTags } = make()
-            const a = bookTags.expand('tag', 'book')
-            const b = bookTags.expand('book', 'tag', 'book')
+            const a = bookTags.fetchRelations('tag', 'book')
+            const b = bookTags.fetchRelations('book', 'tag', 'book')
             expect(a).toBe(b)
             expect(a).not.toBe(bookTags)
             expect(a.id).toBe('book_tags?expand=book,tag')
-            expect(bookTags.expand('book')).not.toBe(a)
+            expect(bookTags.fetchRelations('book')).not.toBe(a)
         })
 
-        it('returns the base when nothing is added beyond alwaysExpand', () => {
+        it('returns the base when nothing is added beyond alwaysFetchRelations', () => {
             const c = createCollection<Schema>(pb, queryClient)
             const authors = c('authors', {})
-            const books = c('books', { relations: { author: authors }, alwaysExpand: ['author'] })
-            expect(books.expand()).toBe(books)
-            expect(books.expand('author')).toBe(books)
+            const books = c('books', {
+                relations: { author: authors },
+                alwaysFetchRelations: ['author'],
+            })
+            expect(books.fetchRelations()).toBe(books)
+            expect(books.fetchRelations('author')).toBe(books)
         })
 
         it('shares one store: the base sees rows fetched through a view', async () => {
             const { books } = make()
-            const view = books.expand('author')
+            const view = books.fetchRelations('author')
 
             const viewQuery = renderHook(() =>
                 useLiveQuery(q =>
@@ -184,7 +189,7 @@ describe('Per-query expand', () => {
 
         it('lets a base and a view of the same collection share one query', async () => {
             const { books } = make()
-            const view = books.expand('author')
+            const view = books.fetchRelations('author')
 
             const { result } = renderHook(() =>
                 useLiveQuery(q =>
@@ -210,7 +215,7 @@ describe('Per-query expand', () => {
                 syncMode: 'on-demand',
                 relations: { book: books },
             })
-            const view = metadata.expand('book.author')
+            const view = metadata.fetchRelations('book.author')
 
             const { result } = renderHook(() => useLiveQuery(q => q.from({ m: view })))
             await waitForLoadFinish(result, 10000)
@@ -227,19 +232,19 @@ describe('Per-query expand', () => {
         it('throws for an undeclared path and for expanding a view', () => {
             const { books } = make()
             // @ts-expect-error runtime check of an undeclared path
-            expect(() => books.expand('nope')).toThrow(
+            expect(() => books.fetchRelations('nope')).toThrow(
                 'Cannot expand "nope" on collection "books": segment "nope" is not a declared relation'
             )
-            const view = books.expand('author')
+            const view = books.fetchRelations('author')
             // @ts-expect-error views are leaves
-            expect(() => view.expand('author')).toThrow(
-                'view of "books" cannot be expanded further'
+            expect(() => view.fetchRelations('author')).toThrow(
+                'view of "books" cannot fetch further relations'
             )
         })
 
         it('keys a view fetch by its expand string', async () => {
             const { books } = make()
-            const view = books.expand('author')
+            const view = books.fetchRelations('author')
             const { result } = renderHook(() =>
                 useLiveQuery(q =>
                     q.from({ books: view }).where(({ books }) => eq(books.title, 'Animal Farm'))
@@ -335,7 +340,7 @@ describe('Per-query expand', () => {
 
                 // Mount the view while the mutation above is still pending; its
                 // gated fetch resolves below with the stale row.
-                const view = books.expand('author')
+                const view = books.fetchRelations('author')
                 const viewQuery = renderHook(() =>
                     useLiveQuery(q =>
                         q.from({ books: view }).where(({ books }) => eq(books.id, seed.id))
@@ -405,7 +410,9 @@ describe('Per-query expand', () => {
             try {
                 const expanded = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(expanded.result, 10000)
@@ -447,7 +454,7 @@ describe('Per-query expand', () => {
             expect((plain.result.current.data[0] as { expand?: unknown }).expand).toBeUndefined()
 
             const expanded = renderHook(() =>
-                useLiveQuery(q => q.from({ books: books.expand('author') }))
+                useLiveQuery(q => q.from({ books: books.fetchRelations('author') }))
             )
             await waitForLoadFinish(expanded.result, 10000)
             await waitFor(() =>
@@ -465,7 +472,9 @@ describe('Per-query expand', () => {
             try {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(result, 10000)
@@ -486,7 +495,7 @@ describe('Per-query expand', () => {
             const authorId = (await pb.collection('authors').getFirstListItem('')).id
             const bookId = await createBook(authorId)
             try {
-                const view = books.expand('author')
+                const view = books.fetchRelations('author')
                 const viaView = renderHook(() =>
                     useLiveQuery(q => q.from({ b: view }).where(({ b }) => eq(b.id, bookId)))
                 )
@@ -543,8 +552,8 @@ describe('Per-query expand', () => {
                 })
 
             try {
-                const bookView = bookTags.expand('book')
-                const tagView = bookTags.expand('tag')
+                const bookView = bookTags.fetchRelations('book')
+                const tagView = bookTags.fetchRelations('tag')
 
                 // Mount both views back-to-back, with no await between them, so
                 // their subscriptions race rather than serialize naturally.
@@ -607,7 +616,7 @@ describe('Per-query expand', () => {
             const { result } = renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ b: books.expand('author') })
+                        .from({ b: books.fetchRelations('author') })
                         .orderBy(({ b }) => b.title)
                         .limit(2)
                 )
@@ -646,7 +655,7 @@ describe('Per-query expand', () => {
             const query = renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ b: books.expand('author') })
+                        .from({ b: books.fetchRelations('author') })
                         .orderBy(({ b }) => b.id)
                         .limit(1)
                 )
@@ -676,7 +685,7 @@ describe('Per-query expand', () => {
             const query = renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ m: metadata.expand('book.author') })
+                        .from({ m: metadata.fetchRelations('book.author') })
                         .orderBy(({ m }) => m.id)
                         .limit(1)
                 )
@@ -718,7 +727,7 @@ describe('Per-query expand', () => {
                 const first = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ bt: bookTags.expand('book') })
+                            .from({ bt: bookTags.fetchRelations('book') })
                             .orderBy(({ bt }) => bt.id)
                             .limit(1)
                     )
@@ -731,7 +740,7 @@ describe('Per-query expand', () => {
                 const second = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ bt: bookTags.expand('tag') })
+                            .from({ bt: bookTags.fetchRelations('tag') })
                             .orderBy(({ bt }) => bt.id)
                             .limit(1)
                     )
@@ -742,7 +751,7 @@ describe('Per-query expand', () => {
                 const third = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ bt: bookTags.expand('book.author') })
+                            .from({ bt: bookTags.fetchRelations('book.author') })
                             .orderBy(({ bt }) => bt.id)
                             .limit(1)
                     )
@@ -798,7 +807,7 @@ describe('Per-query expand', () => {
                 const first = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ bt: bookTags.expand('book') })
+                            .from({ bt: bookTags.fetchRelations('book') })
                             .orderBy(({ bt }) => bt.id)
                             .limit(1)
                     )
@@ -813,7 +822,7 @@ describe('Per-query expand', () => {
                 const second = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ bt: bookTags.expand('tag') })
+                            .from({ bt: bookTags.fetchRelations('tag') })
                             .orderBy(({ bt }) => bt.id)
                             .limit(1)
                     )
@@ -862,7 +871,7 @@ describe('Per-query expand', () => {
                 renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ b: books.expand('author') })
+                            .from({ b: books.fetchRelations('author') })
                             .orderBy(({ b }) => b.id)
                             .limit(1)
                     )
@@ -922,7 +931,7 @@ describe('Per-query expand', () => {
                     const query = renderHook(() =>
                         useLiveQuery(q =>
                             q
-                                .from({ b: books.expand('author') })
+                                .from({ b: books.fetchRelations('author') })
                                 .orderBy(({ b }) => b.id)
                                 .limit(1)
                         )
@@ -960,7 +969,7 @@ describe('Per-query expand', () => {
             const query = renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ b: books.expand('author') })
+                        .from({ b: books.fetchRelations('author') })
                         .orderBy(({ b }) => b.id)
                         .limit(1)
                 )
@@ -984,8 +993,8 @@ describe('Per-query expand', () => {
                 relations: { book: books, tag: tags },
             })
             for (let i = 0; i < 50; i++) {
-                bookTags.expand(i % 2 === 0 ? 'book' : 'tag')
-                bookTags.expand('book', 'tag')
+                bookTags.fetchRelations(i % 2 === 0 ? 'book' : 'tag')
+                bookTags.fetchRelations('book', 'tag')
             }
             expect(internals(bookTags).heldRelationTargetCount()).toBe(0)
             expect(internals(books).subscriberCount).toBe(0)
@@ -1029,7 +1038,9 @@ describe('Per-query expand', () => {
             try {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(result, 10000)
@@ -1074,7 +1085,7 @@ describe('Per-query expand', () => {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ m: metadata.expand('book.author') })
+                            .from({ m: metadata.fetchRelations('book.author') })
                             .where(({ m }) => eq(m.id, metadataId))
                     )
                 )
@@ -1108,7 +1119,7 @@ describe('Per-query expand', () => {
                 const expanded = renderHook(() =>
                     useLiveQuery(q =>
                         q
-                            .from({ b: books.expand('author') })
+                            .from({ b: books.fetchRelations('author') })
                             .where(({ b }) => eq(b.id, embeddedBookId))
                     )
                 )
@@ -1185,7 +1196,9 @@ describe('Per-query expand', () => {
             try {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(result, 10000)
@@ -1223,7 +1236,7 @@ describe('Per-query expand', () => {
             const query = renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ b: books.expand('author') })
+                        .from({ b: books.fetchRelations('author') })
                         .orderBy(({ b }) => b.id)
                         .limit(2)
                 )
@@ -1269,7 +1282,9 @@ describe('Per-query expand', () => {
             try {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(result, 10000)
@@ -1320,7 +1335,9 @@ describe('Per-query expand', () => {
             try {
                 const { result } = renderHook(() =>
                     useLiveQuery(q =>
-                        q.from({ b: books.expand('author') }).where(({ b }) => eq(b.id, bookId))
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, bookId))
                     )
                 )
                 await waitForLoadFinish(result, 10000)

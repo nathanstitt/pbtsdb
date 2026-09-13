@@ -88,7 +88,7 @@ Pins the two undocumented TanStack DB behaviours per-query expand relies on. If 
 ---
 
 #### `expand-types.test.ts`
-Type-level assertions for `relations`, `alwaysExpand`, `expand()` views, and nested paths.
+Type-level assertions for `relations`, `alwaysFetchRelations`, `fetchRelations()` views, and nested paths.
 
 ---
 
