@@ -912,7 +912,7 @@ describe('Fetch relations', () => {
                     const query = (options as { query?: { filter?: string } }).query
                     filters.push(query?.filter ?? '')
                 }
-                return { url, options }
+                return prev ? prev(url, options) : { url, options }
             }
             return {
                 filters,
@@ -1380,6 +1380,60 @@ describe('Fetch relations', () => {
                     expect(counter.filters).toEqual([])
                 } finally {
                     counter.restore()
+                }
+            }, 15000)
+
+            it('serves a nested via path: the junction subset and its tags without requests', async () => {
+                const { bookId, tagIds } = await seededBookWithTags()
+                const c = createCollection<Schema>(pb, queryClient)
+                const tags = c('tags', { syncMode: 'on-demand' })
+                const bookTags = c('book_tags', { syncMode: 'on-demand', relations: { tag: tags } })
+                const books = c('books', {
+                    syncMode: 'on-demand',
+                    relations: { book_tags_via_book: bookTags },
+                })
+                const junctionCounter = countRequestsTo('/collections/book_tags/records')
+                const tagCounter = countRequestsTo('/collections/tags/records')
+                try {
+                    const { result } = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books.fetchRelations('book_tags_via_book.tag') })
+                                .where(({ b }) => eq(b.id, bookId))
+                                .select(({ b }) => ({
+                                    id: b.id,
+                                    links: materialize(
+                                        q
+                                            .from({ bt: bookTags })
+                                            .where(({ bt }) => eq(bt.book, b.id))
+                                            .select(({ bt }) => ({
+                                                id: bt.id,
+                                                tag: materialize(
+                                                    q
+                                                        .from({ t: tags })
+                                                        .where(({ t }) => eq(t.id, bt.tag))
+                                                ),
+                                            }))
+                                    ),
+                                }))
+                        )
+                    )
+                    await waitForLoadFinish(result, 10000)
+                    await waitFor(() =>
+                        expect(new Set(result.current.data[0]?.links?.map(l => l.id))).toEqual(
+                            new Set(tagIds)
+                        )
+                    )
+                    await waitFor(() =>
+                        expect(result.current.data[0]?.links?.every(l => l.tag?.length === 1)).toBe(
+                            true
+                        )
+                    )
+                    expect(junctionCounter.filters).toEqual([])
+                    expect(tagCounter.filters).toEqual([])
+                } finally {
+                    junctionCounter.restore()
+                    tagCounter.restore()
                 }
             }, 15000)
         })
