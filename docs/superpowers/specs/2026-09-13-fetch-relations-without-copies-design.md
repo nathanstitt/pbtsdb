@@ -177,6 +177,11 @@ Adapted from 0.8's suites; every assertion on `row.expand` is removed.
 8. Strip respects other keys: with `subscribeOptions: () => ({ expand:
    'author' })` on a collection that does not declare `author` in
    `alwaysFetchRelations`, the echoed row keeps `expand.author`.
+9. After-load access: after a books query with `alwaysFetchRelations:
+   ['author']` (or a `fetchRelations('author')` view), `authors.get(authorId)`
+   returns the record, and a `useLiveQuery` on authors with
+   `where(eq(a.id, authorId))` and `findOne()` returns it, with zero PocketBase
+   requests to authors.
 
 `test/expand-helpers.test.ts`: keep the path helpers' tests; delete the
 `mergeExpand`, `patchEmbedded`, and `propagateRelatedChange` describes.
