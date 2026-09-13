@@ -19,6 +19,8 @@ export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './t
 /**
  * A pbtsdb collection or view: a TanStack DB collection over
  * `ExtractRecordType<Schema, C>` rows, plus pbtsdb's subscription helpers.
+ * Views are created by {@link PbCollection.fetchRelations} and are leaves:
+ * they have no further `fetchRelations()`.
  */
 export type PbCollectionView<
     Schema extends SchemaDeclaration,

@@ -312,11 +312,12 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         const newTitle = `Renamed ${Date.now().toString().slice(-8)}`
         const newerRow: Books = { ...seed, title: newTitle, updated: offsetUpdated(seed, 60000) }
         const realGetFullList = pb.collection('books').getFullList.bind(pb.collection('books'))
-        const control = { serveNewer: false }
+        const control = { serveNewer: false, served: 0 }
         vi.spyOn(pb.collection('books'), 'getFullList').mockImplementation(
             async (...args: Parameters<typeof realGetFullList>) => {
                 const filter = (args[0] as { filter?: string } | undefined)?.filter ?? ''
                 if (control.serveNewer && filter.includes(seed.id) && !filter.includes('genre')) {
+                    control.served++
                     return [{ ...newerRow }] as unknown as ReturnType<typeof realGetFullList>
                 }
                 return realGetFullList(...args)
@@ -347,6 +348,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
             timeout: 5000,
         })
         expect(testLogger.messages.debug.some(m => m.msg.includes('Dropping'))).toBe(false)
+        expect(control.served).toBeGreaterThan(0)
 
         await pb
             .collection('books')

@@ -381,7 +381,8 @@ book rows. Read them through `materialize()` in a query, a join, or
 `authors.get(book.author)`:
 
 ```typescript
-import { eq, materialize } from 'pbtsdb';
+import { eq } from '@tanstack/db';
+import { materialize } from 'pbtsdb';
 
 const { data } = useLiveQuery((q) =>
     q.from({ b: books }).select(({ b }) => ({

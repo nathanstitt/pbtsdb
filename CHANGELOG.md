@@ -25,6 +25,9 @@ All notable changes to this project will be documented in this file.
 - Id-only loads (`eq(id, x)`, `inArray(id, [...])`, or an `or` of those) are
   served from the synced store when every id is present, so includes and joins
   on filed rows make no request.
+- `PbCollectionView` is exported: a collection or view without
+  `fetchRelations()` (views are leaves). `PbCollection` is `PbCollectionView`
+  plus `fetchRelations()`.
 
 ### Removed
 

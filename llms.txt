@@ -203,6 +203,9 @@ PocketBase `expand` only files related records into their own collections;
 rows never carry `expand`. Read related records from the target collection.
 
 ```typescript
+import { eq } from '@tanstack/db';
+import { materialize } from 'pbtsdb';
+
 const c = createCollection<Schema>(pb, queryClient);
 const authors = c('authors', { syncMode: 'on-demand' });
 const books = c('books', {

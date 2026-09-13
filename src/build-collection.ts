@@ -171,10 +171,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         )
     }
 
-    // A filed value's own `expand` is fully consumed by the recursive
-    // upsertExpanded call right after upsertInto (each of its keys is filed
-    // into that value's own relation targets), so it never belongs on the
-    // copy written here.
+    // A filed copy never carries `expand`: any part of it with a declared
+    // target was filed by the recursive upsertExpanded call right after
+    // upsertInto, and any part without one has nowhere to go and is dropped.
     function withoutExpand(values: object[]): object[] {
         return values.map(value => {
             const { expand: _expand, ...plain } = value as { expand?: unknown }
@@ -258,10 +257,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
     // which an empty id filter would turn into "fetch everything".
     function servedFromStore(request: PbRequest): RecordType[] | undefined {
-        const { ids, limit } = request
+        const { ids, sort, limit } = request
         if (!ids) return undefined
         if (ids.length === 0) return []
         if (request.expand) return undefined
+        // A sorted + limited request must be sliced in that order; the store
+        // holds rows in id order, so slicing here could return the wrong subset.
+        // TanStack passes neither for id-only loads today, so this only guards
+        // against a future caller combining them.
+        if (sort && limit) return undefined
         const present = rowsFromStore(ids)
         if (!present) return undefined
         return limit ? present.slice(0, limit) : present
@@ -846,7 +850,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     // Collections along every active expand path. Held live (below) so their
-    // realtime echoes reach this collection's embedded copies.
+    // stores stay fresh for keyed reads (materialize, joins, get()) and for
+    // the store-served short circuit.
     function activeExpandTargets(): Set<ExpandTargetCollection> {
         const targets = new Set<ExpandTargetCollection>()
         for (const path of splitPaths(pendingSubscribeExpand())) {
