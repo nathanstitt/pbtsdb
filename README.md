@@ -10,7 +10,7 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
 - 🔄 **Automatic caching** via TanStack Query
 - ✨ **Optimistic mutations** with insert/update/delete support
 - 🎨 **React hooks** for easy component integration
-- 🔗 **Type-safe joins** and relation expansion
+- 🔗 **Type-safe joins** and relation fetching into their own collections
 
 ## Table of Contents
 
@@ -19,34 +19,33 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
 - [Core Concepts](#core-concepts)
 - [API Reference](#api-reference)
   - [createCollection()](#createcollection)
+  - [Related data](#related-data)
   - [React Integration](#react-integration)
   - [Subscriptions](#subscriptions)
+  - [Utility Functions](#utility-functions)
 - [Usage Examples](#usage-examples)
-  - [Basic Queries](#basic-queries)
-  - [Filtering and Sorting](#filtering-and-sorting)
-  - [Relations and Joins](#relations-and-joins)
   - [Includes (Nested Subqueries)](#includes-nested-subqueries)
-  - [Real-time Updates](#real-time-updates)
-  - [Mutations](#mutations)
 - [TypeScript](#typescript)
 - [Best Practices](#best-practices)
+- [Configuration](#configuration)
 
 ## Installation
 
 ```bash
-npm install pbtsdb pocketbase @tanstack/react-query @tanstack/react-db @tanstack/query-db-collection
+npm install pbtsdb pocketbase @tanstack/db @tanstack/query-db-collection @tanstack/react-query @tanstack/react-db
 ```
 
 ### Peer Dependencies
 
 - `pocketbase` >= 0.22.0
+- `@tanstack/db` >= 0.6.0
+- `@tanstack/query-db-collection` >= 1.0.40
 - `@tanstack/react-query` >= 5.0.0
-- `@tanstack/react-db` >= 0.1.0
-- `@tanstack/query-db-collection` >= 1.0.0
-- `react` >= 18.0.0
-- `react-dom` >= 18.0.0
+- `@tanstack/react-db` >= 0.1.86 (optional; only for `createReactProvider`)
+- `react` and `react-dom` >= 18.0.0 (optional)
 
-All peer dependencies use minimum version constraints - newer versions should work.
+All peer dependencies use minimum version constraints; newer versions should work. The
+non-React entry point `pbtsdb/core` needs neither `react` nor `@tanstack/react-db`.
 
 ## Quick Start
 
@@ -244,7 +243,7 @@ export function PostWithComments({ postId }: { postId: string }) {
 - ✅ Type-safe queries
 - ✅ Automatic real-time updates
 - ✅ Optimistic mutations
-- ✅ Expanded relations
+- ✅ Related data read from its own collection, no embedded copies
 
 ## Core Concepts
 
@@ -286,6 +285,22 @@ const { data } = useLiveQuery((q) =>
 - **Automatic:** Subscription starts when first subscriber mounts, stops when last subscriber unmounts
 - **Shared:** Multiple components using the same collection share one subscription
 - **No manual control needed:** The collection handles all subscription management internally
+
+### Sync Modes
+
+Every collection is either **eager** (the default) or **on-demand**:
+
+```typescript
+const authors = c('authors', {});                       // eager: one full fetch, then realtime
+const books = c('books', { syncMode: 'on-demand' });    // on-demand: fetch what queries ask for
+```
+
+An eager collection loads all of its rows on first use and answers every query
+from memory. An on-demand collection translates each live query's `where`,
+`orderBy`, and `limit` into a PocketBase request, so only the rows a query asks
+for enter the store, and different filters are cached under different keys.
+Use on-demand for large collections; realtime keeps both modes current once rows
+are loaded.
 
 ### Mutations and Refetch
 
@@ -346,6 +361,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable
+- `refetchOnMutation?: boolean` - Refetch the collection after a built-in insert/update/delete succeeds (default: `false`; see [Mutations and Refetch](#mutations-and-refetch))
 - `ignoreAutoCancellation?: boolean` - Ignore PocketBase auto-cancellation errors (default: `true`)
 - `collectionOptions?: object` - Additional TanStack DB collection options passed through directly (see [Collection Options Passthrough](#collection-options-passthrough))
 
@@ -595,6 +611,10 @@ both transports:
 Setting the matching header on REST requests remains the application's job, via
 `pb.beforeSend`. Requires `pocketbase >= 0.22.0`.
 
+An `expand` you add here is yours: pbtsdb strips only the paths it requested
+through `alwaysFetchRelations` and `fetchRelations()`, so records expanded by
+this option stay on the echoed rows, untyped.
+
 ### Utility Functions
 
 #### newRecordId()
@@ -625,6 +645,7 @@ pbtsdb re-exports commonly used TanStack DB utilities so you don't need to depen
 ```typescript
 import {
     // Includes helpers
+    materialize,
     toArray,
     createEffect,
 
@@ -685,7 +706,7 @@ export function TaskBoard({ userId }: { userId: string }) {
 ```typescript
 // ProductCatalog.tsx
 import { useLiveQuery } from '@tanstack/react-db';
-import { and, gte, lte } from '@tanstack/db';
+import { and, eq, lte } from '@tanstack/db';
 import { useStore } from './app';
 
 export function ProductCatalog() {
@@ -697,12 +718,12 @@ export function ProductCatalog() {
     const { data: filteredProducts } = useLiveQuery((q) => {
         let query = q.from({ products })
             .where(({ products }) => and(
-                products.in_stock === true,
+                eq(products.in_stock, true),
                 lte(products.price, maxPrice)
             ));
 
         if (category) {
-            query = query.where(({ products }) => products.category === category);
+            query = query.where(({ products }) => eq(products.category, category));
         }
 
         return query.orderBy(({ products }) => products.rating, 'desc');
@@ -849,8 +870,9 @@ export function CreateBookForm() {
 
             if (tx.state === 'completed') setTitle('');
             else setError('Failed to create book');
-        } catch (err: any) {
-            setError(err.data ? Object.values(err.data).join(', ') : err.message);
+        } catch (err) {
+            const failure = err as { data?: Record<string, unknown>; message?: string };
+            setError(failure.data ? Object.values(failure.data).join(', ') : failure.message ?? 'Failed');
         }
     };
 
@@ -914,20 +936,27 @@ TanStack DB 0.6.0 introduces **includes** — nested subqueries within `select()
 
 #### Single relation with `findOne()`
 
+Wrap a `findOne()` subquery in `materialize()` to get a plain `T | undefined`
+value that updates when the child changes. Without it, the include is a live
+sub-collection rather than a value.
+
 ```typescript
 import { useLiveQuery, eq } from '@tanstack/react-db';
+import { materialize } from 'pbtsdb';
 
 const { data: booksWithAuthors } = useLiveQuery((q) =>
     q.from({ b: booksCollection }).select(({ b }) => ({
         id: b.id,
         title: b.title,
-        author: q
-            .from({ a: authorsCollection })
-            .where(({ a }) => eq(a.id, b.author))
-            .select(({ a }) => ({ id: a.id, name: a.name }))
-            .findOne(),
+        author: materialize(
+            q.from({ a: authorsCollection })
+                .where(({ a }) => eq(a.id, b.author))
+                .select(({ a }) => ({ id: a.id, name: a.name }))
+                .findOne()
+        ),
     }))
 );
+// booksWithAuthors[0].author?.name
 ```
 
 #### Many relation with `toArray()`
@@ -956,6 +985,8 @@ Use PocketBase's `expand` to file a relation into its target collection, then us
 
 ```typescript
 const authorsCollection = c('authors', { syncMode: 'on-demand' });
+const tagsCollection = c('tags', { syncMode: 'on-demand' });
+const bookTagsCollection = c('book_tags', { syncMode: 'on-demand' });
 const booksCollection = c('books', {
     syncMode: 'on-demand',
     relations: { author: authorsCollection },  // where expanded authors are filed
@@ -967,10 +998,12 @@ const { data } = useLiveQuery((q) =>
         id: b.id,
         title: b.title,
         // Reads from authorsCollection with no request; the rows are already filed
-        author: q.from({ a: authorsCollection })
-            .where(({ a }) => eq(a.id, b.author))
-            .select(({ a }) => ({ id: a.id, name: a.name }))
-            .findOne(),
+        author: materialize(
+            q.from({ a: authorsCollection })
+                .where(({ a }) => eq(a.id, b.author))
+                .select(({ a }) => ({ id: a.id, name: a.name }))
+                .findOne()
+        ),
         tags: toArray(
             q.from({ bt: bookTagsCollection })
                 .where(({ bt }) => eq(bt.book, b.id))
@@ -1013,7 +1046,7 @@ const books = c('books', {
     omitOnInsert: ['created', 'updated'] as const
 });
 
-// ✅ Good - with always-expanded relations
+// ✅ Good - with always-fetched relations
 const authors = c('authors', {});
 const books = c('books', {
     relations: { author: authors },
@@ -1040,7 +1073,7 @@ export const { Provider, useStore } = createReactProvider({
 
 ### 2. Create Dependencies Before Dependents
 
-When using expand collections, create the target collection first:
+When declaring `relations`, create the target collection first:
 
 ```typescript
 // ✅ Good - authors exists before books references it
@@ -1189,12 +1222,13 @@ Contributions welcome! Please open an issue or PR.
 ### Development Setup
 
 **Prerequisites:**
-- Node.js 18+
+- Node.js 20+
 - Git
+- The [PocketBase](https://pocketbase.io/docs/) binary on your `PATH` (the test server uses it)
 
 **Clone and Install:**
 ```bash
-git clone https://github.com/yourusername/pbtsdb
+git clone https://github.com/nathanstitt/pbtsdb
 cd pbtsdb
 npm install
 ```
