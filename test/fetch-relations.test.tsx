@@ -1350,6 +1350,50 @@ describe('Fetch relations', () => {
                 await waitFor(() => expect(bookTags.loadedSubsetCount()).toBe(0))
             }, 15000)
 
+            it('marks a back-relation with zero children when PocketBase omits the expand key', async () => {
+                const authorId = await getTestAuthorId()
+                const book = await pb.collection('books').create({
+                    title: `Empty ${getTestSlug('eb')}`,
+                    isbn: getTestSlug('isbn'),
+                    genre: 'Fiction',
+                    author: authorId,
+                    published_date: '',
+                    page_count: 1,
+                })
+                try {
+                    const { books, bookTags } = makeBooks()
+                    const counter = countRequestsTo('/collections/book_tags/records')
+                    try {
+                        const { result } = renderHook(() =>
+                            useLiveQuery(q =>
+                                q
+                                    .from({ b: books.fetchRelations('book_tags_via_book') })
+                                    .where(({ b }) => eq(b.id, book.id))
+                                    .select(({ b }) => ({
+                                        id: b.id,
+                                        tags: materialize(
+                                            q
+                                                .from({ bt: bookTags })
+                                                .where(({ bt }) => eq(bt.book, b.id))
+                                        ),
+                                    }))
+                            )
+                        )
+                        await waitForLoadFinish(result, 10000)
+                        await waitFor(() => expect(result.current.data[0]?.id).toBe(book.id))
+                        await waitFor(() =>
+                            expect(bookTags.loadedSubsetCount()).toBeGreaterThanOrEqual(1)
+                        )
+                        expect(result.current.data[0]?.tags).toEqual([])
+                        expect(counter.filters).toEqual([])
+                    } finally {
+                        counter.restore()
+                    }
+                } finally {
+                    await pb.collection('books').delete(book.id)
+                }
+            }, 15000)
+
             it('serves a back-relation filed by a different parent (tags)', async () => {
                 const junction = (await pb.collection('book_tags').getList(1, 1))
                     .items[0] as unknown as {

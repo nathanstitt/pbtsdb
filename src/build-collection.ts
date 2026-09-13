@@ -224,13 +224,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // chance to be served from the store instead of racing this fetch.
     function backRelationTargetsFor(
         request: PbRequest
-    ): Array<{ target: ExpandTargetCollection; field: string }> {
+    ): Array<{ target: ExpandTargetCollection; key: string; field: string }> {
         if (!relationTargets) return []
-        const results: Array<{ target: ExpandTargetCollection; field: string }> = []
+        const results: Array<{ target: ExpandTargetCollection; key: string; field: string }> = []
         for (const key of splitPaths(activeExpand(request)).map(path => path.split('.')[0])) {
             const target = relationTargets[key]
             const via = target && parseViaKey(key)
-            if (target && via) results.push({ target, field: via.field })
+            if (target && via) results.push({ target, key, field: via.field })
         }
         return results
     }
@@ -334,6 +334,20 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const parentId = typeof id === 'string' ? id : undefined
             for (const [key, value] of Object.entries(expandData)) {
                 await upsertExpandedField(key, value, targets, parentId)
+            }
+        }
+    }
+
+    // PocketBase omits the expand key entirely when a back-relation has no
+    // records, so absence after a server fetch means zero children for that parent.
+    function markEmptyBackRelations(items: readonly object[], request: PbRequest): void {
+        const heads = backRelationTargetsFor(request)
+        if (heads.length === 0) return
+        for (const item of items) {
+            const { id, expand } = item as { id?: unknown; expand?: Record<string, unknown> }
+            if (typeof id !== 'string') continue
+            for (const { target, key, field } of heads) {
+                if (expand?.[key] === undefined) target.markSubsetLoaded?.(field, id)
             }
         }
     }
@@ -521,14 +535,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 skipTotal: true, // Optimize by skipping total count
                 expand,
             })
-            return result.items as unknown as RecordType[]
+            const items = result.items as unknown as RecordType[]
+            markEmptyBackRelations(items, request)
+            return items
         }
         // Use getFullList to fetch all records with automatic pagination
-        return (await pb.collection(collectionName).getFullList({
+        const items = (await pb.collection(collectionName).getFullList({
             filter,
             sort,
             expand,
         })) as unknown as RecordType[]
+        markEmptyBackRelations(items, request)
+        return items
     }
 
     // Each in-flight fetch registers a set here before its request goes out;
