@@ -437,7 +437,7 @@ parent, and pbtsdb records that the child subset for that parent is complete,
 so a child query filtered by the foreign key is served from the store:
 
 ```typescript
-const comments = c('comments', { syncMode: 'on-demand', relations: { card: cards } });
+const comments = c('comments', { syncMode: 'on-demand' });
 const cards = c('cards', { syncMode: 'on-demand', relations: { comments_via_card: comments } });
 
 const { data } = useLiveQuery((q) =>

@@ -80,8 +80,8 @@ the store once the parent has filed it, one request when nothing filed it, a
 plain base query does not mark the subset, a second child
 (`book_metadata_via_book`), invalidation when a child row is pruned
 (`writeDelete`), invalidation when the target's realtime subscription stops,
-a back-relation filed by a different parent (`book_tags_via_tag`, from the
-tags collection), and cleanup clearing every mark.
+cleanup clearing every mark, and a back-relation filed by a different parent
+(`book_tags_via_tag`, from the tags collection).
 
 ---
 
@@ -91,7 +91,7 @@ Recognizing an id-only `where` (`eq`, `inArray`, or an `or` of those) and turnin
 ---
 
 #### `expand-helpers.test.ts`
-Path helpers.
+Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidationEvents`.
 
 ---
 
