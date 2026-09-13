@@ -344,6 +344,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // Field → parent ids whose child subset is known complete in the store,
     // recorded when a parent files a back-relation expand for that parent id.
+    // Grows with the distinct parents filed while this target is held live,
+    // pairs with rows the store already retains, and is cleared on stop,
+    // cleanup, or truncate.
     const loadedSubsets = new Map<string, Set<string>>()
 
     function markSubsetLoaded(field: string, value: string): void {
@@ -372,30 +375,48 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return value.filter(item => typeof item === 'string' && marked.delete(item))
     }
 
+    // True when `query` reads a subset of this collection keyed on a field the
+    // caller marks, with at least one value the caller marks. Shared by
+    // invalidateForgottenSubset (one field, the values just forgotten) and
+    // invalidateMarkedSubsets (every field/value currently marked).
+    function matchesMarkedSubset(
+        query: { queryKey: readonly unknown[] },
+        isMarked: (field: string, value: string) => boolean
+    ): boolean {
+        if (query.queryKey[0] !== collectionName) return false
+        const request = query.queryKey[1] as PbRequest | undefined
+        if (!request?.subset) return false
+        const { field, values } = request.subset
+        return values.some(value => isMarked(field, value))
+    }
+
+    function invalidateMarkedQueries(isMarked: (field: string, value: string) => boolean): void {
+        void queryClient
+            .invalidateQueries({ predicate: query => matchesMarkedSubset(query, isMarked) })
+            .catch(error =>
+                logger.error('Failed to invalidate marked subset queries', {
+                    collectionName,
+                    error,
+                })
+            )
+    }
+
     // A subset query that already resolved successfully is served from
     // query-db-collection's own observer cache on the next mount regardless of
     // our own marks, so forgetting a mark must also invalidate that cached
     // query for a fresh fetch to actually happen.
     function invalidateForgottenSubset(field: string, values: readonly string[]): void {
-        void queryClient
-            .invalidateQueries({
-                predicate: query => {
-                    if (query.queryKey[0] !== collectionName) return false
-                    const request = query.queryKey[1] as PbRequest | undefined
-                    const subset = request?.subset
-                    return (
-                        subset !== undefined &&
-                        subset.field === field &&
-                        subset.values.some(value => values.includes(value))
-                    )
-                },
-            })
-            .catch(error =>
-                logger.error('Failed to invalidate queries after forgetting a mark', {
-                    collectionName,
-                    error,
-                })
-            )
+        invalidateMarkedQueries(
+            (queryField, value) => queryField === field && values.includes(value)
+        )
+    }
+
+    // Every mark held for this target justified serving some subset query from
+    // the store; releasing them on a real stop (see doStopSubscription) must
+    // invalidate those queries too, or a later mount reads the same cached
+    // result instead of re-checking with a live subscription.
+    function invalidateAllMarkedSubsets(): void {
+        invalidateMarkedQueries((field, value) => loadedSubsets.get(field)?.has(value) ?? false)
     }
 
     // A row leaving the store other than by a server-confirmed delete means the
@@ -1190,8 +1211,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // Before the guard below: a restart whose subscribe() threw leaves
         // isSubscribed false with targets still held, and this real stop is
         // the only remaining chance to release them.
-        if (releaseTargets) syncHeldSubscriptions(new Set())
-        if (releaseTargets) loadedSubsets.clear()
+        if (releaseTargets) {
+            syncHeldSubscriptions(new Set())
+            invalidateAllMarkedSubsets()
+            loadedSubsets.clear()
+        }
         if (!isSubscribed || !unsubscribeFn) return
 
         try {

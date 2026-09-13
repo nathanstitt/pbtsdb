@@ -80,13 +80,15 @@ the store once the parent has filed it, one request when nothing filed it, a
 plain base query does not mark the subset, a second child
 (`book_metadata_via_book`), invalidation when a child row is pruned
 (`writeDelete`), invalidation when the target's realtime subscription stops,
-cleanup clearing every mark, and a back-relation filed by a different parent
-(`book_tags_via_tag`, from the tags collection).
+cleanup clearing every mark, a back-relation filed by a different parent
+(`book_tags_via_tag`, from the tags collection), and a nested via path
+(`book_tags_via_book.tag`, junction subset and its tags both served without
+requests).
 
 ---
 
 #### `keyed-where.test.ts`
-Recognizing an id-only `where` (`eq`, `inArray`, or an `or` of those) and turning it into a keyed load.
+Recognizing any single top-level field in `where` (`eq`, `in`, or an `or` of those) and turning it into a subset.
 
 ---
 
