@@ -179,6 +179,42 @@ describe('Collection - Relations', () => {
         expect(authorsCollection.size).toBe(0)
     })
 
+    it('does not mark a back-relation subset when filing it silently no-ops', async () => {
+        const list = await pb.collection('books').getFullList({ expand: 'book_tags_via_book' })
+        const seeded = list.find(item => {
+            const tags = (item as { expand?: { book_tags_via_book?: unknown[] } }).expand
+                ?.book_tags_via_book
+            return Array.isArray(tags) && tags.length > 0
+        })
+        if (!seeded) throw new Error('seed data has no book with tags')
+
+        const factory = createCollectionFactory(queryClient)
+        const bookTagsCollection = factory.create('book_tags', { syncMode: 'eager' })
+        const booksCollection = factory.create('books', {
+            syncMode: 'on-demand',
+            relations: { book_tags_via_book: bookTagsCollection },
+        })
+
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ b: booksCollection.fetchRelations('book_tags_via_book') })
+                    .where(({ b }) => eq(b.id, seeded.id))
+            )
+        )
+        await waitForLoadFinish(result)
+        expect(result.current.data.length).toBeGreaterThan(0)
+
+        // book_tags_via_book was never actually filed into bookTagsCollection
+        // (eager, no subscriber, sync never started), so the fix in
+        // upsertExpandedField must not have marked the subset complete.
+        const notReadyWarnings = testLogger.messages.warn.filter(
+            w => w.msg.includes('not syncing') && w.msg.includes('not yet ready')
+        )
+        expect(notReadyWarnings.length).toBeGreaterThan(0)
+        expect(bookTagsCollection.loadedSubsetCount()).toBe(0)
+    })
+
     it('should start an eager expand target through a live query and upsert into it', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
