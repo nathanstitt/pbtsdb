@@ -1,4 +1,4 @@
-import { and, eq, materialize, useLiveQuery } from '@tanstack/react-db'
+import { and, eq, inArray, materialize, useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
@@ -904,11 +904,11 @@ describe('Fetch relations', () => {
     })
 
     describe('keyed loads served from the store', () => {
-        function countAuthorRequests() {
+        function countRequestsTo(path: string) {
             const filters: string[] = []
             const prev = pb.beforeSend
             pb.beforeSend = (url, options) => {
-                if (url.includes('/collections/authors/records')) {
+                if (url.includes(path)) {
                     const query = (options as { query?: { filter?: string } }).query
                     filters.push(query?.filter ?? '')
                 }
@@ -920,6 +920,14 @@ describe('Fetch relations', () => {
                     pb.beforeSend = prev
                 },
             }
+        }
+
+        function countAuthorRequests() {
+            return countRequestsTo('/collections/authors/records')
+        }
+
+        function countBooksRequests() {
+            return countRequestsTo('/collections/books/records')
         }
 
         function make(always: boolean) {
@@ -1054,6 +1062,71 @@ describe('Fetch relations', () => {
                 )
                 await waitForLoadFinish(result, 10000)
                 expect(counter.filters).toHaveLength(1)
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('an always-fetch collection serves its own id-only load from the store', async () => {
+            const { books } = make(true)
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitForLoadFinish(first.result, 10000)
+            const bookId = first.result.current.data[0].id
+            const counter = countBooksRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .where(({ b }) => eq(b.id, bookId))
+                            .findOne()
+                    )
+                )
+                await waitFor(() => expect(result.current.data?.id).toBe(bookId), {
+                    timeout: 10000,
+                })
+                expect(counter.filters).toEqual([])
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('a fetchRelations() view still fetches an id-only load, since its extra paths may be unfiled', async () => {
+            const { books } = make(false)
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitForLoadFinish(first.result, 10000)
+            const bookId = first.result.current.data[0].id
+            const counter = countBooksRequests()
+            try {
+                const view = books.fetchRelations('author')
+                const { result } = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: view }).where(({ b }) => eq(b.id, bookId)))
+                )
+                await waitForLoadFinish(result, 10000)
+                expect(counter.filters).toHaveLength(1)
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('an empty inArray(id, []) yields no data and no request', async () => {
+            const { authors, books } = make(true)
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitForLoadFinish(first.result, 10000)
+            const counter = countAuthorRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q => q.from({ a: authors }).where(({ a }) => inArray(a.id, [])))
+                )
+                await waitForLoadFinish(result, 10000)
+                expect(result.current.data).toEqual([])
+                expect(counter.filters).toEqual([])
             } finally {
                 counter.restore()
             }

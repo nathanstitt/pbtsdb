@@ -17,6 +17,10 @@ describe('idsFromWhere', () => {
         expect(idsFromWhere(fn('in', ref('id'), val(['b', 'a', 'b'])))).toEqual(['a', 'b'])
     })
 
+    it('reads in(id, []) as an empty id set, not "no ids"', () => {
+        expect(idsFromWhere(fn('in', ref('id'), val([])))).toEqual([])
+    })
+
     it('reads an or of id equalities', () => {
         const where = fn('or', fn('eq', ref('id'), val('b')), fn('eq', ref('id'), val('a')))
         expect(idsFromWhere(where)).toEqual(['a', 'b'])

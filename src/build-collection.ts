@@ -251,17 +251,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return rows
     }
 
+    // A row already in the store was fetched (and filed) with this collection's own
+    // alwaysFetchRelations, so that part of `expand` is already reflected. Only
+    // `request.expand` — the extra paths a fetchRelations() view adds — may not have
+    // been filed for this row yet, so only that forces a real fetch. An empty `ids`
+    // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
+    // which an empty id filter would turn into "fetch everything".
+    function servedFromStore(request: PbRequest): RecordType[] | undefined {
+        const { ids, limit } = request
+        if (!ids) return undefined
+        if (ids.length === 0) return []
+        if (request.expand) return undefined
+        const present = rowsFromStore(ids)
+        if (!present) return undefined
+        return limit ? present.slice(0, limit) : present
+    }
+
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
+        const served = servedFromStore(request)
+        if (served) return served
         const { sort, limit, ids } = request
-        const expand = activeExpand(request)
-        // A synced row never carries `expand` (it is stripped once filed), so it
-        // cannot stand in for a request that needs one: serving it here would
-        // skip the filing this expand is meant to trigger.
-        if (ids && !expand) {
-            const present = rowsFromStore(ids)
-            if (present) return limit ? present.slice(0, limit) : present
-        }
         const filter = ids ? idFilter(ids) : request.filter
+        const expand = activeExpand(request)
 
         if (limit) {
             // Use getList when limit is specified to avoid fetching all records
