@@ -5,7 +5,6 @@ import type {
     InsertMutationFn,
     UpdateMutationFn,
 } from '@tanstack/db'
-import type { RelatedAction } from './expand-patch'
 
 // ============================================================================
 // Schema Type Definitions
@@ -207,22 +206,6 @@ export interface ExpandTargetCollection {
     status?: string
     /** Resolves once the collection's first load is ready (eager mode). */
     preload?: () => Promise<void>
-    collectionName?: string
-    /** Collections that declared this one in their `relations`. */
-    relationDependents?: RelationDependent[]
-    /** Patch this collection's rows for a change in the relation target under `fields`. */
-    applyRelatedChange?: (
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string },
-        visited: Set<string>
-    ) => void
-}
-
-/** A collection that embeds this one under `field` and must be patched on echoes. */
-export interface RelationDependent {
-    field: string
-    parent: ExpandTargetCollection
 }
 
 /**
@@ -368,7 +351,7 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * const books = c('books', { relations: { author: authors }, alwaysFetchRelations: ['author'] })
-     * // data[0].expand?.author is typed and populated on every fetch
+     * // Every fetch files the author into `authors`; read it with authors.get(data[0].author)
      * ```
      */
     alwaysFetchRelations?: readonly string[]

@@ -287,20 +287,14 @@ describe('createReactProvider', () => {
             expect(result.current.books.data).toBeDefined()
             expect(Array.isArray(result.current.books.data)).toBe(true)
 
-            if (result.current.books.data && result.current.books.data.length > 0) {
-                const book = result.current.books.data[0]
-                expect(book).toBeDefined()
-                expect(book.author).toBe(authorId)
+            expect(result.current.books.data.length).toBeGreaterThan(0)
+            const book = result.current.books.data[0]
+            expect(book).toBeDefined()
+            expect(book.author).toBe(authorId)
+            expect((book as { expand?: unknown }).expand).toBeUndefined()
 
-                // Check that expand property exists and contains author data
-                if (book.expand?.author) {
-                    expect(book.expand.author).toBeDefined()
-                    expect(book.expand.author.id).toBe(authorId)
-                    expect(authors.has(authorId)).toBeTruthy()
-                    expect(book.expand.author.name).toBeTypeOf('string')
-                    expect(book.expand.author.email).toBeTypeOf('string')
-                }
-            }
+            // The auto-expanded author was filed into the authors store instead.
+            await waitFor(() => expect(authors.has(authorId)).toBe(true))
         }, 15000)
     })
 })

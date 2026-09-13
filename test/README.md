@@ -72,13 +72,13 @@ Real-time subscription and live data updates.
 
 ---
 
-#### `expand-views.test.tsx`
-Per-query expand views, nested paths, shared-store coherence, eager refetch, realtime expand, held target subscriptions and echo patching.
+#### `fetch-relations.test.tsx`
+Fetched relations never carry `expand`; per-query views, nested paths, query keys, and held target subscriptions.
 
 ---
 
 #### `expand-helpers.test.ts`
-Pure helpers for expand paths, expand merging, and `patchEmbedded` propagation.
+Pure helpers for expand paths.
 
 ---
 

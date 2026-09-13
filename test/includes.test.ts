@@ -116,7 +116,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
         }
     }, 15000)
 
-    it('should work with expand + includes coexistence', async () => {
+    it('should read a filed relation through an include', async () => {
         const c = createCollection<Schema>(pb, queryClient)
         const authorsCollection = c('authors', { syncMode: 'on-demand' })
         const booksCollection = c('books', {

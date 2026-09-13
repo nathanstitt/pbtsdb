@@ -47,15 +47,6 @@ export type PbView<
     readonly relationTargets: Record<string, unknown> | undefined
     /** @internal number of relation targets currently held live */
     readonly heldRelationTargetCount: () => number
-    /** @internal collections that declared this one in their `relations` */
-    readonly relationDependents: readonly { field: string; parent: unknown }[]
-    /** @internal patch rows for a relation target change; used by the target's realtime handler */
-    readonly applyRelatedChange: (
-        fields: readonly string[],
-        action: 'create' | 'update' | 'delete',
-        record: { id: string },
-        visited: Set<string>
-    ) => void
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }
@@ -72,12 +63,16 @@ export type PbCollection<
     /**
      * A view of this collection whose queries also fetch `paths` and file the
      * expanded records into their target collections. Rows are unchanged; read
-     * the related records through `materialize()`, a join, or the target's `get()`.
+     * the related records through a join, an include, or the target's `get()`.
      *
      * @example
      * ```ts
-     * const { data } = useLiveQuery(q => q.from({ books: books.fetchRelations('author') }))
-     * data[0].expand?.author?.name
+     * const { data } = useLiveQuery(q =>
+     *     q
+     *         .from({ books: books.fetchRelations('author') })
+     *         .join({ authors }, ({ books, authors }) => eq(books.author, authors.id))
+     * )
+     * data[0].authors?.name
      * ```
      */
     fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
@@ -116,7 +111,8 @@ type AlwaysFetchRelationsCheck<Opts> = {
  * });
  *
  * const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
- * // data[0].expand?.author is typed and populated
+ * // The expanded author is filed into authorsCollection, not kept on the row.
+ * authorsCollection.get(data[0].author)?.name
  * ```
  *
  * @example
@@ -128,7 +124,8 @@ type AlwaysFetchRelationsCheck<Opts> = {
  *
  * const view = booksCollection.fetchRelations('author');
  * const { data } = useLiveQuery((q) => q.from({ books: view }));
- * // data[0].expand?.author is typed and populated for this query only
+ * // Same target collection as above; the view only affects what gets fetched.
+ * authorsCollection.get(data[0].author)?.name
  * ```
  */
 export function createCollection<Schema extends SchemaDeclaration>(

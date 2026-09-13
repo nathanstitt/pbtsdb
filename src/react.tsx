@@ -106,15 +106,19 @@ export interface ReactProviderResult<CollectionsMap> {
  *
  * const { Provider, useStore } = createReactProvider({ authors, books });
  *
- * function BooksWithExpandedAuthors() {
- *     const [books] = useStore('books');
- *     const { data } = useLiveQuery((q) => q.from({ books }));
+ * function BooksWithAuthors() {
+ *     const [books, authors] = useStore('books', 'authors');
+ *     const { data } = useLiveQuery((q) =>
+ *         q
+ *             .from({ books })
+ *             .join({ authors }, ({ books, authors }) => eq(books.author, authors.id))
+ *     );
  *
  *     return (
  *         <ul>
- *             {data?.map(book => (
- *                 <li key={book.id}>
- *                     {book.title} by {book.expand?.author?.name}
+ *             {data?.map(row => (
+ *                 <li key={row.books.id}>
+ *                     {row.books.title} by {row.authors?.name}
  *                 </li>
  *             ))}
  *         </ul>
