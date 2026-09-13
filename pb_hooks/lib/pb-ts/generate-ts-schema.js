@@ -156,10 +156,7 @@ function getRelationMap(collections) {
                 const relatedCollectionName = collectionIdToNameMap.get(collectionId)
                 const forwardRelation = `${name}${!required ? '?' : ''}: ${(0, utils_1.toPascalCase)(relatedCollectionName)}${isMultiple() ? '[]' : ''}`
                 relationMap.get(collection.name).push(forwardRelation)
-                let backRelation = `${collection.name}_via_${name}?: ${(0, utils_1.toPascalCase)(collection.name)}`
-                if (!hasUniqueConstraint) {
-                    backRelation = `// ${backRelation}[]`
-                }
+                const backRelation = `${collection.name}_via_${name}?: ${(0, utils_1.toPascalCase)(collection.name)}${hasUniqueConstraint ? '' : '[]'}`
                 relationMap.get(relatedCollectionName).push(backRelation)
             }
         }
