@@ -154,14 +154,22 @@ export function App() {
 ```typescript
 // BlogDashboard.tsx
 import { useLiveQuery } from '@tanstack/react-db';
+import { eq } from '@tanstack/db';
+import { materialize } from 'pbtsdb';
 import { useStore } from './app';
 
 export function BlogDashboard() {
-    const [posts] = useStore('posts');
+    const [posts, users] = useStore('posts', 'users');
 
     const { data: allPosts, isLoading } = useLiveQuery((q) =>
         q.from({ posts })
             .orderBy(({ posts }) => posts.created, 'desc')
+            .select(({ posts }) => ({
+                ...posts,
+                author: materialize(
+                    q.from({ u: users }).where(({ u }) => eq(u.id, posts.author)).findOne()
+                ),
+            }))
     );
 
     if (isLoading) return <div>Loading posts...</div>;
@@ -173,8 +181,8 @@ export function BlogDashboard() {
                 <article key={post.id}>
                     <h2>{post.title}</h2>
                     <p>{post.content}</p>
-                    {/* Expanded author is fully typed! */}
-                    <small>By {post.expand?.author?.username}</small>
+                    {/* Author was filed into the users collection by alwaysFetchRelations */}
+                    <small>By {post.author?.username}</small>
                 </article>
             ))}
         </div>
@@ -189,16 +197,22 @@ export function BlogDashboard() {
 import { useLiveQuery } from '@tanstack/react-db';
 import { eq } from '@tanstack/db';
 import { useStore } from './app';
-import { newRecordId } from 'pbtsdb';
+import { materialize, newRecordId } from 'pbtsdb';
 
 export function PostWithComments({ postId }: { postId: string }) {
-    const [comments, posts] = useStore('comments', 'posts');
+    const [comments, posts, users] = useStore('comments', 'posts', 'users');
 
     // Real-time comments for this post
     const { data: postComments } = useLiveQuery((q) =>
         q.from({ comments })
             .where(({ comments }) => eq(comments.post, postId))
             .orderBy(({ comments }) => comments.created, 'desc')
+            .select(({ comments }) => ({
+                ...comments,
+                author: materialize(
+                    q.from({ u: users }).where(({ u }) => eq(u.id, comments.author)).findOne()
+                ),
+            }))
     );
 
     const handleAddComment = (text: string, authorId: string) => {
@@ -216,7 +230,7 @@ export function PostWithComments({ postId }: { postId: string }) {
             <h3>Comments ({postComments?.length || 0})</h3>
             {postComments?.map(comment => (
                 <div key={comment.id}>
-                    <strong>{comment.expand?.author?.username}:</strong>
+                    <strong>{comment.author?.username}:</strong>
                     <p>{comment.text}</p>
                 </div>
             ))}
@@ -326,7 +340,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 
 **Options:**
 - `relations?: Record<string, Collection>` - Collections that receive expanded records for each relation; declares what `alwaysFetchRelations` and `collection.fetchRelations()` may name
-- `alwaysFetchRelations?: readonly string[]` - Expand paths applied on every fetch (e.g. `['author', 'book.author']`)
+- `alwaysFetchRelations?: readonly string[]` - Expand paths fetched with every request and filed into their `relations` targets; never kept on the row
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
@@ -345,61 +359,60 @@ const c = createCollection<MySchema>(pb, queryClient);
 const booksCollection = c('books', {});
 ```
 
-With always-expanded relations:
+#### Related data
+
+PocketBase `expand` is used only to bring related records into their own
+collections. Rows never carry `expand`; read related records from the target
+collection.
+
 ```typescript
 const c = createCollection<MySchema>(pb, queryClient);
-const authorsCollection = c('authors', {});
-const booksCollection = c('books', {
-    relations: { author: authorsCollection },  // where expanded authors are upserted
-    alwaysFetchRelations: ['author'],                  // expanded on every fetch
+const authors = c('authors', { syncMode: 'on-demand' });
+const tags = c('tags', { syncMode: 'on-demand' });
+const books = c('books', {
+    relations: { author: authors, tags },   // where expanded records are filed
+    alwaysFetchRelations: ['author'],       // fetched with every books request
 });
-
-const { data } = useLiveQuery((q) => q.from({ books: booksCollection }));
-// data[0].expand?.author is typed and populated
 ```
 
-#### Per-query expand
-
-Declare relations once, then ask for expansion per query with `collection.fetchRelations()`.
-A view shares the collection's store, realtime subscription, and mutations; only
-its fetches add the `expand` parameter.
+Every books request expands `author`; the expanded authors are filed into
+`authors` (an on-demand target has its sync started) and removed from the
+book rows. Read them through `materialize()` in a query, a join, or
+`authors.get(book.author)`:
 
 ```typescript
-const tagsCollection = c('tags', {});
-const booksCollection = c('books', {
-    relations: { author: authorsCollection, tags: tagsCollection },
-});
+import { eq, materialize } from 'pbtsdb';
 
-function BookList() {
-    const [books] = useStore('books');
-    const { data } = useLiveQuery((q) =>
-        q.from({ books: books.fetchRelations('tags') })
-         .where(({ books }) => eq(books.genre, 'Fiction'))
-    );
-    // data[0].expand?.tags is Tags[] | undefined; data[0].expand?.author is a type error
-}
+const { data } = useLiveQuery((q) =>
+    q.from({ b: books }).select(({ b }) => ({
+        ...b,
+        author: materialize(
+            q.from({ a: authors }).where(({ a }) => eq(a.id, b.author)).findOne()
+        ),
+    }))
+);
+// data[0].author?.name is Authors | undefined and updates when the author changes
 ```
 
-Paths can be nested through a target collection's own `relations`:
+Because the authors are already in the store, that include makes no request:
+an id-only load (`eq(id, x)`, `inArray(id, [...])`, or an `or` of those) is
+served from the synced store when every id is present, except when the query
+reads through a `fetchRelations()` view, whose fetch goes to PocketBase so its
+paths get filed; anything else is fetched in one batched request. An empty
+`inArray(id, [])` yields no rows and no request.
+
+Fetch a relation for one query only with `fetchRelations()`; the view shares the
+collection's store, realtime subscription, and mutations, and only its fetches
+add the `expand` parameter:
 
 ```typescript
-const metadata = c('book_metadata', { relations: { book: booksCollection } });
-const { data } = useLiveQuery((q) => q.from({ m: metadata.fetchRelations('book.author') }));
-// data[0].expand?.book?.expand?.author?.name
+const { data } = useLiveQuery((q) => q.from({ b: books.fetchRelations('tags') }));
+// tags referenced by these books are now in the tags collection
 ```
 
-Rows fetched through a view keep their `expand` data in the shared store, and the
-realtime subscription requests every relation in use, so echoes keep it populated.
-
-Relation targets stay live too. While a query expands into `tags` (or through
-it into `colors`), those collections keep their realtime subscriptions, and a
-change to a tag or a color updates the embedded copy on affected rows in
-place, so `book.expand?.tags?.[0].name` refreshes without a write to the book.
-While an optimistic mutation is pending on the parent row, TanStack DB shows
-the frozen optimistic snapshot, so a patched `expand` becomes visible once
-that mutation settles. Deleting a related record clears the reference and the
-copy, matching what PocketBase does server-side. Targets are released when
-the last query on the parent unmounts.
+Paths can be nested through a target collection's own `relations`
+(`'book.author'`). While a query fetches into a target, that target keeps its
+realtime subscription, so `get()` reads stay fresh.
 
 #### Collection Options Passthrough
 
@@ -718,13 +731,20 @@ export function ProductCatalog() {
 import { useLiveQuery } from '@tanstack/react-db';
 import { eq } from '@tanstack/db';
 import { useStore } from './app';
-import { newRecordId } from 'pbtsdb';
+import { materialize, newRecordId } from 'pbtsdb';
 
 export function SocialFeed({ currentUserId }: { currentUserId: string }) {
-    const [posts, likes] = useStore('posts', 'likes');
+    const [posts, likes, users] = useStore('posts', 'likes', 'users');
 
     const { data: feedPosts } = useLiveQuery((q) =>
-        q.from({ posts }).orderBy(({ posts }) => posts.created, 'desc')
+        q.from({ posts })
+            .orderBy(({ posts }) => posts.created, 'desc')
+            .select(({ posts }) => ({
+                ...posts,
+                author: materialize(
+                    q.from({ u: users }).where(({ u }) => eq(u.id, posts.author)).findOne()
+                ),
+            }))
     );
 
     const { data: userLikes } = useLiveQuery((q) =>
@@ -746,7 +766,7 @@ export function SocialFeed({ currentUserId }: { currentUserId: string }) {
         <div>
             {feedPosts?.map(post => (
                 <div key={post.id}>
-                    <strong>{post.expand?.author?.username}</strong>
+                    <strong>{post.author?.username}</strong>
                     <p>{post.content}</p>
                     <button onClick={() => handleLike(post.id)}>
                         {likedPostIds.has(post.id) ? '❤️' : '🤍'} {post.likes_count}
@@ -929,15 +949,15 @@ const { data: booksWithTags } = useLiveQuery((q) =>
 );
 ```
 
-#### Combining expand with includes
+#### Includes on filed relations
 
-Use PocketBase's `expand` to auto-populate a related collection, then use includes to query from it:
+Use PocketBase's `expand` to file a relation into its target collection, then use includes to query from it. Because the rows are already in the store, the include makes no request:
 
 ```typescript
 const authorsCollection = c('authors', { syncMode: 'on-demand' });
 const booksCollection = c('books', {
     syncMode: 'on-demand',
-    relations: { author: authorsCollection },  // Auto-populates authorsCollection
+    relations: { author: authorsCollection },  // where expanded authors are filed
     alwaysFetchRelations: ['author'],
 });
 
@@ -945,7 +965,7 @@ const { data } = useLiveQuery((q) =>
     q.from({ b: booksCollection }).select(({ b }) => ({
         id: b.id,
         title: b.title,
-        // Query from the expand-populated authorsCollection
+        // Reads from authorsCollection with no request; the rows are already filed
         author: q.from({ a: authorsCollection })
             .where(({ a }) => eq(a.id, b.author))
             .select(({ a }) => ({ id: a.id, name: a.name }))
@@ -1068,24 +1088,27 @@ if (!data?.length) return <div>No posts found</div>;
 return <PostsList posts={data} />;
 ```
 
-### 5. Use Expand for Performance
+### 5. Choose Between alwaysFetchRelations and Joins
 
-Use PocketBase's expand feature for better performance:
+`alwaysFetchRelations` costs one request but carries the related record once
+per parent row, on every fetch of the parent:
 
 ```typescript
-// ✅ Fast - single query with server-side expand
 const c = createCollection<MySchema>(pb, queryClient);
 const authors = c('authors', {});
 const posts = c('posts', {
     relations: { author: authors },
-    alwaysFetchRelations: ['author'],  // Auto-expand on every fetch
+    alwaysFetchRelations: ['author'],  // expanded on every posts request
 });
 
 const { data } = useLiveQuery((q) => q.from({ posts }));
-
-// ⚠️ Slower - multiple queries + client-side join
-// Only use TanStack DB joins for inner/right/full join behavior
 ```
+
+A join or a `materialize()` include costs one batched request per query
+(fetching each distinct related row once, however many parent rows reference
+it) and, once the rows are filed, subsequent queries make no request at all.
+Prefer `alwaysFetchRelations` when the parent is the only path by which those
+rows enter an on-demand collection; otherwise let the query load them.
 
 ### 6. Configure QueryClient Defaults
 

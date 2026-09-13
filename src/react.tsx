@@ -95,10 +95,10 @@ export interface ReactProviderResult<CollectionsMap> {
  * ```
  *
  * @example
- * With auto-expand collections:
+ * With relations filed via alwaysFetchRelations:
  * ```tsx
  * const c = createCollection<Schema>(pb, queryClient);
- * const authors = c('authors', {});
+ * const authors = c('authors', { syncMode: 'on-demand' });
  * const books = c('books', {
  *     relations: { author: authors },
  *     alwaysFetchRelations: ['author'],
@@ -109,16 +109,19 @@ export interface ReactProviderResult<CollectionsMap> {
  * function BooksWithAuthors() {
  *     const [books, authors] = useStore('books', 'authors');
  *     const { data } = useLiveQuery((q) =>
- *         q
- *             .from({ books })
- *             .join({ authors }, ({ books, authors }) => eq(books.author, authors.id))
+ *         q.from({ b: books }).select(({ b }) => ({
+ *             ...b,
+ *             author: materialize(
+ *                 q.from({ a: authors }).where(({ a }) => eq(a.id, b.author)).findOne()
+ *             ),
+ *         }))
  *     );
  *
  *     return (
  *         <ul>
  *             {data?.map(row => (
- *                 <li key={row.books.id}>
- *                     {row.books.title} by {row.authors?.name}
+ *                 <li key={row.id}>
+ *                     {row.title} by {row.author?.name}
  *                 </li>
  *             ))}
  *         </ul>

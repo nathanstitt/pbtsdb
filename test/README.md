@@ -73,12 +73,17 @@ Real-time subscription and live data updates.
 ---
 
 #### `fetch-relations.test.tsx`
-Fetched relations never carry `expand`; per-query views, nested paths, query keys, and held target subscriptions.
+Fetching and filing relations, stripping, views, held targets, keyed loads from the store.
+
+---
+
+#### `keyed-where.test.ts`
+Recognizing an id-only `where` (`eq`, `inArray`, or an `or` of those) and turning it into a keyed load.
 
 ---
 
 #### `expand-helpers.test.ts`
-Pure helpers for expand paths.
+Path helpers.
 
 ---
 

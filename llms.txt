@@ -197,30 +197,47 @@ function BooksList() {
 
 ## Common Patterns
 
-**Approach 1: Auto-Expand (Recommended)**
+**Approach 1: Related data (Recommended)**
+
+PocketBase `expand` only files related records into their own collections;
+rows never carry `expand`. Read related records from the target collection.
+
 ```typescript
 const c = createCollection<Schema>(pb, queryClient);
-const authors = c('authors', {});
+const authors = c('authors', { syncMode: 'on-demand' });
 const books = c('books', {
-    relations: { author: authors },  // where expanded authors are upserted
-    alwaysExpand: ['author'],        // expanded on every fetch
+    relations: { author: authors },   // where expanded records are filed
+    alwaysFetchRelations: ['author'], // fetched with every books request
 });
 
-const { data } = useLiveQuery((q) => q.from({ books }));
-// data[0].expand?.author is typed and populated
+const { data } = useLiveQuery((q) =>
+    q.from({ b: books }).select(({ b }) => ({
+        ...b,
+        author: materialize(
+            q.from({ a: authors }).where(({ a }) => eq(a.id, b.author)).findOne()
+        ),
+    }))
+);
+// data[0].author?.name is Authors | undefined and updates when the author changes
 ```
 
-**When to use Auto-Expand:**
-- You want expanded records to populate their own collections automatically
-- Performance: Single server query with server-side expand
+An id-only load (`eq(id, x)`, `inArray(id, [...])`, or an `or` of those) is
+served from the synced store when every id is present, except through a
+`fetchRelations()` view, whose fetch always goes to PocketBase; anything else
+is fetched in one batched request.
+
+**When to use alwaysFetchRelations:**
+- The parent is the only path by which those rows enter an on-demand collection
+- Performance: single server request per fetch of the parent
 - Related data always available when fetching parent records
 
-**Per-query expand**
+**Per-query fetchRelations**
 ```typescript
 const books = c('books', { relations: { author: authors, tags } });
-const { data } = useLiveQuery((q) => q.from({ books: books.expand('tags') }));
-// data[0].expand?.tags typed; nested paths like 'book.author' resolve through
-// the target collection's own relations. Views share the base store.
+const { data } = useLiveQuery((q) => q.from({ books: books.fetchRelations('tags') }));
+// tags referenced by these books are filed into the tags collection; nested
+// paths like 'book.author' resolve through the target's own relations.
+// Views share the base store, subscription, and mutations.
 ```
 
 **Approach 2: TanStack Joins**
