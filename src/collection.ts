@@ -4,35 +4,33 @@ import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import { buildCollection, type CreateCollectionFactoryOptions } from './build-collection'
 import type {
-    AlwaysFetchRelationsOf,
     CreateCollectionOptions,
     ExpandPath,
+    ExtractRecordType,
     InsertInputOf,
     PbMeta,
     RelationsOf,
     SchemaDeclaration,
-    WithExpandPaths,
 } from './types'
 
 export type { CreateCollectionFactoryOptions } from './build-collection'
 export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './types'
 
 /**
- * A pbtsdb collection or view: a TanStack DB collection whose rows carry the
- * expand paths in `Paths`, plus pbtsdb's subscription helpers.
+ * A pbtsdb collection or view: a TanStack DB collection over
+ * `ExtractRecordType<Schema, C>` rows, plus pbtsdb's subscription helpers.
  */
-export type PbView<
+export type PbCollectionView<
     Schema extends SchemaDeclaration,
     C extends keyof Schema & string,
     Opts,
-    Paths extends string,
 > = Collection<
-    WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>,
+    ExtractRecordType<Schema, C>,
     string | number,
     QueryCollectionUtils<
-        WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>,
+        ExtractRecordType<Schema, C>,
         string | number,
-        WithExpandPaths<Schema, C, RelationsOf<Opts>, Paths>
+        ExtractRecordType<Schema, C>
     >,
     never,
     InsertInputOf<Schema, C, Opts>
@@ -52,32 +50,22 @@ export type PbView<
 }
 
 /**
- * The collection returned by {@link createCollection}: a {@link PbView} over the
- * `alwaysFetchRelations` paths, plus `fetchRelations()` for per-query views.
+ * The collection returned by {@link createCollection}: a {@link PbCollectionView}
+ * plus `fetchRelations()` for per-query views.
  */
 export type PbCollection<
     Schema extends SchemaDeclaration,
     C extends keyof Schema & string,
     Opts,
-> = PbView<Schema, C, Opts, AlwaysFetchRelationsOf<Opts>> & {
+> = PbCollectionView<Schema, C, Opts> & {
     /**
      * A view of this collection whose queries also fetch `paths` and file the
      * expanded records into their target collections. Rows are unchanged; read
-     * the related records through a join, an include, or the target's `get()`.
-     *
-     * @example
-     * ```ts
-     * const { data } = useLiveQuery(q =>
-     *     q
-     *         .from({ books: books.fetchRelations('author') })
-     *         .join({ authors }, ({ books, authors }) => eq(books.author, authors.id))
-     * )
-     * data[0].authors?.name
-     * ```
+     * related records through `materialize()`, a join, or the target's `get()`.
      */
     fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
         ...paths: P
-    ): PbView<Schema, C, Opts, AlwaysFetchRelationsOf<Opts> | P[number]>
+    ): PbCollectionView<Schema, C, Opts>
 }
 
 type AlwaysFetchRelationsCheck<Opts> = {
