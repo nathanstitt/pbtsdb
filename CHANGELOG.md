@@ -13,6 +13,12 @@ All notable changes to this project will be documented in this file.
   served from the store: a child query filtered by that foreign key makes no
   request while the subset is marked complete.
 
+### Fixed
+
+- A parent with no children is marked complete too: PocketBase omits the
+  expand key for an empty back-relation, which previously left every child
+  query for a fresh parent fetching.
+
 ## [0.9.0] - 2026-09-13
 
 ### Changed
