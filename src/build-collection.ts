@@ -12,17 +12,15 @@ import {
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
-import { mergeExpand } from './expand-merge'
-import { patchEmbedded, propagateRelatedChange, type RelatedAction } from './expand-patch'
 import type { RelationTargets } from './expand-paths'
 import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
+import { idsFromWhere } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
     CreateCollectionOptions,
     ExpandTargetCollection,
     ExtractRecordType,
-    RelationDependent,
     SchemaDeclaration,
 } from './types'
 
@@ -62,15 +60,6 @@ export interface CollectionSubscriptionHelpers {
     relationTargets: RelationTargets | undefined
     /** Number of relation targets currently held live */
     heldRelationTargetCount: () => number
-    /** Collections that declared this one in their `relations` */
-    relationDependents: RelationDependent[]
-    /** Patch this collection's rows for a change in a relation target */
-    applyRelatedChange: (
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string },
-        visited: Set<string>
-    ) => void
 }
 
 /**
@@ -106,8 +95,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     type RecordType = ExtractRecordType<Schema, C>
 
     const relationTargets = options?.relations as RelationTargets | undefined
-    const alwaysExpand = normalizePaths(options?.alwaysExpand ?? [])
-    for (const path of alwaysExpand) validateExpandPath(collectionName, relationTargets, path)
+    const alwaysFetch = normalizePaths(options?.alwaysFetchRelations ?? [])
+    for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
 
     // Paths requested by views that have subscribed at least once. Eager fetches
@@ -116,13 +105,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const requestedExpand = new Set<string>()
 
     type LoadOptions = LoadSubsetOptions & { expand?: readonly string[] }
-    type PbRequest = { filter?: string; sort?: string; limit?: number; expand?: string }
+    type PbRequest = {
+        filter?: string
+        sort?: string
+        limit?: number
+        expand?: string
+        ids?: string[]
+    }
 
     function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
         const request: PbRequest = {}
-        const filter = convertToPocketBaseFilter(opts?.where)
+        const ids = idsFromWhere(opts?.where)
+        const filter = ids ? undefined : convertToPocketBaseFilter(opts?.where)
         const sort = convertToPocketBaseSort(opts?.orderBy)
         const expand = joinPaths((opts as LoadOptions | undefined)?.expand ?? [])
+        if (ids) request.ids = ids
         if (filter) request.filter = filter
         if (sort) request.sort = sort
         if (opts?.limit) request.limit = opts.limit
@@ -137,10 +134,30 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     function activeExpand(request: PbRequest): string | undefined {
         return joinPaths([
-            ...alwaysExpand,
+            ...alwaysFetch,
             ...splitPaths(request.expand),
             ...(syncMode === 'eager' ? requestedExpand : []),
         ])
+    }
+
+    // pbtsdb asked PocketBase for these relations only to file them into their
+    // target collections; the copies never reach a row in any cache.
+    function stripFetchedRelations(
+        items: RecordType[],
+        expandString: string | undefined
+    ): RecordType[] {
+        const heads = new Set(splitPaths(expandString).map(path => path.split('.')[0]))
+        if (heads.size === 0) return items
+        return items.map(item => {
+            const { expand, ...plain } = item as RecordType & {
+                expand?: Record<string, unknown>
+            }
+            if (!expand) return item
+            const kept = Object.fromEntries(
+                Object.entries(expand).filter(([key]) => !heads.has(key))
+            )
+            return (Object.keys(kept).length > 0 ? { ...plain, expand: kept } : plain) as RecordType
+        })
     }
 
     const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
@@ -152,6 +169,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             target.status !== 'idle' &&
             target.status !== 'cleaned-up'
         )
+    }
+
+    // A filed copy never carries `expand`: any part of it with a declared
+    // target was filed by the recursive upsertExpanded call right after
+    // upsertInto, and any part without one has nowhere to go and is dropped.
+    function withoutExpand(values: object[]): object[] {
+        return values.map(value => {
+            const { expand: _expand, ...plain } = value as { expand?: unknown }
+            return plain
+        })
     }
 
     async function upsertInto(
@@ -175,7 +202,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return
             }
         }
-        target.utils.writeUpsert(values)
+        target.utils.writeUpsert(withoutExpand(values))
     }
 
     async function upsertExpandedField(
@@ -207,8 +234,48 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
+    function idFilter(ids: readonly string[]): string {
+        return ids.map(id => `id = "${id.replace(/"/g, '\\"')}"`).join(' || ')
+    }
+
+    // Rows already in the synced store are as fresh as realtime keeps them;
+    // an id-only request whose ids are all present needs no round trip.
+    function rowsFromStore(ids: readonly string[]): RecordType[] | undefined {
+        const rows: RecordType[] = []
+        for (const id of ids) {
+            const row = collection._state.syncedData.get(id) as RecordType | undefined
+            if (!row) return undefined
+            rows.push(row)
+        }
+        return rows
+    }
+
+    // A row already in the store was fetched (and filed) with this collection's own
+    // alwaysFetchRelations, so that part of `expand` is already reflected. Only
+    // `request.expand` — the extra paths a fetchRelations() view adds — may not have
+    // been filed for this row yet, so only that forces a real fetch. An empty `ids`
+    // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
+    // which an empty id filter would turn into "fetch everything".
+    function servedFromStore(request: PbRequest): RecordType[] | undefined {
+        const { ids, sort, limit } = request
+        if (!ids) return undefined
+        if (ids.length === 0) return []
+        if (request.expand) return undefined
+        // A sorted + limited request must be sliced in that order; the store
+        // holds rows in id order, so slicing here could return the wrong subset.
+        // TanStack passes neither for id-only loads today, so this only guards
+        // against a future caller combining them.
+        if (sort && limit) return undefined
+        const present = rowsFromStore(ids)
+        if (!present) return undefined
+        return limit ? present.slice(0, limit) : present
+    }
+
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
-        const { filter, sort, limit } = request
+        const served = servedFromStore(request)
+        if (served) return served
+        const { sort, limit, ids } = request
+        const filter = ids ? idFilter(ids) : request.filter
         const expand = activeExpand(request)
 
         if (limit) {
@@ -316,91 +383,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             }
 
             await upsertExpanded(items, relationTargets)
-            if (request.expand) writeExpandedRows(items)
-
-            return withRowsConfirmedMidFlight(items, confirmedMidFlight)
+            return withRowsConfirmedMidFlight(
+                stripFetchedRelations(items, activeExpand(request)),
+                confirmedMidFlight
+            )
         } finally {
             inFlightConfirmedIds.delete(confirmedMidFlight)
-        }
-    }
-
-    // query-db-collection only calls its synced `write` for a row a query newly
-    // "owns" in the synced store — a query whose result includes a row another
-    // query already put there is treated as a no-op, even though this fetch may
-    // be the only one carrying `expand` data for that row (e.g. a base and a view
-    // of the same collection joined in one live query). Write such rows directly
-    // so the view's `expand` field always reaches the shared store.
-    function writeExpandedRows(items: RecordType[]): void {
-        // On a collection's first fetch the store is empty, so
-        // applySuccessfulResult inserts the rows itself; nothing to do here yet.
-        if (!collection.utils || !collection.isReady()) return
-        // Not writeOwn: writeOwn's optimistic-pending exemption is reserved for
-        // writes already staleness-filtered upstream (writeBackAfterPersisted,
-        // isStaleEcho). A view fetch is an unfiltered server read — exactly what
-        // the optimistic-pending arm of shouldDropSyncedWrite must still catch,
-        // since isStaleServerRecord alone compares against the synced store,
-        // which a pending optimistic overlay does not update.
-        collection.utils.writeUpsert(items)
-    }
-
-    // Every field this collection declares onto the changed target is patched in
-    // one pass, so a collection with two relations to the same target (author and
-    // editor both pointing at authors) updates both embedded copies per echo.
-    function patchRowFields(
-        row: RecordType,
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string }
-    ): RecordType | undefined {
-        let current: RecordType | undefined
-        for (const field of fields) {
-            const next = patchEmbedded(current ?? row, field, action, record)
-            if (next) current = next
-        }
-        return current
-    }
-
-    function patchedRows(
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string },
-        visited: Set<string>
-    ): RecordType[] {
-        const patched: RecordType[] = []
-        for (const row of collection._state.syncedData.values()) {
-            const id = (row as { id?: unknown }).id
-            if (typeof id !== 'string') continue
-            const key = `${collectionName}:${id}`
-            if (visited.has(key)) continue
-            const next = patchRowFields(row as RecordType, fields, action, record)
-            if (!next) continue
-            visited.add(key)
-            patched.push(next)
-        }
-        return patched
-    }
-
-    // Patch this collection's rows for a change in a relation target. Runs
-    // synchronously from the target's realtime handler; writes go through the
-    // authoritative path because the rows are the current synced rows with only
-    // `expand` (or, on delete, the reference) changed.
-    function applyRelatedChange(
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string },
-        visited: Set<string>
-    ): void {
-        if (!collection.utils || !collection.isReady()) return
-        const patched = patchedRows(fields, action, record, visited)
-        if (patched.length === 0) return
-        writeOwn(() => collection.utils.writeUpsert(patched))
-        for (const row of patched) {
-            propagateRelatedChange(
-                collection as unknown as ExpandTargetCollection,
-                'update',
-                row as { id: string },
-                visited
-            )
         }
     }
 
@@ -617,20 +605,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return paths ? { ...opts, expand: paths } : opts
     }
 
-    // Merge a synced insert/update's value with any `expand` already stored for its
-    // key, so a later write that omits `expand` (e.g. a plain fetch of the same row)
-    // does not wipe an entry another query's view put there. Called only for an
-    // insert/update carrying an object value; returns the value unchanged (by
-    // identity) when there is nothing to carry.
-    function mergedWriteValue(op: { type: string; value?: unknown; key?: unknown }): RecordType {
-        const key = syncedWriteKey(op)
-        const existing =
-            key === null
-                ? undefined
-                : (collection._state.syncedData.get(key) as RecordType | undefined)
-        return mergeExpand(op.value as RecordType, existing)
-    }
-
     // Wrap the sync factory so every synced `write` flows through the guard above,
     // and every loadSubset/unloadSubset call is tagged with a view's expand paths.
     // @tanstack/db invokes sync.sync with the write primitives; we hand back the
@@ -642,14 +616,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const guardedWrite: typeof params.write = message => {
                 const op = message as { type: string; value?: unknown; key?: unknown }
                 if (shouldDropSyncedWrite(op)) return
-                if (
-                    (op.type === 'insert' || op.type === 'update') &&
-                    op.value &&
-                    typeof op.value === 'object'
-                ) {
-                    const merged = mergedWriteValue(op)
-                    if (merged !== op.value) return params.write({ ...message, value: merged })
-                }
                 return params.write(message)
             }
             const res = innerSync({ ...params, write: guardedWrite })
@@ -668,15 +634,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     const collection = createTanStackCollection(collectionOptions)
-
-    const relationDependents: RelationDependent[] = []
-    for (const [field, target] of Object.entries(relationTargets ?? {})) {
-        target.relationDependents ??= []
-        target.relationDependents.push({
-            field,
-            parent: collection as unknown as ExpandTargetCollection,
-        })
-    }
 
     const views = new Map<string, object>()
 
@@ -697,19 +654,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     }
                 },
             },
-            expand: {
+            fetchRelations: {
                 value: () => {
-                    throw new Error(`A view of "${collectionName}" cannot be expanded further`)
+                    throw new Error(`A view of "${collectionName}" cannot fetch further relations`)
                 },
             },
         })
         return view
     }
 
-    function expand(...paths: string[]): object {
+    function fetchRelations(...paths: string[]): object {
         for (const path of paths) validateExpandPath(collectionName, relationTargets, path)
-        const all = normalizePaths([...alwaysExpand, ...paths])
-        if (all.every(path => alwaysExpand.includes(path))) return collection
+        const all = normalizePaths([...alwaysFetch, ...paths])
+        if (all.every(path => alwaysFetch.includes(path))) return collection
         const key = all.join(',')
         let view = views.get(key)
         if (!view) {
@@ -827,15 +784,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         markEchoPresence(event)
         if (isStaleEcho(event)) return
 
+        const [stored] = stripFetchedRelations([event.record], pendingSubscribeExpand())
         try {
             writeOwn(() =>
                 collection.utils.writeBatch(() => {
                     switch (event.action) {
                         case 'create':
-                            collection.utils.writeInsert(event.record)
+                            collection.utils.writeInsert(stored)
                             break
                         case 'update':
-                            collection.utils.writeUpsert(event.record)
+                            collection.utils.writeUpsert(stored)
                             break
                         case 'delete':
                             if (event.record && 'id' in event.record) {
@@ -881,25 +839,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 })
             )
         }
-
-        propagateRelatedChange(
-            collection as unknown as ExpandTargetCollection,
-            event.action as RelatedAction,
-            event.record as { id: string },
-            new Set()
-        )
     }
 
     // The union of expand paths the next (re)subscribe should carry:
-    // alwaysExpand plus every path a view has requested. Pure and
+    // alwaysFetch plus every path a view has requested. Pure and
     // side-effect-free (unlike realtimeSubscribeOptions below), so it is
     // safe to call more than once per subscribe attempt to detect drift.
     function pendingSubscribeExpand(): string | undefined {
-        return joinPaths([...alwaysExpand, ...requestedExpand])
+        return joinPaths([...alwaysFetch, ...requestedExpand])
     }
 
     // Collections along every active expand path. Held live (below) so their
-    // realtime echoes reach this collection's embedded copies.
+    // stores stay fresh for keyed reads (materialize, joins, get()) and for
+    // the store-served short circuit.
     function activeExpandTargets(): Set<ExpandTargetCollection> {
         const targets = new Set<ExpandTargetCollection>()
         for (const path of splitPaths(pendingSubscribeExpand())) {
@@ -1134,9 +1086,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         waitForSubscription,
         isSubscribed: () => isSubscribed,
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
-        expand,
-        relationDependents,
-        applyRelatedChange,
+        fetchRelations,
     })
 
     return collection as unknown as BuiltCollection<RecordType>

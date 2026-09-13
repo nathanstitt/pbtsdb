@@ -95,26 +95,33 @@ export interface ReactProviderResult<CollectionsMap> {
  * ```
  *
  * @example
- * With auto-expand collections:
+ * With relations filed via alwaysFetchRelations:
  * ```tsx
  * const c = createCollection<Schema>(pb, queryClient);
- * const authors = c('authors', {});
+ * const authors = c('authors', { syncMode: 'on-demand' });
  * const books = c('books', {
  *     relations: { author: authors },
- *     alwaysExpand: ['author'],
+ *     alwaysFetchRelations: ['author'],
  * });
  *
  * const { Provider, useStore } = createReactProvider({ authors, books });
  *
- * function BooksWithExpandedAuthors() {
- *     const [books] = useStore('books');
- *     const { data } = useLiveQuery((q) => q.from({ books }));
+ * function BooksWithAuthors() {
+ *     const [books, authors] = useStore('books', 'authors');
+ *     const { data } = useLiveQuery((q) =>
+ *         q.from({ b: books }).select(({ b }) => ({
+ *             ...b,
+ *             author: materialize(
+ *                 q.from({ a: authors }).where(({ a }) => eq(a.id, b.author)).findOne()
+ *             ),
+ *         }))
+ *     );
  *
  *     return (
  *         <ul>
- *             {data?.map(book => (
- *                 <li key={book.id}>
- *                     {book.title} by {book.expand?.author?.name}
+ *             {data?.map(row => (
+ *                 <li key={row.id}>
+ *                     {row.title} by {row.author?.name}
  *                 </li>
  *             ))}
  *         </ul>

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 > Releases 0.1.0 through 0.6.3 were reconstructed from git history after the
 > fact, so they summarise each release rather than record it contemporaneously.
 
+## [0.9.0] - 2026-09-13
+
+### Changed
+
+- **Breaking:** rows never carry `expand`. PocketBase `expand` now only files
+  related records into the collections named in `relations`; read them with
+  `materialize()`, a join, or the target's `get()`.
+- **Breaking:** `alwaysExpand` is `alwaysFetchRelations`, and
+  `collection.expand()` is `collection.fetchRelations()`. Both keep their path
+  validation.
+- **Breaking:** the row-shape types `ExpandShape`, `WithExpandPaths`,
+  `WithExpand`, `ParseExpandFields`, and `PbView` are removed; `PbCollection`
+  and `PbCollectionView` rows are the schema record type.
+
+### Added
+
+- `materialize` is re-exported from `pbtsdb`.
+- Id-only loads (`eq(id, x)`, `inArray(id, [...])`, or an `or` of those) are
+  served from the synced store when every id is present, so includes and joins
+  on filed rows make no request.
+- `PbCollectionView` is exported: a collection or view without
+  `fetchRelations()` (views are leaves). `PbCollection` is `PbCollectionView`
+  plus `fetchRelations()`.
+
+### Removed
+
+- Embedded-copy patching from relation echoes, the `expand` merge rules, and
+  the dependents registry; they existed only to keep copies fresh.
+
 ## [0.8.0] - 2026-09-11
 
 ### Changed

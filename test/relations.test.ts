@@ -94,13 +94,13 @@ describe('Collection - Relations', () => {
         expect(authorName).toBeTypeOf('string')
     }, 15000)
 
-    it('should auto-expand relations when configured with alwaysExpand', async () => {
+    it('should auto-expand relations when configured with alwaysFetchRelations', async () => {
         const factory = createCollectionFactory(queryClient)
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -110,12 +110,9 @@ describe('Collection - Relations', () => {
         expect(result.current.data.length).toBeGreaterThan(0)
 
         const firstBook = result.current.data[0]
+        expect((firstBook as { expand?: unknown }).expand).toBeUndefined()
 
-        // Type checking: These should compile without errors
-        expect(firstBook.expand).toBeDefined()
-
-        const authorName: string | undefined = firstBook.expand?.author?.name
-        expect(authorName).toBeTypeOf('string')
+        await waitFor(() => expect(authorsCollection.has(firstBook.author)).toBe(true))
     })
 
     it('should filter on relation fields with auto-expand', async () => {
@@ -124,7 +121,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // Get an author ID to filter by
@@ -166,7 +163,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // preload() loads without a subscriber, so nothing holds the authors
@@ -180,9 +177,6 @@ describe('Collection - Relations', () => {
         )
         expect(notReadyWarnings.length).toBeGreaterThan(0)
         expect(authorsCollection.size).toBe(0)
-
-        // The expand data is still present on the record from PocketBase
-        expect(books[0].expand?.author).toBeDefined()
     })
 
     it('should start an eager expand target through a live query and upsert into it', async () => {
@@ -191,7 +185,7 @@ describe('Collection - Relations', () => {
         const booksCollection = factory.create('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -199,7 +193,6 @@ describe('Collection - Relations', () => {
         await waitForLoadFinish(result)
         expect(result.current.data.length).toBeGreaterThan(0)
         const firstBook = result.current.data[0]
-        expect(firstBook.expand?.author).toBeDefined()
 
         // The live query's subscription holds the authors collection live, which
         // starts its load; the expanded author lands there once it is ready.
@@ -215,7 +208,7 @@ describe('Collection - Relations', () => {
         const authorsCollection = factory.create('authors', { syncMode: 'eager' })
         const booksCollection = factory.create('books', {
             relations: { author: authorsCollection },
-            alwaysExpand: ['author'],
+            alwaysFetchRelations: ['author'],
         })
 
         // Get test data
@@ -238,7 +231,7 @@ describe('Collection - Relations', () => {
         // Verify expand works with filtering
         const firstBook = result.current.data[0]
         expect(firstBook.genre).toBe(testGenre)
-        expect(firstBook.expand?.author).toBeDefined()
+        await waitFor(() => expect(authorsCollection.has(firstBook.author)).toBe(true))
 
         // Verify ordering
         for (let i = 1; i < result.current.data.length; i++) {

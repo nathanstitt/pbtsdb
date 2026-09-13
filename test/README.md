@@ -72,13 +72,18 @@ Real-time subscription and live data updates.
 
 ---
 
-#### `expand-views.test.tsx`
-Per-query expand views, nested paths, shared-store coherence, eager refetch, realtime expand, held target subscriptions and echo patching.
+#### `fetch-relations.test.tsx`
+Fetching and filing relations, stripping, views, held targets, keyed loads from the store.
+
+---
+
+#### `keyed-where.test.ts`
+Recognizing an id-only `where` (`eq`, `inArray`, or an `or` of those) and turning it into a keyed load.
 
 ---
 
 #### `expand-helpers.test.ts`
-Pure helpers for expand paths, expand merging, and `patchEmbedded` propagation.
+Path helpers.
 
 ---
 
@@ -88,7 +93,7 @@ Pins the two undocumented TanStack DB behaviours per-query expand relies on. If 
 ---
 
 #### `expand-types.test.ts`
-Type-level assertions for `relations`, `alwaysExpand`, `expand()` views, and nested paths.
+Type-level assertions for `relations`, `alwaysFetchRelations`, `fetchRelations()` views, and nested paths.
 
 ---
 

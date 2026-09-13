@@ -5,7 +5,6 @@ import type {
     InsertMutationFn,
     UpdateMutationFn,
 } from '@tanstack/db'
-import type { RelatedAction } from './expand-patch'
 
 // ============================================================================
 // Schema Type Definitions
@@ -93,56 +92,6 @@ export type ExtractRelations<
 > = Schema[CollectionName] extends { relations: infer R } ? R : never
 
 // ============================================================================
-// Expand Type Utilities
-// ============================================================================
-
-/**
- * Parses comma-separated relation field names into a union type.
- * Recursively processes "field1,field2,field3" into "field1" | "field2" | "field3".
- *
- * @example
- * ParseExpandFields<"customer,address"> => "customer" | "address"
- * @internal
- */
-export type ParseExpandFields<T extends string> = T extends `${infer Field},${infer Rest}`
-    ? Field | ParseExpandFields<Rest>
-    : T
-
-/**
- * Builds the expand object type based on field names.
- * If expand fields are provided, adds an optional `expand` property with properly typed relations.
- *
- * @example
- * ```ts
- * // Without expand
- * WithExpand<Schema, 'jobs', undefined> => JobRecord
- *
- * // With expand
- * WithExpand<Schema, 'jobs', 'customer'> => JobRecord & {
- *     expand?: { customer?: CustomerRecord }
- * }
- * ```
- */
-export type WithExpand<
-    Schema extends SchemaDeclaration,
-    CollectionName extends keyof Schema,
-    ExpandFields extends string | undefined,
-> = ExpandFields extends string
-    ? ExtractRecordType<Schema, CollectionName> & {
-          expand?: {
-              [K in ParseExpandFields<ExpandFields>]?: K extends keyof ExtractRelations<
-                  Schema,
-                  CollectionName
-              >
-                  ? ExtractRelations<Schema, CollectionName>[K] extends Array<infer U>
-                      ? U[] // Array relation
-                      : ExtractRelations<Schema, CollectionName>[K] // Single relation
-                  : never
-          }
-      }
-    : ExtractRecordType<Schema, CollectionName>
-
-// ============================================================================
 // Relation Type Utilities
 // ============================================================================
 
@@ -207,22 +156,6 @@ export interface ExpandTargetCollection {
     status?: string
     /** Resolves once the collection's first load is ready (eager mode). */
     preload?: () => Promise<void>
-    collectionName?: string
-    /** Collections that declared this one in their `relations`. */
-    relationDependents?: RelationDependent[]
-    /** Patch this collection's rows for a change in the relation target under `fields`. */
-    applyRelatedChange?: (
-        fields: readonly string[],
-        action: RelatedAction,
-        record: Record<string, unknown> & { id: string },
-        visited: Set<string>
-    ) => void
-}
-
-/** A collection that embeds this one under `field` and must be patched on echoes. */
-export interface RelationDependent {
-    field: string
-    parent: ExpandTargetCollection
 }
 
 /**
@@ -254,13 +187,6 @@ export type MetaOf<T> = T extends { readonly __pbtsdb: infer M } ? M : never
 /** @internal */
 export type RelationsOf<Opts> = Opts extends { relations: infer R } ? R : never
 
-/** @internal */
-export type AlwaysExpandOf<Opts> = Opts extends {
-    alwaysExpand: readonly (infer A extends string)[]
-}
-    ? A
-    : never
-
 type RelationsOfMeta<M> = M extends { relations: infer R } ? R : never
 
 type Prev = [never, 0, 1, 2, 3, 4, 5]
@@ -278,53 +204,6 @@ export type ExpandPath<Relations, Depth extends number = 6> = [Depth] extends [0
                 | `${K}.${ExpandPath<RelationsOfMeta<MetaOf<Relations[K]>>, Prev[Depth]>}`
         }[keyof Relations & string]
       : never
-
-type PathHead<P extends string> = P extends `${infer H}.${string}` ? H : P
-type PathTail<P extends string, H extends string> = P extends `${H}.${infer R}` ? R : never
-
-type RelationRecord<
-    Schema extends SchemaDeclaration,
-    C extends keyof Schema,
-    K,
-> = K extends keyof ExtractRelations<Schema, C>
-    ? ExcludeUndefined<ExtractRelations<Schema, C>[K]>
-    : never
-
-type WrapNested<Rel, Nested> = Rel extends (infer U)[] ? (U & Nested)[] : Rel & Nested
-
-type NestedExpand<Target, Tail extends string> = [Tail] extends [never]
-    ? unknown
-    : MetaOf<Target> extends PbMeta<infer S, infer N, infer R>
-      ? { expand?: ExpandShape<S, N & keyof S, R, Tail> }
-      : unknown
-
-/**
- * The `expand` object type produced by a set of expand paths.
- */
-export type ExpandShape<
-    Schema extends SchemaDeclaration,
-    C extends keyof Schema,
-    Relations,
-    P extends string,
-> = {
-    [H in PathHead<P>]?: WrapNested<
-        RelationRecord<Schema, C, H>,
-        NestedExpand<H extends keyof Relations ? Relations[H] : never, PathTail<P, H>>
-    >
-}
-
-/**
- * Record type with an `expand` property for the given paths; the plain record when
- * there are none.
- */
-export type WithExpandPaths<
-    Schema extends SchemaDeclaration,
-    C extends keyof Schema,
-    Relations,
-    P extends string,
-> = [P] extends [never]
-    ? ExtractRecordType<Schema, C>
-    : ExtractRecordType<Schema, C> & { expand?: ExpandShape<Schema, C, Relations, P> }
 
 /** @internal */
 export type InsertInputOf<
@@ -350,8 +229,8 @@ export interface CreateCollectionOptions<
 > {
     /**
      * Collections that receive the records PocketBase expands for each relation.
-     * Declaring a relation here makes it available to `alwaysExpand` and to
-     * `collection.expand()`.
+     * Declaring a relation here makes it available to `alwaysFetchRelations` and to
+     * `collection.fetchRelations()`.
      *
      * @example
      * ```ts
@@ -362,16 +241,16 @@ export interface CreateCollectionOptions<
     relations?: RelationsConfig<Schema, CollectionName>
 
     /**
-     * Expand paths applied on every fetch. Each path must resolve through
-     * `relations` (and, for nested paths, the target collection's `relations`).
+     * Expand paths fetched with every request. The expanded records are filed
+     * into the collections named in `relations`; they are not kept on the row.
      *
      * @example
      * ```ts
-     * const books = c('books', { relations: { author: authors }, alwaysExpand: ['author'] })
-     * // data[0].expand?.author is typed and populated on every fetch
+     * const books = c('books', { relations: { author: authors }, alwaysFetchRelations: ['author'] })
+     * // Every fetch files the author into `authors`; read it with authors.get(data[0].author)
      * ```
      */
-    alwaysExpand?: readonly string[]
+    alwaysFetchRelations?: readonly string[]
 
     /**
      * Fields that can be omitted during insert operations.
