@@ -47,6 +47,10 @@ export type PbCollectionView<
     readonly relationTargets: Record<string, unknown> | undefined
     /** @internal number of relation targets currently held live */
     readonly heldRelationTargetCount: () => number
+    /** @internal record that every row with `field === value` is now in this collection's store */
+    readonly markSubsetLoaded: (field: string, value: string) => void
+    /** @internal number of field/value pairs currently marked loaded */
+    readonly loadedSubsetCount: () => number
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
 }

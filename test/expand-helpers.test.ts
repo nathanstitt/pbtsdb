@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+    BACK_RELATION_EXPAND_CAP,
     joinPaths,
+    markFiledSubset,
     normalizePaths,
+    parseViaKey,
     type RelationTargets,
     splitPaths,
     validateExpandPath,
 } from '../src/expand-paths'
+import type { ExpandTargetCollection } from '../src/types'
 
 function target(relationTargets?: RelationTargets) {
     return {
@@ -68,5 +72,70 @@ describe('expand paths', () => {
         expect(() => validateExpandPath('books', undefined, 'author')).toThrow(
             'Cannot expand "author" on collection "books": no relations declared'
         )
+    })
+})
+
+describe('parseViaKey', () => {
+    it('splits at the first _via_', () => {
+        expect(parseViaKey('book_tags_via_book')).toEqual({ field: 'book' })
+        expect(parseViaKey('a_via_b_via_c')).toEqual({ field: 'b_via_c' })
+    })
+
+    it('returns undefined for forward relations and empty fields', () => {
+        expect(parseViaKey('author')).toBeUndefined()
+        expect(parseViaKey('comments_via_')).toBeUndefined()
+    })
+})
+
+describe('markFiledSubset', () => {
+    function fakeTarget() {
+        const marks: [string, string][] = []
+        const target: ExpandTargetCollection & { marks: typeof marks } = {
+            marks,
+            isReady: () => true,
+            _sync: { startSync: async () => undefined },
+            markSubsetLoaded: (field, value) => {
+                marks.push([field, value])
+            },
+        }
+        return target
+    }
+
+    it('marks a back-relation for the parent id', () => {
+        const target = fakeTarget()
+        markFiledSubset(target, 'comments_via_card', [{ id: 'x' }], 'c1')
+        expect(target.marks).toEqual([['card', 'c1']])
+    })
+
+    it('marks a single object (unique-index back-relation) the same way', () => {
+        const target = fakeTarget()
+        markFiledSubset(target, 'profile_via_user', [{ id: 'p' }], 'u1')
+        expect(target.marks).toEqual([['user', 'u1']])
+    })
+
+    it('does not mark forward relations', () => {
+        const target = fakeTarget()
+        markFiledSubset(target, 'author', [{ id: 'a' }], 'b1')
+        expect(target.marks).toEqual([])
+    })
+
+    it('marks below the cap and not at it', () => {
+        const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ id: String(i) }))
+        const under = fakeTarget()
+        markFiledSubset(under, 'comments_via_card', rows(BACK_RELATION_EXPAND_CAP - 1), 'c1')
+        expect(under.marks).toEqual([['card', 'c1']])
+        const at = fakeTarget()
+        markFiledSubset(at, 'comments_via_card', rows(BACK_RELATION_EXPAND_CAP), 'c1')
+        expect(at.marks).toEqual([])
+    })
+
+    it('skips a target without markSubsetLoaded', () => {
+        const target: ExpandTargetCollection = {
+            isReady: () => true,
+            _sync: { startSync: async () => undefined },
+        }
+        expect(() =>
+            markFiledSubset(target, 'comments_via_card', [{ id: 'x' }], 'c1')
+        ).not.toThrow()
     })
 })

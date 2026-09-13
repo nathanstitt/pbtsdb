@@ -13,8 +13,15 @@ import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import type { RelationTargets } from './expand-paths'
-import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
-import { subsetFromWhere, type WhereSubset } from './keyed-where'
+import {
+    joinPaths,
+    markFiledSubset,
+    normalizePaths,
+    parseViaKey,
+    splitPaths,
+    validateExpandPath,
+} from './expand-paths'
+import { matchesSubset, subsetFromWhere, type WhereSubset } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -27,6 +34,38 @@ import type {
 // Subscriptions created through a view, mapped to the view's expand paths. Keyed
 // by the subscription object TanStack hands back to loadSubset/unloadSubset.
 const viewPaths = new WeakMap<object, string[]>()
+
+// A correlated subquery over a relation target (e.g. a `materialize` include
+// keyed off the parent row's id) can have its own `loadSubset` dispatched by
+// TanStack DB's query planner before the parent's own fetch — the one that
+// would file and mark this exact subset — has resolved. Keyed by the target
+// collection instance and via-field, this lets the target's own fetch wait
+// for a same-tick parent fetch that might satisfy it instead of racing it.
+const pendingFilings = new WeakMap<object, Map<string, Promise<void>[]>>()
+
+// Called by a PARENT collection's own fetch, on the relation TARGET instance,
+// to register that it might mark `field` once that fetch's upsertExpanded
+// settles. The target's own fetchItems awaits these (see awaitPendingFiling)
+// before issuing a request for a not-yet-loaded subset on that field.
+function registerPendingFiling(target: object, field: string, settles: Promise<void>): void {
+    let byField = pendingFilings.get(target)
+    if (!byField) {
+        byField = new Map()
+        pendingFilings.set(target, byField)
+    }
+    let pending = byField.get(field)
+    if (!pending) {
+        pending = []
+        byField.set(field, pending)
+    }
+    pending.push(settles)
+}
+
+async function awaitPendingFiling(target: object, field: string): Promise<void> {
+    const pending = pendingFilings.get(target)?.get(field)
+    if (!pending || pending.length === 0) return
+    await Promise.all(pending)
+}
 
 /**
  * Options applied to every collection built by a {@link createCollection} factory.
@@ -60,6 +99,10 @@ export interface CollectionSubscriptionHelpers {
     relationTargets: RelationTargets | undefined
     /** Number of relation targets currently held live */
     heldRelationTargetCount: () => number
+    /** Record that every row with `field === value` is now in this collection's store */
+    markSubsetLoaded: (field: string, value: string) => void
+    /** Number of field/value pairs currently marked loaded */
+    loadedSubsetCount: () => number
 }
 
 /**
@@ -140,6 +183,23 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         ])
     }
 
+    // The declared relation targets this request's top-level expand keys will
+    // file into, for each key that is a back-relation (`<collection>_via_<field>`).
+    // Used to give a same-tick correlated subquery on one of those targets a
+    // chance to be served from the store instead of racing this fetch.
+    function backRelationTargetsFor(
+        request: PbRequest
+    ): Array<{ target: ExpandTargetCollection; field: string }> {
+        if (!relationTargets) return []
+        const results: Array<{ target: ExpandTargetCollection; field: string }> = []
+        for (const key of splitPaths(activeExpand(request)).map(path => path.split('.')[0])) {
+            const target = relationTargets[key]
+            const via = target && parseViaKey(key)
+            if (target && via) results.push({ target, field: via.field })
+        }
+        return results
+    }
+
     // pbtsdb asked PocketBase for these relations only to file them into their
     // target collections; the copies never reach a row in any cache.
     function stripFetchedRelations(
@@ -208,7 +268,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     async function upsertExpandedField(
         key: string,
         value: object | object[],
-        targets: RelationTargets
+        targets: RelationTargets,
+        parentId: string | undefined
     ): Promise<void> {
         const target = targets[key]
         if (!target) {
@@ -218,6 +279,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const values = Array.isArray(value) ? value : [value]
         await upsertInto(key, target, values)
         await upsertExpanded(values, target.relationTargets)
+        if (parentId !== undefined) markFiledSubset(target, key, values, parentId)
     }
 
     async function upsertExpanded(
@@ -228,14 +290,71 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         for (const record of records) {
             const expandData = (record as { expand?: Record<string, object | object[]> }).expand
             if (!expandData) continue
+            const id = (record as { id?: unknown }).id
+            const parentId = typeof id === 'string' ? id : undefined
             for (const [key, value] of Object.entries(expandData)) {
-                await upsertExpandedField(key, value, targets)
+                await upsertExpandedField(key, value, targets, parentId)
             }
         }
     }
 
     function subsetFilter({ field, values }: WhereSubset): string {
         return values.map(value => `${field} = "${value.replace(/"/g, '\\"')}"`).join(' || ')
+    }
+
+    // Field → parent ids whose child subset is known complete in the store,
+    // recorded when a parent files a back-relation expand for that parent id.
+    const loadedSubsets = new Map<string, Set<string>>()
+
+    function markSubsetLoaded(field: string, value: string): void {
+        let values = loadedSubsets.get(field)
+        if (!values) {
+            values = new Set()
+            loadedSubsets.set(field, values)
+        }
+        values.add(value)
+    }
+
+    function loadedSubsetCount(): number {
+        let count = 0
+        for (const values of loadedSubsets.values()) count += values.size
+        return count
+    }
+
+    function subsetIsLoaded({ field, values }: WhereSubset): boolean {
+        const marked = loadedSubsets.get(field)
+        return marked !== undefined && values.every(value => marked.has(value))
+    }
+
+    function forgetMarkedValue(marked: Set<string>, value: unknown): boolean {
+        if (typeof value === 'string') return marked.delete(value)
+        if (!Array.isArray(value)) return false
+        let removed = false
+        for (const item of value)
+            if (typeof item === 'string' && marked.delete(item)) removed = true
+        return removed
+    }
+
+    // A row leaving the store other than by a server-confirmed delete means the
+    // subsets it belonged to are no longer complete. A currently-observed subset
+    // query already resolved successfully is served from query-db-collection's
+    // own cache on the next mount regardless of our own marks (see
+    // createQueryFromOpts's `state.observers`/`isSuccess` fast path), so an
+    // actual forget also refetches every currently tracked subset to clear it.
+    function forgetMarksFor(row: unknown): void {
+        if (!row || typeof row !== 'object') return
+        let forgot = false
+        for (const [field, marked] of loadedSubsets) {
+            if (forgetMarkedValue(marked, (row as Record<string, unknown>)[field])) forgot = true
+        }
+        if (forgot) {
+            void collection.utils.refetch().catch(error =>
+                logger.error('Failed to refetch after forgetting a mark', {
+                    collectionName,
+                    error,
+                })
+            )
+        }
     }
 
     // Rows already in the synced store are as fresh as realtime keeps them;
@@ -256,6 +375,27 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // been filed for this row yet, so only that forces a real fetch. An empty subset
     // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
     // which an empty id filter would turn into "fetch everything".
+    function idSubsetFromStore(
+        subset: WhereSubset,
+        limit: number | undefined
+    ): RecordType[] | undefined {
+        const present = rowsFromStore(subset.values)
+        if (!present) return undefined
+        return limit ? present.slice(0, limit) : present
+    }
+
+    function fieldSubsetFromStore(
+        subset: WhereSubset,
+        limit: number | undefined
+    ): RecordType[] | undefined {
+        if (!subsetIsLoaded(subset)) return undefined
+        const wanted = new Set(subset.values)
+        const rows = [...collection._state.syncedData.values()].filter(row =>
+            matchesSubset(row as object, subset.field, wanted)
+        ) as RecordType[]
+        return limit ? rows.slice(0, limit) : rows
+    }
+
     function servedFromStore(request: PbRequest): RecordType[] | undefined {
         const { subset, sort, limit } = request
         if (!subset) return undefined
@@ -266,15 +406,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // TanStack passes neither for id-only loads today, so this only guards
         // against a future caller combining them.
         if (sort && limit) return undefined
-        if (subset.field !== 'id') return undefined
-        const present = rowsFromStore(subset.values)
-        if (!present) return undefined
-        return limit ? present.slice(0, limit) : present
+        return subset.field === 'id'
+            ? idSubsetFromStore(subset, limit)
+            : fieldSubsetFromStore(subset, limit)
     }
 
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
         const served = servedFromStore(request)
         if (served) return served
+        // A same-tick parent fetch may be about to file and mark exactly this
+        // subset (see pendingFilings above); give it the chance before fetching.
+        if (request.subset && request.subset.field !== 'id') {
+            await awaitPendingFiling(collection, request.subset.field)
+            const servedAfterFiling = servedFromStore(request)
+            if (servedAfterFiling) return servedAfterFiling
+        }
         const { sort, limit, subset } = request
         const filter = subset ? subsetFilter(subset) : request.filter
         const expand = activeExpand(request)
@@ -357,6 +503,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     ): Promise<RecordType[]> {
         const confirmedMidFlight = new Set<string>()
         inFlightConfirmedIds.add(confirmedMidFlight)
+        // Registered up front, before fetchItems runs, so a target's own
+        // fetchItems — dispatched the same tick by a correlated subquery — can
+        // await this fetch's filing instead of racing it. Resolves once filing
+        // settles either way (including on an error/autocancel path below), so
+        // a waiter is never left hanging on a subset this fetch never files.
+        let settleFiling: () => void = () => undefined
+        const filed = new Promise<void>(resolve => {
+            settleFiling = resolve
+        })
+        for (const { target, field } of backRelationTargetsFor(request)) {
+            registerPendingFiling(target, field, filed)
+        }
         try {
             let items: RecordType[]
             try {
@@ -390,6 +548,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             )
         } finally {
             inFlightConfirmedIds.delete(confirmedMidFlight)
+            settleFiling()
         }
     }
 
@@ -616,6 +775,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         sync: (params: Parameters<typeof innerSync>[0]) => {
             const guardedWrite: typeof params.write = message => {
                 const op = message as { type: string; value?: unknown; key?: unknown }
+                if (op.type === 'delete' && !applyingOwnWrite) forgetMarksFor(op.value)
                 if (shouldDropSyncedWrite(op)) return
                 return params.write(message)
             }
@@ -963,6 +1123,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // isSubscribed false with targets still held, and this real stop is
         // the only remaining chance to release them.
         if (releaseTargets) syncHeldSubscriptions(new Set())
+        if (releaseTargets) loadedSubsets.clear()
         if (!isSubscribed || !unsubscribeFn) return
 
         try {
@@ -1080,6 +1241,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     )
 
+    collection.on('status:change', (event: { status: string }) => {
+        if (event.status === 'cleaned-up') loadedSubsets.clear()
+    })
+    collection.on('truncate', () => loadedSubsets.clear())
+
     // Add collectionName and subscription helpers
     Object.assign(collection, {
         collectionName,
@@ -1087,6 +1253,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         waitForSubscription,
         isSubscribed: () => isSubscribed,
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
+        markSubsetLoaded,
+        loadedSubsetCount,
         fetchRelations,
     })
 

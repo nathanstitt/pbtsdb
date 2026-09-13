@@ -1131,5 +1131,246 @@ describe('Fetch relations', () => {
                 counter.restore()
             }
         }, 15000)
+
+        describe('loaded subsets', () => {
+            function makeBooks() {
+                const c = createCollection<Schema>(pb, queryClient)
+                const bookTags = c('book_tags', { syncMode: 'on-demand' })
+                const metadata = c('book_metadata', { syncMode: 'on-demand' })
+                const books = c('books', {
+                    syncMode: 'on-demand',
+                    relations: { book_tags_via_book: bookTags, book_metadata_via_book: metadata },
+                })
+                return { books, bookTags, metadata }
+            }
+
+            // A seeded book with at least one junction row, plus the ids PocketBase
+            // reports for it, fetched before any request counter is installed.
+            async function seededBookWithTags() {
+                const list = await pb
+                    .collection('books')
+                    .getFullList({ expand: 'book_tags_via_book' })
+                const book = list.find(item => {
+                    const tags = (item as { expand?: { book_tags_via_book?: unknown[] } }).expand
+                        ?.book_tags_via_book
+                    return Array.isArray(tags) && tags.length > 0
+                })
+                if (!book) throw new Error('seed data has no book with tags')
+                const tagIds = (
+                    book as unknown as { expand: { book_tags_via_book: Array<{ id: string }> } }
+                ).expand.book_tags_via_book.map(row => row.id)
+                return { bookId: book.id, tagIds }
+            }
+
+            function tagsFor(bookTags: ReturnType<typeof makeBooks>['bookTags'], bookId: string) {
+                return renderHook(() =>
+                    useLiveQuery(q =>
+                        q.from({ bt: bookTags }).where(({ bt }) => eq(bt.book, bookId))
+                    )
+                )
+            }
+
+            it('serves a back-relation subset from the store after the parent filed it', async () => {
+                const { bookId, tagIds } = await seededBookWithTags()
+                const { books, bookTags } = makeBooks()
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const { result } = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books.fetchRelations('book_tags_via_book') })
+                                .where(({ b }) => eq(b.id, bookId))
+                                .select(({ b }) => ({
+                                    id: b.id,
+                                    tags: materialize(
+                                        q
+                                            .from({ bt: bookTags })
+                                            .where(({ bt }) => eq(bt.book, b.id))
+                                    ),
+                                }))
+                        )
+                    )
+                    await waitForLoadFinish(result, 10000)
+                    await waitFor(() =>
+                        expect(new Set(result.current.data[0]?.tags?.map(t => t.id))).toEqual(
+                            new Set(tagIds)
+                        )
+                    )
+                    expect(counter.filters).toEqual([])
+                } finally {
+                    counter.restore()
+                }
+            }, 15000)
+
+            it('fetches the subset once when nothing filed it', async () => {
+                const { bookId, tagIds } = await seededBookWithTags()
+                const { books, bookTags } = makeBooks()
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const { result } = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books })
+                                .where(({ b }) => eq(b.id, bookId))
+                                .select(({ b }) => ({
+                                    id: b.id,
+                                    tags: materialize(
+                                        q
+                                            .from({ bt: bookTags })
+                                            .where(({ bt }) => eq(bt.book, b.id))
+                                    ),
+                                }))
+                        )
+                    )
+                    await waitForLoadFinish(result, 10000)
+                    await waitFor(() =>
+                        expect(new Set(result.current.data[0]?.tags?.map(t => t.id))).toEqual(
+                            new Set(tagIds)
+                        )
+                    )
+                    expect(counter.filters).toHaveLength(1)
+                    expect(counter.filters[0]).toContain('book = "')
+                } finally {
+                    counter.restore()
+                }
+            }, 15000)
+
+            it('a plain base query does not mark the subset', async () => {
+                const { bookId } = await seededBookWithTags()
+                const { books, bookTags } = makeBooks()
+                const base = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.id, bookId)))
+                )
+                await waitForLoadFinish(base.result, 10000)
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const include = tagsFor(bookTags, bookId)
+                    await waitForLoadFinish(include.result, 10000)
+                    expect(counter.filters).toHaveLength(1)
+                } finally {
+                    counter.restore()
+                }
+            }, 15000)
+
+            it('serves a second back-relation child (book_metadata) the same way', async () => {
+                const { bookId } = await seededBookWithTags()
+                const { books, metadata } = makeBooks()
+                const counter = countRequestsTo('/collections/book_metadata/records')
+                try {
+                    const { result } = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books.fetchRelations('book_metadata_via_book') })
+                                .where(({ b }) => eq(b.id, bookId))
+                                .select(({ b }) => ({
+                                    id: b.id,
+                                    meta: materialize(
+                                        q.from({ m: metadata }).where(({ m }) => eq(m.book, b.id))
+                                    ),
+                                }))
+                        )
+                    )
+                    await waitForLoadFinish(result, 10000)
+                    await waitFor(() =>
+                        expect(result.current.data[0]?.meta?.length).toBeGreaterThan(0)
+                    )
+                    expect(counter.filters).toEqual([])
+                } finally {
+                    counter.restore()
+                }
+            }, 15000)
+
+            it('a pruned row invalidates the mark', async () => {
+                const { bookId, tagIds } = await seededBookWithTags()
+                const { books, bookTags } = makeBooks()
+                const parent = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('book_tags_via_book') })
+                            .where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(parent.result, 10000)
+                await waitFor(() => expect(bookTags.has(tagIds[0])).toBe(true))
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const first = tagsFor(bookTags, bookId)
+                    await waitForLoadFinish(first.result, 10000)
+                    expect(first.result.current.data.length).toBe(tagIds.length)
+                    expect(counter.filters).toEqual([])
+                    first.unmount()
+
+                    bookTags.utils.writeDelete(tagIds[0])
+                    const second = tagsFor(bookTags, bookId)
+                    await waitForLoadFinish(second.result, 10000)
+                    await waitFor(() => expect(counter.filters).toHaveLength(1))
+                    await waitFor(() =>
+                        expect(second.result.current.data.length).toBe(tagIds.length)
+                    )
+                } finally {
+                    counter.restore()
+                }
+            }, 20000)
+
+            it('the target realtime stop invalidates every mark', async () => {
+                const { bookId } = await seededBookWithTags()
+                const { books, bookTags } = makeBooks()
+                const parent = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('book_tags_via_book') })
+                            .where(({ b }) => eq(b.id, bookId))
+                    )
+                )
+                await waitForLoadFinish(parent.result, 10000)
+                await waitFor(() => expect(bookTags.isSubscribed()).toBe(true), { timeout: 10000 })
+                parent.unmount()
+                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const include = tagsFor(bookTags, bookId)
+                    await waitForLoadFinish(include.result, 10000)
+                    expect(counter.filters).toHaveLength(1)
+                } finally {
+                    counter.restore()
+                }
+            }, 20000)
+
+            it('serves a back-relation filed by a different parent (tags)', async () => {
+                const junction = (await pb.collection('book_tags').getList(1, 1))
+                    .items[0] as unknown as {
+                    tag: string
+                }
+                const c = createCollection<Schema>(pb, queryClient)
+                const bookTags = c('book_tags', { syncMode: 'on-demand' })
+                const tags = c('tags', {
+                    syncMode: 'on-demand',
+                    relations: { book_tags_via_tag: bookTags },
+                })
+                const counter = countRequestsTo('/collections/book_tags/records')
+                try {
+                    const { result } = renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ t: tags.fetchRelations('book_tags_via_tag') })
+                                .where(({ t }) => eq(t.id, junction.tag))
+                                .select(({ t }) => ({
+                                    id: t.id,
+                                    links: materialize(
+                                        q.from({ bt: bookTags }).where(({ bt }) => eq(bt.tag, t.id))
+                                    ),
+                                }))
+                        )
+                    )
+                    await waitForLoadFinish(result, 10000)
+                    await waitFor(() =>
+                        expect(result.current.data[0]?.links?.length).toBeGreaterThan(0)
+                    )
+                    expect(counter.filters).toEqual([])
+                } finally {
+                    counter.restore()
+                }
+            }, 15000)
+        })
     })
 })

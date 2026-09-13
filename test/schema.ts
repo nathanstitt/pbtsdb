@@ -499,8 +499,8 @@ export type Schema = {
         type: Books
         relations: {
             author: Authors
-            // book_metadata_via_book?: BookMetadata[]
-            // book_tags_via_book?: BookTags[]
+            book_metadata_via_book?: BookMetadata[]
+            book_tags_via_book?: BookTags[]
         }
     }
     book_metadata: {
@@ -512,7 +512,7 @@ export type Schema = {
     tags: {
         type: Tags
         relations: {
-            // book_tags_via_tag?: BookTags[]
+            book_tags_via_tag?: BookTags[]
         }
     }
     book_tags: {

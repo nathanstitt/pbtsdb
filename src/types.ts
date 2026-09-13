@@ -156,6 +156,8 @@ export interface ExpandTargetCollection {
     status?: string
     /** Resolves once the collection's first load is ready (eager mode). */
     preload?: () => Promise<void>
+    /** Record that every row with `field === value` is now in this collection's store. */
+    markSubsetLoaded?: (field: string, value: string) => void
 }
 
 /**
