@@ -907,17 +907,20 @@ describe('Fetch relations', () => {
         function countRequestsTo(path: string) {
             const filters: string[] = []
             const prev = pb.beforeSend
-            pb.beforeSend = (url, options) => {
+            const hook: typeof pb.beforeSend = (url, options) => {
                 if (url.includes(path)) {
                     const query = (options as { query?: { filter?: string } }).query
                     filters.push(query?.filter ?? '')
                 }
                 return prev ? prev(url, options) : { url, options }
             }
+            pb.beforeSend = hook
             return {
                 filters,
                 restore: () => {
-                    pb.beforeSend = prev
+                    if (pb.beforeSend === hook) {
+                        pb.beforeSend = prev
+                    }
                 },
             }
         }
@@ -1432,8 +1435,8 @@ describe('Fetch relations', () => {
                     expect(junctionCounter.filters).toEqual([])
                     expect(tagCounter.filters).toEqual([])
                 } finally {
-                    junctionCounter.restore()
                     tagCounter.restore()
+                    junctionCounter.restore()
                 }
             }, 15000)
         })
