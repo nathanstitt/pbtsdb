@@ -492,7 +492,7 @@ export type Schema = {
     authors: {
         type: Authors
         relations: {
-            // books_via_author?: Books[]
+            books_via_author?: Books[]
         }
     }
     books: {
