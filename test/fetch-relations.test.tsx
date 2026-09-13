@@ -234,7 +234,7 @@ describe('Fetch relations', () => {
                 .map(query => query.queryKey)
             expect(keys).toContainEqual([
                 'books',
-                { filter: 'genre = "Fiction"', sort: 'title', limit: 2 },
+                { subset: { field: 'genre', values: ['Fiction'] }, sort: 'title', limit: 2 },
             ])
         }, 15000)
     })
@@ -377,7 +377,7 @@ describe('Fetch relations', () => {
                 .map(query => query.queryKey)
             expect(keys).toContainEqual([
                 'books',
-                { filter: 'title = "Animal Farm"', expand: 'author' },
+                { subset: { field: 'title', values: ['Animal Farm'] }, expand: 'author' },
             ])
         }, 15000)
 

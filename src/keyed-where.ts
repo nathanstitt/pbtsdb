@@ -1,38 +1,45 @@
 import type { IR } from '@tanstack/db'
 
+export type WhereSubset = { field: string; values: string[] }
+
 type Node = { type: string; name?: string; args?: Node[]; path?: string[]; value?: unknown }
 
-function isIdRef(node: Node | undefined): boolean {
-    return node?.type === 'ref' && node.path?.length === 1 && node.path[0] === 'id'
+function fieldRef(node: Node | undefined): string | undefined {
+    return node?.type === 'ref' && node.path?.length === 1 ? node.path[0] : undefined
 }
 
 function stringValue(node: Node | undefined): string | undefined {
     return node?.type === 'val' && typeof node.value === 'string' ? node.value : undefined
 }
 
-function collectEq(a: Node | undefined, b: Node | undefined): string[] | undefined {
-    const other = isIdRef(a) ? b : isIdRef(b) ? a : undefined
-    if (!other) return undefined
-    const value = stringValue(other)
-    return value === undefined ? undefined : [value]
+function collectEq(a: Node | undefined, b: Node | undefined): WhereSubset | undefined {
+    const field = fieldRef(a) ?? fieldRef(b)
+    if (field === undefined) return undefined
+    const value = stringValue(fieldRef(a) !== undefined ? b : a)
+    return value === undefined ? undefined : { field, values: [value] }
 }
 
-function collectIn(a: Node | undefined, b: Node | undefined): string[] | undefined {
-    if (!isIdRef(a) || b?.type !== 'val' || !Array.isArray(b.value)) return undefined
-    return b.value.every(v => typeof v === 'string') ? (b.value as string[]) : undefined
+function collectIn(a: Node | undefined, b: Node | undefined): WhereSubset | undefined {
+    const field = fieldRef(a)
+    if (field === undefined || b?.type !== 'val' || !Array.isArray(b.value)) return undefined
+    return b.value.every(v => typeof v === 'string')
+        ? { field, values: b.value as string[] }
+        : undefined
 }
 
-function collectOr(args: Node[]): string[] | undefined {
-    const ids: string[] = []
+function collectOr(args: Node[]): WhereSubset | undefined {
+    let field: string | undefined
+    const values: string[] = []
     for (const arg of args) {
         const sub = collect(arg)
-        if (!sub) return undefined
-        ids.push(...sub)
+        if (!sub || (field !== undefined && sub.field !== field)) return undefined
+        field = sub.field
+        values.push(...sub.values)
     }
-    return ids
+    return field === undefined ? undefined : { field, values }
 }
 
-function collect(node: Node): string[] | undefined {
+function collect(node: Node): WhereSubset | undefined {
     if (node.type !== 'func' || !node.args) return undefined
     const [a, b] = node.args
     switch (node.name) {
@@ -48,13 +55,23 @@ function collect(node: Node): string[] | undefined {
 }
 
 /**
- * The ids a `where` selects when it is nothing but `id` equalities: `eq(id, x)`,
- * `in(id, [...])`, or an `or` of those. Anything else returns `undefined`.
+ * The single-field subset a `where` selects when it is nothing but equalities on
+ * one top-level field: `eq(field, x)`, `in(field, [...])`, or an `or` of those.
+ * Anything else returns `undefined`.
  */
-export function idsFromWhere(
+export function subsetFromWhere(
     where: IR.BasicExpression<boolean> | undefined | null
-): string[] | undefined {
+): WhereSubset | undefined {
     if (!where) return undefined
-    const ids = collect(where as unknown as Node)
-    return ids ? [...new Set(ids)].sort() : undefined
+    const subset = collect(where as unknown as Node)
+    return subset ? { field: subset.field, values: [...new Set(subset.values)].sort() } : undefined
+}
+
+/** Whether a row's `field` is one of `wanted` (a multiple relation matches by containment). */
+export function matchesSubset(row: object, field: string, wanted: ReadonlySet<string>): boolean {
+    const value = (row as Record<string, unknown>)[field]
+    if (typeof value === 'string') return wanted.has(value)
+    if (Array.isArray(value))
+        return value.some(item => typeof item === 'string' && wanted.has(item))
+    return false
 }

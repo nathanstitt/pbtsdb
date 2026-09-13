@@ -14,7 +14,7 @@ import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import type { RelationTargets } from './expand-paths'
 import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
-import { idsFromWhere } from './keyed-where'
+import { subsetFromWhere, type WhereSubset } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -110,16 +110,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         sort?: string
         limit?: number
         expand?: string
-        ids?: string[]
+        subset?: WhereSubset
     }
 
     function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
         const request: PbRequest = {}
-        const ids = idsFromWhere(opts?.where)
-        const filter = ids ? undefined : convertToPocketBaseFilter(opts?.where)
+        const subset = subsetFromWhere(opts?.where)
+        const filter = subset ? undefined : convertToPocketBaseFilter(opts?.where)
         const sort = convertToPocketBaseSort(opts?.orderBy)
         const expand = joinPaths((opts as LoadOptions | undefined)?.expand ?? [])
-        if (ids) request.ids = ids
+        if (subset) request.subset = subset
         if (filter) request.filter = filter
         if (sort) request.sort = sort
         if (opts?.limit) request.limit = opts.limit
@@ -234,8 +234,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    function idFilter(ids: readonly string[]): string {
-        return ids.map(id => `id = "${id.replace(/"/g, '\\"')}"`).join(' || ')
+    function subsetFilter({ field, values }: WhereSubset): string {
+        return values.map(value => `${field} = "${value.replace(/"/g, '\\"')}"`).join(' || ')
     }
 
     // Rows already in the synced store are as fresh as realtime keeps them;
@@ -253,20 +253,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // A row already in the store was fetched (and filed) with this collection's own
     // alwaysFetchRelations, so that part of `expand` is already reflected. Only
     // `request.expand` — the extra paths a fetchRelations() view adds — may not have
-    // been filed for this row yet, so only that forces a real fetch. An empty `ids`
+    // been filed for this row yet, so only that forces a real fetch. An empty subset
     // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
     // which an empty id filter would turn into "fetch everything".
     function servedFromStore(request: PbRequest): RecordType[] | undefined {
-        const { ids, sort, limit } = request
-        if (!ids) return undefined
-        if (ids.length === 0) return []
+        const { subset, sort, limit } = request
+        if (!subset) return undefined
+        if (subset.values.length === 0) return []
         if (request.expand) return undefined
         // A sorted + limited request must be sliced in that order; the store
         // holds rows in id order, so slicing here could return the wrong subset.
         // TanStack passes neither for id-only loads today, so this only guards
         // against a future caller combining them.
         if (sort && limit) return undefined
-        const present = rowsFromStore(ids)
+        if (subset.field !== 'id') return undefined
+        const present = rowsFromStore(subset.values)
         if (!present) return undefined
         return limit ? present.slice(0, limit) : present
     }
@@ -274,8 +275,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
         const served = servedFromStore(request)
         if (served) return served
-        const { sort, limit, ids } = request
-        const filter = ids ? idFilter(ids) : request.filter
+        const { sort, limit, subset } = request
+        const filter = subset ? subsetFilter(subset) : request.filter
         const expand = activeExpand(request)
 
         if (limit) {
