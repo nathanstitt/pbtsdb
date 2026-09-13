@@ -14,6 +14,7 @@ import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import type { RelationTargets } from './expand-paths'
 import { joinPaths, normalizePaths, splitPaths, validateExpandPath } from './expand-paths'
+import { idsFromWhere } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -104,13 +105,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const requestedExpand = new Set<string>()
 
     type LoadOptions = LoadSubsetOptions & { expand?: readonly string[] }
-    type PbRequest = { filter?: string; sort?: string; limit?: number; expand?: string }
+    type PbRequest = {
+        filter?: string
+        sort?: string
+        limit?: number
+        expand?: string
+        ids?: string[]
+    }
 
     function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
         const request: PbRequest = {}
-        const filter = convertToPocketBaseFilter(opts?.where)
+        const ids = idsFromWhere(opts?.where)
+        const filter = ids ? undefined : convertToPocketBaseFilter(opts?.where)
         const sort = convertToPocketBaseSort(opts?.orderBy)
         const expand = joinPaths((opts as LoadOptions | undefined)?.expand ?? [])
+        if (ids) request.ids = ids
         if (filter) request.filter = filter
         if (sort) request.sort = sort
         if (opts?.limit) request.limit = opts.limit
@@ -226,9 +235,33 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
+    function idFilter(ids: readonly string[]): string {
+        return ids.map(id => `id = "${id.replace(/"/g, '\\"')}"`).join(' || ')
+    }
+
+    // Rows already in the synced store are as fresh as realtime keeps them;
+    // an id-only request whose ids are all present needs no round trip.
+    function rowsFromStore(ids: readonly string[]): RecordType[] | undefined {
+        const rows: RecordType[] = []
+        for (const id of ids) {
+            const row = collection._state.syncedData.get(id) as RecordType | undefined
+            if (!row) return undefined
+            rows.push(row)
+        }
+        return rows
+    }
+
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
-        const { filter, sort, limit } = request
+        const { sort, limit, ids } = request
         const expand = activeExpand(request)
+        // A synced row never carries `expand` (it is stripped once filed), so it
+        // cannot stand in for a request that needs one: serving it here would
+        // skip the filing this expand is meant to trigger.
+        if (ids && !expand) {
+            const present = rowsFromStore(ids)
+            if (present) return limit ? present.slice(0, limit) : present
+        }
+        const filter = ids ? idFilter(ids) : request.filter
 
         if (limit) {
             // Use getList when limit is specified to avoid fetching all records

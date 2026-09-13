@@ -1,4 +1,4 @@
-import { eq, useLiveQuery } from '@tanstack/react-db'
+import { and, eq, materialize, useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
@@ -901,5 +901,162 @@ describe('Fetch relations', () => {
             expect(internals(books).subscriberCount).toBe(0)
             expect(internals(tags).subscriberCount).toBe(0)
         })
+    })
+
+    describe('keyed loads served from the store', () => {
+        function countAuthorRequests() {
+            const filters: string[] = []
+            const prev = pb.beforeSend
+            pb.beforeSend = (url, options) => {
+                if (url.includes('/collections/authors/records')) {
+                    const query = (options as { query?: { filter?: string } }).query
+                    filters.push(query?.filter ?? '')
+                }
+                return { url, options }
+            }
+            return {
+                filters,
+                restore: () => {
+                    pb.beforeSend = prev
+                },
+            }
+        }
+
+        function make(always: boolean) {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', {
+                syncMode: 'on-demand',
+                relations: { author: authors },
+                ...(always ? { alwaysFetchRelations: ['author'] as const } : {}),
+            })
+            return { authors, books }
+        }
+
+        it('a materialize include on filed rows makes no authors request', async () => {
+            const { authors, books } = make(true)
+            const counter = countAuthorRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .where(({ b }) => eq(b.genre, 'Fiction'))
+                            .select(({ b }) => ({
+                                id: b.id,
+                                author: materialize(
+                                    q
+                                        .from({ a: authors })
+                                        .where(({ a }) => eq(a.id, b.author))
+                                        .findOne()
+                                ),
+                            }))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => {
+                    expect(result.current.data.length).toBeGreaterThan(0)
+                    expect(result.current.data.every(r => r.author?.name)).toBe(true)
+                })
+                expect(counter.filters).toEqual([])
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('a join on filed rows makes no authors request', async () => {
+            const { authors, books } = make(true)
+            const counter = countAuthorRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .where(({ b }) => eq(b.genre, 'Fiction'))
+                            .join({ a: authors }, ({ b, a }) => eq(b.author, a.id))
+                            .select(({ b, a }) => ({ id: b.id, name: a?.name }))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(result.current.data.every(r => r.name)).toBe(true))
+                expect(counter.filters).toEqual([])
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('get() and a findOne live query read a filed row without a request', async () => {
+            const { authors, books } = make(true)
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitForLoadFinish(first.result, 10000)
+            const authorId = first.result.current.data[0].author
+            await waitFor(() => expect(authors.has(authorId)).toBe(true))
+            const counter = countAuthorRequests()
+            try {
+                expect(authors.get(authorId)?.id).toBe(authorId)
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ a: authors })
+                            .where(({ a }) => eq(a.id, authorId))
+                            .findOne()
+                    )
+                )
+                await waitFor(() => expect(result.current.data?.id).toBe(authorId), {
+                    timeout: 10000,
+                })
+                expect(counter.filters).toEqual([])
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('without the always-fetch, a join issues exactly one batched request', async () => {
+            const { authors, books } = make(false)
+            const counter = countAuthorRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .join({ a: authors }, ({ b, a }) => eq(b.author, a.id))
+                            .select(({ b, a }) => ({ id: b.id, name: a?.name }))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitFor(() => expect(result.current.data.every(r => r.name)).toBe(true))
+                expect(counter.filters).toHaveLength(1)
+                expect(counter.filters[0]).toContain('id = "')
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
+
+        it('a mixed predicate still fetches', async () => {
+            const { authors, books } = make(true)
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitForLoadFinish(first.result, 10000)
+            const authorId = first.result.current.data[0].author
+            await waitFor(() => expect(authors.has(authorId)).toBe(true))
+            const name = authors.get(authorId)?.name ?? ''
+            const counter = countAuthorRequests()
+            try {
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ a: authors })
+                            .where(({ a }) => and(eq(a.id, authorId), eq(a.name, name)))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                expect(counter.filters).toHaveLength(1)
+            } finally {
+                counter.restore()
+            }
+        }, 15000)
     })
 })

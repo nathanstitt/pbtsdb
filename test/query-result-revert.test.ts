@@ -1,4 +1,4 @@
-import { eq } from '@tanstack/db'
+import { and, eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -35,9 +35,11 @@ import type { Books } from './schema'
  *
  * `genre` stands in for a file's parent folder, exactly as in
  * refetch-on-mutation-revert.test.ts: a `genre = SOURCE` live query is the "current
- * folder" and update(id, d => d.genre = DEST) is the move. A `where(id = X)` live query
- * is the app's "resolve selected item" resolver — the query that, in the report, served
- * the stale read.
+ * folder" and update(id, d => d.genre = DEST) is the move. A `where(id = X && isbn = Y)`
+ * live query is the app's "resolve selected item" resolver — the query that, in the
+ * report, served the stale read. It mixes in `isbn` so the predicate isn't id-only:
+ * an id-only `where` is now served straight from the synced store (see
+ * src/keyed-where.ts), which would never reach this test's mocked server fetch at all.
  *
  * The race is made deterministic by stubbing the id= resolver's server fetch to return
  * the pre-move row, then refetching it after the move has committed. The id= query must
@@ -140,7 +142,9 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         )
         const { result: idResult } = renderHook(() =>
             useLiveQuery(q =>
-                q.from({ books: collection }).where(({ books }) => eq(books.id, seed.id))
+                q
+                    .from({ books: collection })
+                    .where(({ books }) => and(eq(books.id, seed.id), eq(books.isbn, seed.isbn)))
             )
         )
         await waitForLoadFinish(folderResult, 10000)
@@ -235,7 +239,9 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         )
         const { result: idResult } = renderHook(() =>
             useLiveQuery(q =>
-                q.from({ books: collection }).where(({ books }) => eq(books.id, seed.id))
+                q
+                    .from({ books: collection })
+                    .where(({ books }) => and(eq(books.id, seed.id), eq(books.isbn, seed.isbn)))
             )
         )
         await waitForLoadFinish(folderResult, 10000)
@@ -319,7 +325,9 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
         const { result: idResult } = renderHook(() =>
             useLiveQuery(q =>
-                q.from({ books: collection }).where(({ books }) => eq(books.id, seed.id))
+                q
+                    .from({ books: collection })
+                    .where(({ books }) => and(eq(books.id, seed.id), eq(books.isbn, seed.isbn)))
             )
         )
         await waitForLoadFinish(idResult, 10000)
