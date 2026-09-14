@@ -305,29 +305,51 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return true
     }
 
-    // Filed per relation key across the WHOLE batch, not per parent record: a
-    // write pushes the target's entire row set into every cached query for it,
-    // so filing a 300-member roster's boards one parent at a time was 300 full
-    // writes where one will do.
+    type ExpandedGroup = { values: object[]; byParent: [string, object[]][] }
+
+    function addExpanded(
+        byKey: Map<string, ExpandedGroup>,
+        key: string,
+        value: object | object[],
+        parentId: unknown
+    ): void {
+        const values = Array.isArray(value) ? value : [value]
+        const group = byKey.get(key) ?? { values: [], byParent: [] }
+        group.values.push(...values)
+        if (typeof parentId === 'string') group.byParent.push([parentId, values])
+        byKey.set(key, group)
+    }
+
+    function groupExpandedByKey(records: object[]): Map<string, ExpandedGroup> {
+        const byKey = new Map<string, ExpandedGroup>()
+        for (const record of records) {
+            const { id, expand } = record as {
+                id?: unknown
+                expand?: Record<string, object | object[]>
+            }
+            if (!expand) continue
+            for (const [key, value] of Object.entries(expand)) {
+                addExpanded(byKey, key, value, id)
+            }
+        }
+        return byKey
+    }
+
+    // Many parents can expand the same record; the last copy wins.
+    function lastById(values: object[]): object[] {
+        const byId = new Map<unknown, object>()
+        for (const value of values) byId.set((value as { id?: unknown }).id, value)
+        return [...byId.values()]
+    }
+
+    // One write per relation key for the whole batch: a write pushes the
+    // target's entire row set into every cached query for it.
     async function upsertExpanded(
         records: object[],
         targets: RelationTargets | undefined
     ): Promise<void> {
         if (!targets) return
-        const byKey = new Map<string, { values: object[]; byParent: [string, object[]][] }>()
-        for (const record of records) {
-            const expandData = (record as { expand?: Record<string, object | object[]> }).expand
-            if (!expandData) continue
-            const id = (record as { id?: unknown }).id
-            for (const [key, value] of Object.entries(expandData)) {
-                const values = Array.isArray(value) ? value : [value]
-                const group = byKey.get(key) ?? { values: [], byParent: [] }
-                group.values.push(...values)
-                if (typeof id === 'string') group.byParent.push([id, values])
-                byKey.set(key, group)
-            }
-        }
-        for (const [key, group] of byKey) {
+        for (const [key, group] of groupExpandedByKey(records)) {
             const target = targets[key]
             if (!target) {
                 logger.debug('No relation target for expanded field', { collectionName, key })
@@ -341,14 +363,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 markFiledSubset(target, key, parentValues, parentId)
             }
         }
-    }
-
-    // One row per id, the last occurrence winning: many parents can expand the
-    // same record (every member of a board expands that board).
-    function lastById(values: object[]): object[] {
-        const byId = new Map<unknown, object>()
-        for (const value of values) byId.set((value as { id?: unknown }).id, value)
-        return [...byId.values()]
     }
 
     // PocketBase omits the expand key entirely when a back-relation has no
@@ -533,30 +547,32 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (servedAfterFiling) return servedAfterFiling
         }
         const { sort, limit, subset } = request
-        // A subset too long for one filter goes out as several requests; with a
-        // limit each returns its own first rows and the union is cut to the
-        // limit again, which matches only when nothing sorts across them.
         const filters = subset ? subsetFilters(subset) : [request.filter]
         const expand = activeExpand(request)
-        const pages = await Promise.all(
-            filters.map(async filter => {
-                if (limit) {
-                    const result = await pb.collection(collectionName).getList(1, limit, {
-                        filter,
-                        sort,
-                        skipTotal: true,
-                        expand,
-                    })
-                    return result.items as unknown as RecordType[]
-                }
-                return (await pb.collection(collectionName).getFullList({
+        // Each chunk carries its own request key so the SDK's auto-cancellation
+        // (keyed on method + path by default) does not abort sibling chunks.
+        // A limited request returns each chunk's first rows unsliced: the live
+        // query re-applies sort and limit over the union.
+        async function fetchPage(filter: string | undefined, index: number): Promise<RecordType[]> {
+            const requestKey = `${collectionName}:${index}`
+            if (limit) {
+                const result = await pb.collection(collectionName).getList(1, limit, {
                     filter,
                     sort,
+                    skipTotal: true,
                     expand,
-                })) as unknown as RecordType[]
-            })
-        )
-        const items = limit ? pages.flat().slice(0, limit) : pages.flat()
+                    requestKey,
+                })
+                return result.items as unknown as RecordType[]
+            }
+            return (await pb.collection(collectionName).getFullList({
+                filter,
+                sort,
+                expand,
+                requestKey,
+            })) as unknown as RecordType[]
+        }
+        const items = (await Promise.all(filters.map(fetchPage))).flat()
         markEmptyBackRelations(items, request)
         return items
     }

@@ -103,7 +103,7 @@ describe('subsetFilters', () => {
         const values = Array.from({ length: 300 }, (_, i) => `id${String(i).padStart(13, '0')}`)
         const filters = subsetFilters({ field: 'id', values })
         expect(filters.length).toBeGreaterThan(1)
-        for (const filter of filters) expect(filter.length).toBeLessThanOrEqual(3000)
+        for (const filter of filters) expect(filter.length).toBeLessThanOrEqual(2500)
         expect(filters.flatMap(filter => filter.split(' || '))).toEqual(
             values.map(value => `id = "${value}"`)
         )

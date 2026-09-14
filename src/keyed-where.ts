@@ -1,4 +1,5 @@
 import type { IR } from '@tanstack/db'
+import { escapeValue } from './pocketbase-query-converter'
 
 export type WhereSubset = { field: string; values: string[] }
 
@@ -67,10 +68,11 @@ export function subsetFromWhere(
     return subset ? { field: subset.field, values: [...new Set(subset.values)].sort() } : undefined
 }
 
-// PocketBase refuses a filter longer than its MaxFilterLength (3500 bytes) with
-// a generic 400, and a subset's size is the caller's data — a user's
-// memberships, a mailbox's threads. The cap leaves room for multi-byte values.
-const MAX_FILTER_LENGTH = 3000
+// PocketBase refuses a filter over MaxFilterLength (3500 bytes) with a generic
+// 400, and a subset's size is the caller's data — a user's memberships, a
+// mailbox's threads. The margin below the server cap absorbs multi-byte values,
+// since `.length` counts UTF-16 units.
+const MAX_FILTER_LENGTH = 2500
 
 /**
  * The PocketBase filters that select `subset`, each short enough for the server
@@ -80,7 +82,7 @@ export function subsetFilters({ field, values }: WhereSubset): string[] {
     const filters: string[] = []
     let current = ''
     for (const value of values) {
-        const clause = `${field} = "${value.replace(/"/g, '\\"')}"`
+        const clause = `${field} = ${escapeValue(value)}`
         const joined = current ? `${current} || ${clause}` : clause
         if (current && joined.length > MAX_FILTER_LENGTH) {
             filters.push(current)
