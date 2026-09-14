@@ -1,16 +1,19 @@
-import { eq } from '@tanstack/db'
+import { eq, inArray } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createCollection } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
     createTestQueryClient,
+    getTestSlug,
     pb,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Server-Side Filtering (on-demand mode)', () => {
     let queryClient: QueryClient
@@ -31,6 +34,38 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         queryClient.clear()
         vi.restoreAllMocks()
     })
+
+    it('fetches an id subset too long for one PocketBase filter in several requests', async () => {
+        const slug = getTestSlug('bulk')
+        const created = await Promise.all(
+            Array.from({ length: 150 }, (_, i) =>
+                pb.collection('tags').create({ name: `${slug}-${i}`, color: '#336699' })
+            )
+        )
+        const ids = created.map(tag => tag.id)
+        try {
+            const tags = createCollection<Schema>(pb, queryClient)('tags', {
+                syncMode: 'on-demand',
+            })
+            const getFullListSpy = vi.spyOn(pb.collection('tags'), 'getFullList')
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ tags }).where(({ tags }) => inArray(tags.id, ids)))
+            )
+            await waitFor(
+                () => {
+                    expect(result.current.data).toHaveLength(ids.length)
+                },
+                { timeout: 10000 }
+            )
+            const filters = getFullListSpy.mock.calls.map(
+                call => (call[0] as { filter?: string } | undefined)?.filter ?? ''
+            )
+            expect(filters.length).toBeGreaterThan(1)
+            for (const filter of filters) expect(filter.length).toBeLessThanOrEqual(3500)
+        } finally {
+            await Promise.all(ids.map(id => pb.collection('tags').delete(id)))
+        }
+    }, 20000)
 
     it('should pass filter to PocketBase getFullList when .where() is present', async () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })

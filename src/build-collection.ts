@@ -21,7 +21,7 @@ import {
     splitPaths,
     validateExpandPath,
 } from './expand-paths'
-import { matchesSubset, subsetFromWhere, type WhereSubset } from './keyed-where'
+import { matchesSubset, subsetFilters, subsetFromWhere, type WhereSubset } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -305,37 +305,50 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return true
     }
 
-    async function upsertExpandedField(
-        key: string,
-        value: object | object[],
-        targets: RelationTargets,
-        parentId: string | undefined
-    ): Promise<void> {
-        const target = targets[key]
-        if (!target) {
-            logger.debug('No relation target for expanded field', { collectionName, key })
-            return
-        }
-        const values = Array.isArray(value) ? value : [value]
-        const filed = await upsertInto(key, target, values)
-        await upsertExpanded(values, target.relationTargets)
-        if (filed && parentId !== undefined) markFiledSubset(target, key, values, parentId)
-    }
-
+    // Filed per relation key across the WHOLE batch, not per parent record: a
+    // write pushes the target's entire row set into every cached query for it,
+    // so filing a 300-member roster's boards one parent at a time was 300 full
+    // writes where one will do.
     async function upsertExpanded(
         records: object[],
         targets: RelationTargets | undefined
     ): Promise<void> {
         if (!targets) return
+        const byKey = new Map<string, { values: object[]; byParent: [string, object[]][] }>()
         for (const record of records) {
             const expandData = (record as { expand?: Record<string, object | object[]> }).expand
             if (!expandData) continue
             const id = (record as { id?: unknown }).id
-            const parentId = typeof id === 'string' ? id : undefined
             for (const [key, value] of Object.entries(expandData)) {
-                await upsertExpandedField(key, value, targets, parentId)
+                const values = Array.isArray(value) ? value : [value]
+                const group = byKey.get(key) ?? { values: [], byParent: [] }
+                group.values.push(...values)
+                if (typeof id === 'string') group.byParent.push([id, values])
+                byKey.set(key, group)
             }
         }
+        for (const [key, group] of byKey) {
+            const target = targets[key]
+            if (!target) {
+                logger.debug('No relation target for expanded field', { collectionName, key })
+                continue
+            }
+            const values = lastById(group.values)
+            const filed = await upsertInto(key, target, values)
+            await upsertExpanded(values, target.relationTargets)
+            if (!filed) continue
+            for (const [parentId, parentValues] of group.byParent) {
+                markFiledSubset(target, key, parentValues, parentId)
+            }
+        }
+    }
+
+    // One row per id, the last occurrence winning: many parents can expand the
+    // same record (every member of a board expands that board).
+    function lastById(values: object[]): object[] {
+        const byId = new Map<unknown, object>()
+        for (const value of values) byId.set((value as { id?: unknown }).id, value)
+        return [...byId.values()]
     }
 
     // PocketBase omits the expand key entirely when a back-relation has no
@@ -350,10 +363,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 if (expand?.[key] === undefined) target.markSubsetLoaded?.(field, id)
             }
         }
-    }
-
-    function subsetFilter({ field, values }: WhereSubset): string {
-        return values.map(value => `${field} = "${value.replace(/"/g, '\\"')}"`).join(' || ')
     }
 
     // Field → parent ids whose child subset is known complete in the store,
@@ -524,27 +533,30 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (servedAfterFiling) return servedAfterFiling
         }
         const { sort, limit, subset } = request
-        const filter = subset ? subsetFilter(subset) : request.filter
+        // A subset too long for one filter goes out as several requests; with a
+        // limit each returns its own first rows and the union is cut to the
+        // limit again, which matches only when nothing sorts across them.
+        const filters = subset ? subsetFilters(subset) : [request.filter]
         const expand = activeExpand(request)
-
-        if (limit) {
-            // Use getList when limit is specified to avoid fetching all records
-            const result = await pb.collection(collectionName).getList(1, limit, {
-                filter,
-                sort,
-                skipTotal: true, // Optimize by skipping total count
-                expand,
+        const pages = await Promise.all(
+            filters.map(async filter => {
+                if (limit) {
+                    const result = await pb.collection(collectionName).getList(1, limit, {
+                        filter,
+                        sort,
+                        skipTotal: true,
+                        expand,
+                    })
+                    return result.items as unknown as RecordType[]
+                }
+                return (await pb.collection(collectionName).getFullList({
+                    filter,
+                    sort,
+                    expand,
+                })) as unknown as RecordType[]
             })
-            const items = result.items as unknown as RecordType[]
-            markEmptyBackRelations(items, request)
-            return items
-        }
-        // Use getFullList to fetch all records with automatic pagination
-        const items = (await pb.collection(collectionName).getFullList({
-            filter,
-            sort,
-            expand,
-        })) as unknown as RecordType[]
+        )
+        const items = limit ? pages.flat().slice(0, limit) : pages.flat()
         markEmptyBackRelations(items, request)
         return items
     }

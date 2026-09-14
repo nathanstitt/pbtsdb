@@ -67,6 +67,32 @@ export function subsetFromWhere(
     return subset ? { field: subset.field, values: [...new Set(subset.values)].sort() } : undefined
 }
 
+// PocketBase refuses a filter longer than its MaxFilterLength (3500 bytes) with
+// a generic 400, and a subset's size is the caller's data — a user's
+// memberships, a mailbox's threads. The cap leaves room for multi-byte values.
+const MAX_FILTER_LENGTH = 3000
+
+/**
+ * The PocketBase filters that select `subset`, each short enough for the server
+ * to accept: one when every value fits, more when they do not.
+ */
+export function subsetFilters({ field, values }: WhereSubset): string[] {
+    const filters: string[] = []
+    let current = ''
+    for (const value of values) {
+        const clause = `${field} = "${value.replace(/"/g, '\\"')}"`
+        const joined = current ? `${current} || ${clause}` : clause
+        if (current && joined.length > MAX_FILTER_LENGTH) {
+            filters.push(current)
+            current = clause
+        } else {
+            current = joined
+        }
+    }
+    if (current) filters.push(current)
+    return filters
+}
+
 /** Whether a row's `field` is one of `wanted` (a multiple relation matches by containment). */
 export function matchesSubset(row: object, field: string, wanted: ReadonlySet<string>): boolean {
     const value = (row as Record<string, unknown>)[field]
