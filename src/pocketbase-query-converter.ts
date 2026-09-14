@@ -8,7 +8,7 @@ import {
 
 type BasicExpression<T = unknown> = IR.BasicExpression<T>
 
-function escapeValue(value: unknown): string {
+export function escapeValue(value: unknown): string {
     if (value === null) {
         return 'null'
     }

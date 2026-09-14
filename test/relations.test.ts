@@ -2,7 +2,7 @@ import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
     authenticateTestUser,
@@ -274,4 +274,45 @@ describe('Collection - Relations', () => {
             expect(result.current.data[i].title >= result.current.data[i - 1].title).toBe(true)
         }
     })
+    it("files a fetch's expanded relations in one write per target, not one per parent", async () => {
+        const factory = createCollectionFactory(queryClient)
+        const authorsCollection = factory.create('authors', { syncMode: 'on-demand' })
+        const booksCollection = factory.create('books', {
+            syncMode: 'on-demand',
+            relations: { author: authorsCollection },
+            alwaysFetchRelations: ['author'],
+        })
+        const seeded = await pb.collection('books').getFullList({ expand: 'author' })
+        const distinctAuthors = new Set(seeded.map(book => book.author)).size
+        expect(seeded.length).toBeGreaterThan(distinctAuthors)
+
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ book: booksCollection })
+                    .where(({ book }) => eq(book.page_count, seeded[0].page_count))
+            )
+        )
+        await waitForLoadFinish(result, 10000)
+        const writeUpsert = vi.spyOn(authorsCollection.utils, 'writeUpsert')
+        try {
+            const { result: all } = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ book: booksCollection })
+                        .where(({ book }) => eq(book.genre, seeded[0].genre))
+                )
+            )
+            await waitForLoadFinish(all, 10000)
+            // Every batch of filing is one write; the parents in it share authors.
+            expect(writeUpsert).toHaveBeenCalledTimes(1)
+            const filed = writeUpsert.mock.calls[0][0] as object[]
+            const wanted = new Set(
+                seeded.filter(b => b.genre === seeded[0].genre).map(b => b.author)
+            )
+            expect(filed).toHaveLength(wanted.size)
+        } finally {
+            writeUpsert.mockRestore()
+        }
+    }, 20000)
 })

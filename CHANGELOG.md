@@ -15,6 +15,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A response's expanded relations are filed with one write per relation
+  target instead of one per parent record. Each write pushes the target's
+  whole row set into every cached query for it, so a 300-row roster whose
+  every row expands the same board cost 300 full writes where one will do.
+- An id subset too long for one PocketBase filter (about 130 ids — the server
+  refuses a filter over 3500 bytes with a generic 400) is fetched in several
+  requests instead of failing.
 - A parent with no children is marked complete too: PocketBase omits the
   expand key for an empty back-relation, which previously left every child
   query for a fresh parent fetching.

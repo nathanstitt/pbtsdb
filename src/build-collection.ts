@@ -21,7 +21,7 @@ import {
     splitPaths,
     validateExpandPath,
 } from './expand-paths'
-import { matchesSubset, subsetFromWhere, type WhereSubset } from './keyed-where'
+import { matchesSubset, subsetFilters, subsetFromWhere, type WhereSubset } from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -305,35 +305,62 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return true
     }
 
-    async function upsertExpandedField(
+    type ExpandedGroup = { values: object[]; byParent: [string, object[]][] }
+
+    function addExpanded(
+        byKey: Map<string, ExpandedGroup>,
         key: string,
         value: object | object[],
-        targets: RelationTargets,
-        parentId: string | undefined
-    ): Promise<void> {
-        const target = targets[key]
-        if (!target) {
-            logger.debug('No relation target for expanded field', { collectionName, key })
-            return
-        }
+        parentId: unknown
+    ): void {
         const values = Array.isArray(value) ? value : [value]
-        const filed = await upsertInto(key, target, values)
-        await upsertExpanded(values, target.relationTargets)
-        if (filed && parentId !== undefined) markFiledSubset(target, key, values, parentId)
+        const group = byKey.get(key) ?? { values: [], byParent: [] }
+        group.values.push(...values)
+        if (typeof parentId === 'string') group.byParent.push([parentId, values])
+        byKey.set(key, group)
     }
 
+    function groupExpandedByKey(records: object[]): Map<string, ExpandedGroup> {
+        const byKey = new Map<string, ExpandedGroup>()
+        for (const record of records) {
+            const { id, expand } = record as {
+                id?: unknown
+                expand?: Record<string, object | object[]>
+            }
+            if (!expand) continue
+            for (const [key, value] of Object.entries(expand)) {
+                addExpanded(byKey, key, value, id)
+            }
+        }
+        return byKey
+    }
+
+    // Many parents can expand the same record; the last copy wins.
+    function lastById(values: object[]): object[] {
+        const byId = new Map<unknown, object>()
+        for (const value of values) byId.set((value as { id?: unknown }).id, value)
+        return [...byId.values()]
+    }
+
+    // One write per relation key for the whole batch: a write pushes the
+    // target's entire row set into every cached query for it.
     async function upsertExpanded(
         records: object[],
         targets: RelationTargets | undefined
     ): Promise<void> {
         if (!targets) return
-        for (const record of records) {
-            const expandData = (record as { expand?: Record<string, object | object[]> }).expand
-            if (!expandData) continue
-            const id = (record as { id?: unknown }).id
-            const parentId = typeof id === 'string' ? id : undefined
-            for (const [key, value] of Object.entries(expandData)) {
-                await upsertExpandedField(key, value, targets, parentId)
+        for (const [key, group] of groupExpandedByKey(records)) {
+            const target = targets[key]
+            if (!target) {
+                logger.debug('No relation target for expanded field', { collectionName, key })
+                continue
+            }
+            const values = lastById(group.values)
+            const filed = await upsertInto(key, target, values)
+            await upsertExpanded(values, target.relationTargets)
+            if (!filed) continue
+            for (const [parentId, parentValues] of group.byParent) {
+                markFiledSubset(target, key, parentValues, parentId)
             }
         }
     }
@@ -350,10 +377,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 if (expand?.[key] === undefined) target.markSubsetLoaded?.(field, id)
             }
         }
-    }
-
-    function subsetFilter({ field, values }: WhereSubset): string {
-        return values.map(value => `${field} = "${value.replace(/"/g, '\\"')}"`).join(' || ')
     }
 
     // Field → parent ids whose child subset is known complete in the store,
@@ -524,27 +547,32 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (servedAfterFiling) return servedAfterFiling
         }
         const { sort, limit, subset } = request
-        const filter = subset ? subsetFilter(subset) : request.filter
+        const filters = subset ? subsetFilters(subset) : [request.filter]
         const expand = activeExpand(request)
-
-        if (limit) {
-            // Use getList when limit is specified to avoid fetching all records
-            const result = await pb.collection(collectionName).getList(1, limit, {
+        // Each chunk carries its own request key so the SDK's auto-cancellation
+        // (keyed on method + path by default) does not abort sibling chunks.
+        // A limited request returns each chunk's first rows unsliced: the live
+        // query re-applies sort and limit over the union.
+        async function fetchPage(filter: string | undefined, index: number): Promise<RecordType[]> {
+            const requestKey = `${collectionName}:${index}`
+            if (limit) {
+                const result = await pb.collection(collectionName).getList(1, limit, {
+                    filter,
+                    sort,
+                    skipTotal: true,
+                    expand,
+                    requestKey,
+                })
+                return result.items as unknown as RecordType[]
+            }
+            return (await pb.collection(collectionName).getFullList({
                 filter,
                 sort,
-                skipTotal: true, // Optimize by skipping total count
                 expand,
-            })
-            const items = result.items as unknown as RecordType[]
-            markEmptyBackRelations(items, request)
-            return items
+                requestKey,
+            })) as unknown as RecordType[]
         }
-        // Use getFullList to fetch all records with automatic pagination
-        const items = (await pb.collection(collectionName).getFullList({
-            filter,
-            sort,
-            expand,
-        })) as unknown as RecordType[]
+        const items = (await Promise.all(filters.map(fetchPage))).flat()
         markEmptyBackRelations(items, request)
         return items
     }
