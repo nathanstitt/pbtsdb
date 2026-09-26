@@ -725,13 +725,13 @@ describe('Fetch relations', () => {
                             .limit(1)
                     )
                 )
-                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+                await waitFor(() => expect(failNext).toBe(false), { timeout: 10000 })
 
                 first.unmount()
                 second.unmount()
 
                 // The real stop must still release every held target, even though
-                // the failed restart already cleared isSubscribed/unsubscribeFn.
+                // a restart's subscribe() rejected along the way.
                 await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(0), {
                     timeout: 10000,
                 })

@@ -1,15 +1,28 @@
-import { useLiveQuery } from '@tanstack/react-db'
+import { eq, useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
-import { renderHook } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { renderHook, waitFor } from '@testing-library/react'
+import {
+    afterAll,
+    afterEach,
+    beforeAll,
+    beforeEach,
+    describe,
+    expect,
+    it,
+    type MockInstance,
+    vi,
+} from 'vitest'
 
 import { createCollection } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
     createTestQueryClient,
+    getTestAuthorId,
+    getTestSlug,
     pb,
     waitForLoadFinish,
+    waitForSubscription,
 } from './helpers'
 import type { Schema } from './schema'
 
@@ -107,5 +120,165 @@ describe('realtime mode', () => {
                 "Collection 'books': realtime 'query' requires syncMode 'on-demand'"
             )
         })
+    })
+
+    describe('query mode subscriptions', () => {
+        const createdIds: string[] = []
+        let subscribeSpy: MockInstance<ReturnType<typeof pb.collection>['subscribe']>
+
+        beforeEach(() => {
+            subscribeSpy = vi.spyOn(pb.collection('books'), 'subscribe')
+        })
+
+        afterEach(() => {
+            subscribeSpy.mockRestore()
+        })
+
+        afterAll(async () => {
+            for (const id of createdIds) {
+                try {
+                    await pb.collection('books').delete(id)
+                } catch (_error) {
+                    // Ignore cleanup errors
+                }
+            }
+        })
+
+        const FANTASY = 'genre = "Fantasy"'
+
+        const filtersSubscribed = () => subscribeSpy.mock.calls.map(call => call[2]?.filter)
+
+        async function seedBook(genre: 'Fantasy' | 'Mystery') {
+            const authorId = await getTestAuthorId()
+            const book = await pb.collection('books').create({
+                title: `Realtime ${getTestSlug('rt')}`,
+                isbn: getTestSlug('isbn'),
+                genre,
+                author: authorId,
+                published_date: '',
+                page_count: 1,
+            })
+            createdIds.push(book.id)
+            return book
+        }
+
+        function make() {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', {
+                syncMode: 'on-demand',
+                realtime: 'query',
+                relations: { author: authors },
+            })
+            return { authors, books }
+        }
+
+        const syncedHas = (collection: object, id: string) =>
+            (
+                collection as { _state: { syncedData: { has: (k: string) => boolean } } }
+            )._state.syncedData.has(id)
+
+        it('subscribes with the query filter and delivers a matching create', async () => {
+            const { books } = make()
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(result)
+            await waitForSubscription(books)
+
+            expect(books.isSubscribed()).toBe(true)
+            expect(filtersSubscribed()).toEqual([FANTASY])
+
+            const book = await seedBook('Fantasy')
+            await waitFor(
+                () => expect(result.current.data.some(r => r.id === book.id)).toBe(true),
+                {
+                    timeout: 8000,
+                }
+            )
+        }, 20000)
+
+        it('does not deliver a create outside the filter', async () => {
+            const { books } = make()
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(result)
+            await waitForSubscription(books)
+
+            const book = await seedBook('Mystery')
+            await new Promise(resolve => setTimeout(resolve, 3000))
+            expect(syncedHas(books, book.id)).toBe(false)
+        }, 20000)
+
+        it('delivers a delete of a matching row', async () => {
+            const book = await seedBook('Fantasy')
+            const { books } = make()
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(result)
+            await waitForSubscription(books)
+            expect(result.current.data.some(r => r.id === book.id)).toBe(true)
+
+            await pb.collection('books').delete(book.id)
+            createdIds.splice(createdIds.indexOf(book.id), 1)
+            await waitFor(
+                () => expect(result.current.data.some(r => r.id === book.id)).toBe(false),
+                { timeout: 8000 }
+            )
+        }, 20000)
+
+        it('shares one filtered subscription between queries with the same filter', async () => {
+            const { books } = make()
+            const first = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            const second = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(first.result)
+            await waitForLoadFinish(second.result)
+            await waitForSubscription(books)
+            expect(filtersSubscribed()).toEqual([FANTASY])
+
+            first.unmount()
+            await new Promise(resolve => setTimeout(resolve, 500))
+            expect(books.isSubscribed()).toBe(true)
+
+            second.unmount()
+            await waitFor(() => expect(books.isSubscribed()).toBe(false), { timeout: 8000 })
+            expect(filtersSubscribed()).toEqual([FANTASY])
+        }, 20000)
+
+        it('keeps filter entries closed while a collection-mode subscriber is active', async () => {
+            const { books } = make()
+            const all = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books.withRealtime('collection') }))
+            )
+            await waitForLoadFinish(all.result, 10000)
+            await waitForSubscription(books)
+
+            const fantasy = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(fantasy.result)
+            await new Promise(resolve => setTimeout(resolve, 500))
+            expect(filtersSubscribed()).toEqual([undefined])
+
+            all.unmount()
+            await waitFor(() => expect(filtersSubscribed()).toEqual([undefined, FANTASY]), {
+                timeout: 8000,
+            })
+            expect(books.isSubscribed()).toBe(true)
+        }, 30000)
+
+        it('treats a query with no filter as the whole collection', async () => {
+            const { books } = make()
+            const { result } = renderHook(() => useLiveQuery(q => q.from({ b: books })))
+            await waitForLoadFinish(result, 10000)
+            await waitForSubscription(books)
+            expect(filtersSubscribed()).toEqual([undefined])
+        }, 20000)
     })
 })
