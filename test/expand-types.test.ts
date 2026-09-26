@@ -36,10 +36,7 @@ describe('fetch relations types', () => {
             books.fetchRelations('nope')
         ).toThrow()
         const view = books.fetchRelations('author')
-        expect(() =>
-            // @ts-expect-error views are leaves
-            view.fetchRelations('author')
-        ).toThrow()
+        expect(view.fetchRelations('author')).toBe(view)
     })
 
     it('validates nested paths through the target collection', () => {

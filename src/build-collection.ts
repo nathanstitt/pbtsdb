@@ -32,9 +32,16 @@ import type {
     SchemaDeclaration,
 } from './types'
 
-// Subscriptions created through a view, mapped to the view's expand paths. Keyed
+// What a view adds to every subscription made through it: extra expand paths
+// and, when set, a realtime mode that overrides the collection default. Keyed
 // by the subscription object TanStack hands back to loadSubset/unloadSubset.
-const viewPaths = new WeakMap<object, string[]>()
+interface ViewTag {
+    paths: string[]
+    realtime: RealtimeMode | undefined
+}
+const viewTags = new WeakMap<object, ViewTag>()
+
+const REALTIME_MODES: readonly RealtimeMode[] = ['collection', 'query']
 
 // A correlated subquery over a relation target (e.g. a `materialize` include
 // keyed off the parent row's id) can have its own `loadSubset` dispatched by
@@ -890,20 +897,23 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return false
     }
 
-    // A view's subscription is tagged in viewPaths (see createView below); this
+    // A view's subscription is tagged in viewTags (see createView below); this
     // adds the view's expand paths to load options for a tagged subscription so
     // loadSubset/unloadSubset fetch (and later untrack) with the right `expand`.
     // A subscription's initial snapshot loads synchronously inside
     // collection.subscribeChanges, before that call returns the subscription
-    // object a view tags in viewPaths — so that first loadSubset cannot yet be
+    // object a view tags in viewTags — so that first loadSubset cannot yet be
     // looked up by identity. While a view's subscribeChanges call is on the
     // stack, its paths are used for load options with no tagged subscription;
     // every later call (untracked demand growth, unloadSubset) is tagged by then.
-    let subscribingViewPaths: string[] | undefined
+    let subscribingViewTag: ViewTag | undefined
+
+    function tagFor(opts: LoadSubsetOptions): ViewTag | undefined {
+        return (opts.subscription && viewTags.get(opts.subscription)) ?? subscribingViewTag
+    }
 
     function withViewExpand(opts: LoadSubsetOptions): LoadOptions {
-        const paths =
-            (opts.subscription && viewPaths.get(opts.subscription)) ?? subscribingViewPaths
+        const paths = tagFor(opts)?.paths
         return paths ? { ...opts, expand: paths } : opts
     }
 
@@ -940,43 +950,86 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     const views = new Map<string, object>()
 
-    function createView(paths: string[]): object {
+    function assertRealtimeMode(mode: RealtimeMode): void {
+        if (!REALTIME_MODES.includes(mode)) {
+            throw new Error(
+                `Collection '${collectionName}': unknown realtime mode '${String(mode)}'`
+            )
+        }
+        if (mode === 'query' && syncMode !== 'on-demand') {
+            throw new Error(
+                `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
+            )
+        }
+    }
+
+    function subscribeChangesFor(tag: ViewTag | undefined) {
+        return (...args: Parameters<typeof collection.subscribeChanges>) => {
+            if (tag) noteViewSubscribed(tag.paths)
+            subscribingViewTag = tag
+            try {
+                const subscription = collection.subscribeChanges(...args)
+                if (tag) viewTags.set(subscription, tag)
+                return subscription
+            } finally {
+                subscribingViewTag = undefined
+            }
+        }
+    }
+
+    function createView(tag: ViewTag): object {
+        const query: string[] = []
+        if (tag.paths.length > 0) query.push(`expand=${tag.paths.join(',')}`)
+        if (tag.realtime) query.push(`realtime=${tag.realtime}`)
         const view = Object.create(collection)
         Object.defineProperties(view, {
-            id: { value: `${collectionName}?expand=${paths.join(',')}` },
-            subscribeChanges: {
-                value: (...args: Parameters<typeof collection.subscribeChanges>) => {
-                    noteViewSubscribed(paths)
-                    subscribingViewPaths = paths
-                    try {
-                        const subscription = collection.subscribeChanges(...args)
-                        viewPaths.set(subscription, paths)
-                        return subscription
-                    } finally {
-                        subscribingViewPaths = undefined
-                    }
-                },
-            },
+            id: { value: `${collectionName}?${query.join('&')}` },
+            subscribeChanges: { value: subscribeChangesFor(tag) },
             fetchRelations: {
-                value: () => {
-                    throw new Error(`A view of "${collectionName}" cannot fetch further relations`)
+                value: (...more: string[]) => viewFor([...tag.paths, ...more], tag.realtime),
+            },
+            withRealtime: {
+                value: (mode: RealtimeMode) => {
+                    assertRealtimeMode(mode)
+                    const override = mode === realtimeMode ? undefined : mode
+                    if (tag.realtime !== undefined && tag.realtime !== override) {
+                        throw new Error(
+                            `A view of "${collectionName}" already uses realtime '${tag.realtime}'`
+                        )
+                    }
+                    return viewFor(tag.paths, mode)
                 },
             },
         })
         return view
     }
 
-    function fetchRelations(...paths: string[]): object {
+    // A view is identified by its normalized expand paths plus its realtime
+    // override; the collection default is stored as `undefined` so a mode equal
+    // to the default never creates a distinct view.
+    function viewFor(paths: readonly string[], realtime: RealtimeMode | undefined): object {
         for (const path of paths) validateExpandPath(collectionName, relationTargets, path)
         const all = normalizePaths([...alwaysFetch, ...paths])
-        if (all.every(path => alwaysFetch.includes(path))) return collection
-        const key = all.join(',')
+        const override = realtime === realtimeMode ? undefined : realtime
+        if (override === undefined && all.every(path => alwaysFetch.includes(path))) {
+            return collection
+        }
+        const key = `${all.join(',')}|${override ?? ''}`
         let view = views.get(key)
         if (!view) {
-            view = createView(all)
+            view = createView({ paths: all, realtime: override })
             views.set(key, view)
         }
         return view
+    }
+
+    function fetchRelations(...paths: string[]): object {
+        return viewFor(paths, undefined)
+    }
+
+    function withRealtime(mode: RealtimeMode): object {
+        assertRealtimeMode(mode)
+        return viewFor([], mode)
     }
 
     // True when the key has an in-flight (not yet settled) optimistic mutation.
@@ -1404,6 +1457,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         markSubsetLoaded,
         loadedSubsetCount,
         fetchRelations,
+        withRealtime,
     })
 
     return collection as unknown as BuiltCollection<RecordType>

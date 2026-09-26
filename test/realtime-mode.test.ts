@@ -51,4 +51,61 @@ describe('realtime mode', () => {
             expect(result.current.data.length).toBeGreaterThan(0)
         }, 15000)
     })
+
+    describe('withRealtime views', () => {
+        function make(realtime: 'collection' | 'query' = 'collection') {
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand' })
+            const books = c('books', {
+                syncMode: 'on-demand',
+                realtime,
+                relations: { author: authors },
+            })
+            return { authors, books }
+        }
+
+        it('returns the collection itself for the default mode', () => {
+            const { books } = make()
+            expect(books.withRealtime('collection')).toBe(books)
+            const queryBooks = make('query').books
+            expect(queryBooks.withRealtime('query')).toBe(queryBooks)
+        })
+
+        it('caches a view per mode', () => {
+            const { books } = make()
+            const view = books.withRealtime('query')
+            expect(view).not.toBe(books)
+            expect(books.withRealtime('query')).toBe(view)
+            expect(view.id).toBe('books?realtime=query')
+        })
+
+        it('composes with fetchRelations in either order', () => {
+            const { books } = make()
+            const a = books.fetchRelations('author').withRealtime('query')
+            const b = books.withRealtime('query').fetchRelations('author')
+            expect(a).toBe(b)
+            expect(a.id).toBe('books?expand=author&realtime=query')
+            expect(books.fetchRelations('author').withRealtime('collection')).toBe(
+                books.fetchRelations('author')
+            )
+        })
+
+        it('rejects a second, different mode on a view', () => {
+            const { books } = make()
+            expect(() => books.withRealtime('query').withRealtime('collection')).toThrow(
+                `A view of "books" already uses realtime 'query'`
+            )
+        })
+
+        it('rejects an unknown mode and query mode on an eager collection', () => {
+            const { books } = make()
+            expect(() => books.withRealtime('everything' as 'query')).toThrow(
+                "Collection 'books': unknown realtime mode 'everything'"
+            )
+            const eager = createCollection<Schema>(pb, queryClient)('books', {})
+            expect(() => eager.withRealtime('query')).toThrow(
+                "Collection 'books': realtime 'query' requires syncMode 'on-demand'"
+            )
+        })
+    })
 })

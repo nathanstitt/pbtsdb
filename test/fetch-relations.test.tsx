@@ -349,17 +349,14 @@ describe('Fetch relations', () => {
             })
         }, 15000)
 
-        it('throws for an undeclared path and for expanding a view', () => {
+        it('throws for an undeclared path and composes further fetchRelations', () => {
             const { books } = make()
             // @ts-expect-error runtime check of an undeclared path
             expect(() => books.fetchRelations('nope')).toThrow(
                 'Cannot expand "nope" on collection "books": segment "nope" is not a declared relation'
             )
             const view = books.fetchRelations('author')
-            // @ts-expect-error views are leaves
-            expect(() => view.fetchRelations('author')).toThrow(
-                'view of "books" cannot fetch further relations'
-            )
+            expect(view.fetchRelations('author')).toBe(view)
         })
 
         it('keys a view fetch by its expand string', async () => {
