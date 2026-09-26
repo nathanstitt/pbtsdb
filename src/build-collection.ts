@@ -28,6 +28,7 @@ import type {
     CreateCollectionOptions,
     ExpandTargetCollection,
     ExtractRecordType,
+    RealtimeMode,
     SchemaDeclaration,
 } from './types'
 
@@ -176,6 +177,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const alwaysFetch = normalizePaths(options?.alwaysFetchRelations ?? [])
     for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
+    const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
+    if (realtimeMode === 'query' && syncMode !== 'on-demand') {
+        throw new Error(
+            `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
+        )
+    }
 
     // Paths requested by views that have subscribed at least once. Eager fetches
     // read it because they cannot receive per-subset options; the realtime
