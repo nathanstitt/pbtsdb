@@ -942,6 +942,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         reconcile().catch(() => {})
     }
 
+    // TanStack drops a discarded sync session's demands without unloadSubset
+    // and reloads them on the next session, so its cleanup must zero the refs.
+    function resetQueryFilters(): void {
+        filterRefs.clear()
+        unfilteredQueryRefs = 0
+        reconcile().catch(() => {})
+    }
+
     function releaseQueryFilters(opts: LoadSubsetOptions): void {
         if (realtimeModeFor(opts) !== 'query') return
         const filters = filtersFor(opts)
@@ -970,14 +978,24 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return params.write(message)
             }
             const res = innerSync({ ...params, write: guardedWrite })
-            if (!res || typeof res === 'function') return res
-            const { loadSubset, unloadSubset } = res
+            if (!res) return res
+            const parts = typeof res === 'function' ? { cleanup: res } : res
+            const { cleanup, loadSubset, unloadSubset } = parts
             return {
-                ...res,
+                ...parts,
+                cleanup: () => {
+                    resetQueryFilters()
+                    return cleanup?.()
+                },
                 loadSubset: loadSubset
                     ? (opts: LoadSubsetOptions) => {
                           retainQueryFilters(opts)
-                          return loadSubset(withViewExpand(opts))
+                          try {
+                              return loadSubset(withViewExpand(opts))
+                          } catch (error) {
+                              releaseQueryFilters(opts)
+                              throw error
+                          }
                       }
                     : undefined,
                 unloadSubset: unloadSubset

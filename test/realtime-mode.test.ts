@@ -273,6 +273,26 @@ describe('realtime mode', () => {
             expect(books.isSubscribed()).toBe(true)
         }, 30000)
 
+        it('releases the filtered entry and held targets after a sync cleanup', async () => {
+            const { books } = make()
+            const { result, unmount } = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.fetchRelations('author') })
+                        .where(({ b }) => eq(b.genre, 'Fantasy'))
+                )
+            )
+            await waitForLoadFinish(result, 10000)
+            await waitForSubscription(books)
+            await waitFor(() => expect(books.heldRelationTargetCount()).toBe(1))
+
+            await books.cleanup()
+            unmount()
+
+            await waitFor(() => expect(books.isSubscribed()).toBe(false), { timeout: 8000 })
+            await waitFor(() => expect(books.heldRelationTargetCount()).toBe(0))
+        }, 20000)
+
         it('treats a query with no filter as the whole collection', async () => {
             const { books } = make()
             const { result } = renderHook(() => useLiveQuery(q => q.from({ b: books })))
