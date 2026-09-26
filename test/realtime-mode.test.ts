@@ -361,6 +361,41 @@ describe('realtime mode', () => {
             }
         }, 30000)
 
+        it('keeps the held filter entry open across the target sync cleanup', async () => {
+            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            try {
+                const c = createCollection<Schema>(pb, queryClient)
+                const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
+                const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+                const { result, unmount } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.genre, 'Fantasy'))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitForSubscription(books)
+                const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
+                const expected = subsetFilters({ field: 'id', values: authorIds })
+                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
+                    timeout: 8000,
+                })
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
+
+                await authors.cleanup()
+                await new Promise(resolve => setTimeout(resolve, 500))
+                expect(books.heldRelationTargetCount()).toBe(1)
+                expect(authors.isSubscribed()).toBe(true)
+
+                unmount()
+                await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
+            } finally {
+                authorsSpy.mockRestore()
+            }
+        }, 30000)
+
         it('subscribes a back-relation target by parent id so new children arrive', async () => {
             const booksSpy = vi.spyOn(pb.collection('books'), 'subscribe')
             try {

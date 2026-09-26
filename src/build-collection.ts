@@ -955,26 +955,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return tagFor(opts)?.realtime ?? realtimeMode
     }
 
-    function addFilterRef(filter: string): void {
-        filterRefs.set(filter, (filterRefs.get(filter) ?? 0) + 1)
+    function addFilterRef(refs: Map<string, number>, filter: string): void {
+        refs.set(filter, (refs.get(filter) ?? 0) + 1)
     }
 
-    function dropFilterRef(filter: string): void {
-        const count = (filterRefs.get(filter) ?? 0) - 1
-        if (count > 0) filterRefs.set(filter, count)
-        else filterRefs.delete(filter)
+    function dropFilterRef(refs: Map<string, number>, filter: string): void {
+        const count = (refs.get(filter) ?? 0) - 1
+        if (count > 0) refs.set(filter, count)
+        else refs.delete(filter)
     }
 
-    function swapFilterRefs(previous: readonly string[], next: readonly string[]): void {
-        for (const filter of next) if (!previous.includes(filter)) addFilterRef(filter)
-        for (const filter of previous) if (!next.includes(filter)) dropFilterRef(filter)
+    function swapHoldFilterRefs(previous: readonly string[], next: readonly string[]): void {
+        for (const filter of next)
+            if (!previous.includes(filter)) addFilterRef(holdFilterRefs, filter)
+        for (const filter of previous)
+            if (!next.includes(filter)) dropFilterRef(holdFilterRefs, filter)
     }
 
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if (realtimeModeFor(opts) !== 'query') return
         const filters = filtersFor(opts)
         if (!filters) unfilteredQueryRefs += 1
-        else for (const filter of filters) addFilterRef(filter)
+        else for (const filter of filters) addFilterRef(filterRefs, filter)
         reconcile().catch(() => {})
     }
 
@@ -990,7 +992,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (realtimeModeFor(opts) !== 'query') return
         const filters = filtersFor(opts)
         if (!filters) unfilteredQueryRefs = Math.max(0, unfilteredQueryRefs - 1)
-        else for (const filter of filters) dropFilterRef(filter)
+        else for (const filter of filters) dropFilterRef(filterRefs, filter)
         reconcile().catch(() => {})
     }
 
@@ -1259,6 +1261,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     let collectionModeSubscribers = 0
     let unfilteredQueryRefs = 0
     const filterRefs = new Map<string, number>()
+    // Held-target refs live apart from loadSubset refs: a sync cleanup resets
+    // only the latter, while the hold outlives the sync session.
+    const holdFilterRefs = new Map<string, number>()
+
+    function wantedFilters(): Set<string> {
+        return new Set([...filterRefs.keys(), ...holdFilterRefs.keys()])
+    }
 
     function wantsStar(): boolean {
         return collectionModeSubscribers > 0 || unfilteredQueryRefs > 0
@@ -1614,10 +1623,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             await doStartSubscription()
         } else {
             await doStopSubscription()
-            await closeFilterEntries(filter => filterRefs.has(filter))
-            for (const filter of filterRefs.keys()) await openFilterEntry(filter)
+            const wanted = wantedFilters()
+            await closeFilterEntries(filter => wanted.has(filter))
+            for (const filter of wanted) await openFilterEntry(filter)
         }
-        if (!anyEntryOpen() && !wantsStar() && filterRefs.size === 0) {
+        if (!anyEntryOpen() && !wantsStar() && wantedFilters().size === 0) {
             clearSubscriptionPromise()
             releaseAll()
         }
@@ -1654,14 +1664,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             setFilters: filters => {
                 if (released) return
                 const next = [...new Set(filters)]
-                swapFilterRefs(current, next)
+                swapHoldFilterRefs(current, next)
                 current = next
                 reconcile().catch(() => {})
             },
             release: () => {
                 if (released) return
                 released = true
-                for (const filter of current) dropFilterRef(filter)
+                for (const filter of current) dropFilterRef(holdFilterRefs, filter)
                 current = []
                 if (counted) collectionModeSubscribers -= 1
                 subscription.unsubscribe()
