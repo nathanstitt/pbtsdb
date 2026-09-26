@@ -14,6 +14,7 @@ import {
 } from 'vitest'
 
 import { createCollection } from '../src'
+import { subsetFilters } from '../src/keyed-where'
 import {
     authenticateTestUser,
     clearAuth,
@@ -300,5 +301,104 @@ describe('realtime mode', () => {
             await waitForSubscription(books)
             expect(filtersSubscribed()).toEqual([undefined])
         }, 20000)
+    })
+
+    describe('held targets in query mode', () => {
+        const createdIds: string[] = []
+
+        afterAll(async () => {
+            for (const id of createdIds) {
+                try {
+                    await pb.collection('books').delete(id)
+                } catch (_error) {
+                    // Ignore cleanup errors
+                }
+            }
+        })
+
+        const filtersOf = (spy: MockInstance<ReturnType<typeof pb.collection>['subscribe']>) =>
+            spy.mock.calls.map(call => call[2]?.filter)
+
+        it('subscribes a forward relation target to the filed ids only', async () => {
+            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            try {
+                const c = createCollection<Schema>(pb, queryClient)
+                const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
+                const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.genre, 'Fantasy'))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitForSubscription(books)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
+
+                const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
+                expect(authorIds.length).toBeGreaterThan(0)
+                const expected = subsetFilters({ field: 'id', values: authorIds })
+                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
+                    timeout: 8000,
+                })
+                expect(filtersOf(authorsSpy)).not.toContain(undefined)
+
+                const authorId = authorIds[0]
+                const before = await pb.collection('authors').getOne(authorId)
+                const renamed = `${before.name} ${getTestSlug('rt')}`
+                try {
+                    await pb.collection('authors').update(authorId, { name: renamed })
+                    await waitFor(() => expect(authors.get(authorId)?.name).toBe(renamed), {
+                        timeout: 8000,
+                    })
+                } finally {
+                    await pb.collection('authors').update(authorId, { name: before.name })
+                }
+            } finally {
+                authorsSpy.mockRestore()
+            }
+        }, 30000)
+
+        it('subscribes a back-relation target by parent id so new children arrive', async () => {
+            const booksSpy = vi.spyOn(pb.collection('books'), 'subscribe')
+            try {
+                const c = createCollection<Schema>(pb, queryClient)
+                const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
+                const authors = c('authors', {
+                    syncMode: 'on-demand',
+                    relations: { books_via_author: books },
+                })
+                const authorId = await getTestAuthorId()
+
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ a: authors.fetchRelations('books_via_author') })
+                            .where(({ a }) => eq(a.id, authorId))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitForSubscription(authors)
+                await waitFor(() => expect(booksSpy.mock.calls.length).toBeGreaterThan(0), {
+                    timeout: 8000,
+                })
+                expect(filtersOf(booksSpy)).toEqual([`author = "${authorId}"`])
+
+                const book = await pb.collection('books').create({
+                    title: `Held ${getTestSlug('held')}`,
+                    isbn: getTestSlug('isbn'),
+                    genre: 'Fiction',
+                    author: authorId,
+                    published_date: '',
+                    page_count: 1,
+                })
+                createdIds.push(book.id)
+                await waitFor(() => expect(books.has(book.id)).toBe(true), { timeout: 8000 })
+            } finally {
+                booksSpy.mockRestore()
+            }
+        }, 30000)
     })
 })

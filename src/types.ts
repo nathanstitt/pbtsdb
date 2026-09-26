@@ -161,6 +161,11 @@ export interface ExpandTargetCollection {
     preload?: () => Promise<void>
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded?: (field: string, value: string) => void
+    /**
+     * pbtsdb-built targets: hold this collection live for a parent, with the
+     * filters covering the rows the parent filed here (query mode only).
+     */
+    holdLive?: () => { setFilters: (filters: readonly string[]) => void; release: () => void }
 }
 
 /**

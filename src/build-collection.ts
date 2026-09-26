@@ -127,6 +127,9 @@ export interface CreateCollectionFactoryOptions {
     subscribeOptions?: () => RecordSubscribeOptions | undefined
 }
 
+/** @internal */
+export type HeldTarget = { setFilters: (filters: readonly string[]) => void; release: () => void }
+
 /**
  * Subscription helpers added to collection instances.
  * @internal
@@ -146,6 +149,8 @@ export interface CollectionSubscriptionHelpers {
     markSubsetLoaded: (field: string, value: string) => void
     /** Number of field/value pairs currently marked loaded */
     loadedSubsetCount: () => number
+    /** Hold this collection live as a relation target; see ExpandTargetCollection.holdLive */
+    holdLive: () => HeldTarget
 }
 
 /**
@@ -356,6 +361,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return [...byId.values()]
     }
 
+    function recordFiledGroup(
+        target: ExpandTargetCollection,
+        key: string,
+        group: ExpandedGroup,
+        values: object[]
+    ): void {
+        const via = parseViaKey(key)
+        if (via) {
+            recordFiled(
+                target,
+                via.field,
+                group.byParent.map(([parentId]) => parentId)
+            )
+        } else {
+            recordFiled(
+                target,
+                'id',
+                values.map(value => (value as { id: string }).id)
+            )
+        }
+    }
+
     // One write per relation key for the whole batch: a write pushes the
     // target's entire row set into every cached query for it.
     async function upsertExpanded(
@@ -373,6 +400,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const filed = await upsertInto(key, target, values)
             await upsertExpanded(values, target.relationTargets)
             if (!filed) continue
+            recordFiledGroup(target, key, group, values)
             for (const [parentId, parentValues] of group.byParent) {
                 markFiledSubset(target, key, parentValues, parentId)
             }
@@ -388,7 +416,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const { id, expand } = item as { id?: unknown; expand?: Record<string, unknown> }
             if (typeof id !== 'string') continue
             for (const { target, key, field } of heads) {
-                if (expand?.[key] === undefined) target.markSubsetLoaded?.(field, id)
+                if (expand?.[key] === undefined) {
+                    target.markSubsetLoaded?.(field, id)
+                    recordFiled(target, field, [id])
+                }
             }
         }
     }
@@ -934,6 +965,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         else filterRefs.delete(filter)
     }
 
+    function swapFilterRefs(previous: readonly string[], next: readonly string[]): void {
+        for (const filter of next) if (!previous.includes(filter)) addFilterRef(filter)
+        for (const filter of previous) if (!next.includes(filter)) dropFilterRef(filter)
+    }
+
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if (realtimeModeFor(opts) !== 'query') return
         const filters = filtersFor(opts)
@@ -1360,16 +1396,55 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return targets
     }
 
-    // The only place held target subscriptions are added or removed, so the
-    // map always mirrors the last desired set exactly.
-    const heldTargetSubscriptions = new Map<ExpandTargetCollection, { unsubscribe: () => void }>()
+    // The only place held targets are added or removed, so the map always
+    // mirrors the last desired set exactly.
+    const heldTargetSubscriptions = new Map<ExpandTargetCollection, HeldTarget>()
+
+    // What this collection filed into each target, per field: filed ids for a
+    // forward relation, parent ids for a back-relation. A query-mode target
+    // subscribes to exactly these rows while held.
+    const filedByTarget = new Map<ExpandTargetCollection, Map<string, Set<string>>>()
+
+    function filedFiltersFor(target: ExpandTargetCollection): string[] {
+        const byField = filedByTarget.get(target)
+        if (!byField) return []
+        const filters: string[] = []
+        for (const [field, values] of byField) {
+            filters.push(...subsetFilters({ field, values: [...values].sort() }))
+        }
+        return filters
+    }
+
+    function recordFiled(
+        target: ExpandTargetCollection,
+        field: string,
+        values: Iterable<string>
+    ): void {
+        let byField = filedByTarget.get(target)
+        if (!byField) {
+            byField = new Map()
+            filedByTarget.set(target, byField)
+        }
+        let recorded = byField.get(field)
+        if (!recorded) {
+            recorded = new Set()
+            byField.set(field, recorded)
+        }
+        let grew = false
+        for (const value of values) {
+            if (recorded.has(value)) continue
+            recorded.add(value)
+            grew = true
+        }
+        if (grew) heldTargetSubscriptions.get(target)?.setFilters(filedFiltersFor(target))
+    }
 
     function releaseHeldTarget(target: ExpandTargetCollection): void {
         const held = heldTargetSubscriptions.get(target)
         if (!held) return
         heldTargetSubscriptions.delete(target)
         try {
-            held.unsubscribe()
+            held.release()
         } catch (error) {
             logger.error('Failed to release relation target subscription', {
                 collectionName,
@@ -1379,10 +1454,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     function holdTarget(target: ExpandTargetCollection): void {
-        if (heldTargetSubscriptions.has(target) || !target.subscribeChanges) return
+        if (heldTargetSubscriptions.has(target)) return
         try {
-            const held = target.subscribeChanges(() => {}, { includeInitialState: false })
-            heldTargetSubscriptions.set(target, held)
+            if (target.holdLive) {
+                const held = target.holdLive()
+                heldTargetSubscriptions.set(target, held)
+                held.setFilters(filedFiltersFor(target))
+            } else if (target.subscribeChanges) {
+                const held = target.subscribeChanges(() => {}, { includeInitialState: false })
+                heldTargetSubscriptions.set(target, {
+                    setFilters: () => {},
+                    release: () => held.unsubscribe(),
+                })
+            }
         } catch (error) {
             logger.error('Failed to hold relation target subscription', { collectionName, error })
         }
@@ -1414,6 +1498,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         syncHeldSubscriptions(new Set())
         invalidateAllMarkedSubsets()
         loadedSubsets.clear()
+        filedByTarget.clear()
     }
 
     // Open the '*' entry. Only ever run through enqueueSubscriptionWork.
@@ -1554,6 +1639,37 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const reconcile = () => enqueueSubscriptionWork(doReconcile)
     const restartSubscription = () => enqueueSubscriptionWork(doRestartSubscription)
 
+    // A parent's hold on this collection as a relation target. Keeps sync
+    // alive and GC blocked like any subscriber. In collection mode the hold
+    // counts toward '*'; in query mode it is uncounted and the parent
+    // supplies the filters covering the rows it filed here.
+    function holdLive(): HeldTarget {
+        const counted = realtimeMode === 'collection'
+        if (counted) collectionModeSubscribers += 1
+        const subscription = originalSubscribeChanges(() => {}, { includeInitialState: false })
+        let current: string[] = []
+        let released = false
+        reconcile().catch(() => {})
+        return {
+            setFilters: filters => {
+                if (released) return
+                const next = [...new Set(filters)]
+                swapFilterRefs(current, next)
+                current = next
+                reconcile().catch(() => {})
+            },
+            release: () => {
+                if (released) return
+                released = true
+                for (const filter of current) dropFilterRef(filter)
+                current = []
+                if (counted) collectionModeSubscribers -= 1
+                subscription.unsubscribe()
+                reconcile().catch(() => {})
+            },
+        }
+    }
+
     // Record which expand paths a view has subscribed with at least once.
     // Eager collections cannot request per-subset options, so a wider union
     // needs a refetch to pick up the new expand; a live realtime subscription
@@ -1636,6 +1752,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
         markSubsetLoaded,
         loadedSubsetCount,
+        holdLive,
         fetchRelations,
         withRealtime,
     })
