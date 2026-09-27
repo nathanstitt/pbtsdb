@@ -4,8 +4,8 @@ import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 
 /**
- * pbtsdb's per-query expand rests on two behaviours TanStack DB does not
- * document. This test reproduces the mechanism with plain TanStack pieces so an
+ * pbtsdb rests on behaviours TanStack DB does not document: two behind
+ * per-query expand, and the synced-row store behind the write guard. This test reproduces the mechanism with plain TanStack pieces so an
  * upgrade that changes either fails here, with a message naming the assumption.
  */
 describe('TanStack DB assumptions behind per-query expand', () => {
@@ -73,5 +73,43 @@ describe('TanStack DB assumptions behind per-query expand', () => {
             'Assumption 2 broke: an extra field on load options no longer reaches queryKey(opts)'
         ).toBe(true)
         expect(live.toArray.map(row => row.id)).toEqual(['1'])
+    })
+
+    it('keeps the server row on _state.syncedData while an optimistic mutation is pending', async () => {
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        let settle: () => void = () => undefined
+        const collection = createCollection(
+            queryCollectionOptions<{ id: string; name: string }>({
+                queryClient,
+                queryKey: ['pin-synced'],
+                queryFn: async () => [{ id: '1', name: 'server' }],
+                getKey: item => item.id,
+                onUpdate: () =>
+                    new Promise<void>(resolve => {
+                        settle = resolve
+                    }),
+            })
+        )
+        await collection.preload()
+        collection.update('1', draft => {
+            draft.name = 'draft'
+        })
+
+        expect(collection.get('1')?.name).toBe('draft')
+        expect(
+            collection.get('1')?.$synced,
+            'Assumption 3 broke: $synced no longer reports a pending optimistic mutation'
+        ).toBe(false)
+        const state = (
+            collection as unknown as {
+                _state?: { syncedData?: Map<string, { name: string }> }
+            }
+        )._state
+        expect(
+            state?.syncedData?.get('1')?.name,
+            'Assumption 4 broke: collection._state.syncedData no longer holds the server row apart from the optimistic overlay. pbtsdb reads it through syncedRow/syncedRows in build-collection.ts; find the new accessor before touching anything else.'
+        ).toBe('server')
+        expect([...(state?.syncedData?.values() ?? [])]).toHaveLength(1)
+        settle()
     })
 })

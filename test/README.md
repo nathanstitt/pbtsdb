@@ -102,7 +102,7 @@ Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidati
 ---
 
 #### `tanstack-internals.test.ts`
-Pins the two undocumented TanStack DB behaviours per-query expand relies on. If this fails after an upgrade, read the assertion message before touching anything else.
+Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, and `_state.syncedData` behind the write guard. If this fails after an upgrade, read the assertion message before touching anything else.
 
 ---
 
