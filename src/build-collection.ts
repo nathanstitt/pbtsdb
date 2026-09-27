@@ -1411,7 +1411,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // What this collection filed into each target, per field: filed ids for a
     // forward relation, parent ids for a back-relation. A query-mode target
-    // subscribes to exactly these rows while held.
+    // subscribes to exactly these rows while held. Kept across hold releases,
+    // since a cached refetch re-holds without filing again; cleared on
+    // cleanup or truncate.
     const filedByTarget = new Map<ExpandTargetCollection, Map<string, Set<string>>>()
 
     function filedFiltersFor(target: ExpandTargetCollection): string[] {
@@ -1507,7 +1509,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         syncHeldSubscriptions(new Set())
         invalidateAllMarkedSubsets()
         loadedSubsets.clear()
-        filedByTarget.clear()
     }
 
     // Open the '*' entry. Only ever run through enqueueSubscriptionWork.
@@ -1750,7 +1751,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             onStatusChange: callback => collection.on('status:change', callback),
             onTruncate: callback => collection.on('truncate', callback),
         },
-        () => loadedSubsets.clear()
+        () => {
+            loadedSubsets.clear()
+            filedByTarget.clear()
+        }
     )
 
     // Add collectionName and subscription helpers

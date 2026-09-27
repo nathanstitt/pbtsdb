@@ -1,5 +1,5 @@
 import { eq, useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
+import { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
     afterAll,
@@ -393,6 +393,58 @@ describe('realtime mode', () => {
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
             } finally {
                 authorsSpy.mockRestore()
+            }
+        }, 30000)
+
+        it('re-holds a query-mode target with its filed rows after a cached remount', async () => {
+            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
+            const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
+            const fetches = () => getListSpy.mock.calls.length + getFullListSpy.mock.calls.length
+            try {
+                const cachingClient = new QueryClient({
+                    defaultOptions: { queries: { retry: false, gcTime: 30000, staleTime: 60000 } },
+                })
+                const c = createCollection<Schema>(pb, cachingClient)
+                const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
+                const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+                const mount = () =>
+                    renderHook(() =>
+                        useLiveQuery(q =>
+                            q
+                                .from({ b: books.fetchRelations('author') })
+                                .where(({ b }) => eq(b.genre, 'Fantasy'))
+                        )
+                    )
+
+                const first = mount()
+                await waitForLoadFinish(first.result, 10000)
+                await waitForSubscription(books)
+                const authorIds = [...new Set(first.result.current.data.map(b => b.author))].sort()
+                const expected = subsetFilters({ field: 'id', values: authorIds })
+                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
+                    timeout: 8000,
+                })
+
+                first.unmount()
+                await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
+                const callsBefore = authorsSpy.mock.calls.length
+                const fetchesBefore = fetches()
+
+                const second = mount()
+                await waitForLoadFinish(second.result, 10000)
+                await waitFor(
+                    () => expect(authorsSpy.mock.calls.length).toBeGreaterThan(callsBefore),
+                    { timeout: 8000 }
+                )
+                expect(filtersOf(authorsSpy).slice(callsBefore)).toEqual([expected[0]])
+                expect(authors.isSubscribed()).toBe(true)
+                expect(fetches()).toBe(fetchesBefore)
+                second.unmount()
+            } finally {
+                authorsSpy.mockRestore()
+                getListSpy.mockRestore()
+                getFullListSpy.mockRestore()
             }
         }, 30000)
 
