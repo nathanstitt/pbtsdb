@@ -19,7 +19,7 @@ import {
     REALTIME_TOPIC_MAX_LENGTH,
     realtimeTopicLength,
     subsetFilters,
-} from '../src/keyed-where'
+} from '../src/pocketbase-limits'
 import {
     authenticateTestUser,
     clearAuth,

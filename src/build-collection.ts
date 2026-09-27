@@ -24,16 +24,14 @@ import {
     splitPaths,
     validateExpandPath,
 } from './expand-paths'
+import { matchesSubset, subsetFromWhere, type WhereSubset } from './keyed-where'
+import { logger } from './logger'
 import {
-    matchesSubset,
     REALTIME_MAX_FILTER_LENGTH,
     REALTIME_TOPIC_MAX_LENGTH,
     realtimeTopicLength,
     subsetFilters,
-    subsetFromWhere,
-    type WhereSubset,
-} from './keyed-where'
-import { logger } from './logger'
+} from './pocketbase-limits'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
     CreateCollectionOptions,
@@ -54,6 +52,28 @@ interface ViewTag {
 const viewTags = new WeakMap<object, ViewTag>()
 
 const REALTIME_MODES: readonly RealtimeMode[] = ['collection', 'query']
+
+// Accessors for the untyped records PocketBase hands back: rows, expand
+// entries, and realtime events.
+function idOf(value: unknown): string | undefined {
+    if (!value || typeof value !== 'object' || !('id' in value)) return undefined
+    return typeof value.id === 'string' ? value.id : undefined
+}
+
+function updatedAtOf(value: unknown): string | undefined {
+    if (!value || typeof value !== 'object' || !('updated' in value)) return undefined
+    return typeof value.updated === 'string' && value.updated !== '' ? value.updated : undefined
+}
+
+function expandOf(value: unknown): Record<string, unknown> | undefined {
+    if (!value || typeof value !== 'object' || !('expand' in value)) return undefined
+    const { expand } = value
+    return expand && typeof expand === 'object' ? (expand as Record<string, unknown>) : undefined
+}
+
+function isObject(value: unknown): value is object {
+    return typeof value === 'object' && value !== null
+}
 
 // A correlated subquery over a relation target (e.g. a `materialize` include
 // keyed off the parent row's id) can have its own `loadSubset` dispatched by
@@ -174,7 +194,10 @@ export type BuiltCollection<T extends object> = Collection<
     never,
     T
 > &
-    CollectionSubscriptionHelpers
+    CollectionSubscriptionHelpers & {
+        fetchRelations: (...paths: string[]) => BuiltCollection<T>
+        withRealtime: (mode: RealtimeMode) => BuiltCollection<T>
+    }
 
 /** @internal */
 export interface BuildCollectionInput<
@@ -321,8 +344,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const defaultUpdate: UpdateMutationFn<RecordType> = async ({ transaction }) => {
         const updated = await Promise.all(
             transaction.mutations.map(async mutation => {
-                const recordWithId = mutation.original as { id: string }
-                return pb.collection(collectionName).update(recordWithId.id, mutation.changes)
+                return pb.collection(collectionName).update(mutation.original.id, mutation.changes)
             })
         )
         writeBackAfterPersisted(transaction, updated)
@@ -332,8 +354,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const defaultDelete: DeleteMutationFn<RecordType> = async ({ transaction }) => {
         await Promise.all(
             transaction.mutations.map(async mutation => {
-                const recordWithId = mutation.original as { id: string }
-                await pb.collection(collectionName).delete(recordWithId.id)
+                await pb.collection(collectionName).delete(mutation.original.id)
             })
         )
         return { refetch: refetchOnMutation }
@@ -391,10 +412,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function addExpanded(
         byKey: Map<string, ExpandedGroup>,
         key: string,
-        value: object | object[],
-        parentId: unknown
+        value: unknown,
+        parentId: string | undefined
     ): void {
-        const values = Array.isArray(value) ? value : [value]
+        const values = (Array.isArray(value) ? value : [value]).filter(isObject)
         const group = byKey.get(key) ?? { values: [], byParent: [] }
         group.values.push(...values)
         if (typeof parentId === 'string') group.byParent.push([parentId, values])
@@ -404,13 +425,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function groupExpandedByKey(records: object[]): Map<string, ExpandedGroup> {
         const byKey = new Map<string, ExpandedGroup>()
         for (const record of records) {
-            const { id, expand } = record as {
-                id?: unknown
-                expand?: Record<string, object | object[]>
-            }
+            const expand = expandOf(record)
             if (!expand) continue
             for (const [key, value] of Object.entries(expand)) {
-                addExpanded(byKey, key, value, id)
+                addExpanded(byKey, key, value, idOf(record))
             }
         }
         return byKey
@@ -419,7 +437,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Many parents can expand the same record; the last copy wins.
     function lastById(values: object[]): object[] {
         const byId = new Map<unknown, object>()
-        for (const value of values) byId.set((value as { id?: unknown }).id, value)
+        for (const value of values) byId.set(idOf(value), value)
         return [...byId.values()]
     }
 
@@ -440,7 +458,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             recordFiled(
                 target,
                 'id',
-                values.map(value => (value as { id: string }).id)
+                values.flatMap(value => idOf(value) ?? [])
             )
         }
     }
@@ -475,8 +493,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const heads = backRelationTargetsFor(request)
         if (heads.length === 0) return
         for (const item of items) {
-            const { id, expand } = item as { id?: unknown; expand?: Record<string, unknown> }
-            if (typeof id !== 'string') continue
+            const id = idOf(item)
+            if (!id) continue
+            const expand = expandOf(item)
             for (const { target, key, field } of heads) {
                 if (expand?.[key] === undefined) {
                     target.markSubsetLoaded?.(field, id)
@@ -708,8 +727,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function markConfirmedPresent(records: RecordType[]): void {
         if (inFlightConfirmedIds.size === 0) return
         for (const record of records) {
-            const id = (record as { id?: unknown } | null | undefined)?.id
-            if (typeof id !== 'string') continue
+            const id = idOf(record)
+            if (!id) continue
             for (const confirmed of inFlightConfirmedIds) confirmed.add(id)
         }
     }
@@ -719,9 +738,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         confirmedMidFlight: Set<string>
     ): RecordType[] {
         if (confirmedMidFlight.size === 0) return items
-        const resultIds = new Set(
-            items.map(item => (item as { id?: unknown } | null | undefined)?.id)
-        )
+        const resultIds = new Set(items.map(idOf))
         // Ids absent from the synced store (deleted mid-flight, or never
         // landed) have nothing to protect and drop out of the merge.
         const mergedIds = [...confirmedMidFlight].filter(
@@ -810,13 +827,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             return fetchRecords(request, ctx.queryKey)
         },
         getKey: (item: RecordType) => {
-            const record = item as unknown as Record<string, unknown>
-            if (!record || typeof record !== 'object' || !('id' in record)) {
+            const id = idOf(item)
+            if (id === undefined) {
                 throw new Error(
                     `Record in collection '${collectionName}' is missing required 'id' field. Received: ${JSON.stringify(item)}`
                 )
             }
-            return record.id as string
+            return id
         },
         onInsert: resolveHandler(options?.onInsert, defaultInsert),
         onUpdate: resolveHandler(options?.onUpdate, defaultUpdate),
@@ -903,8 +920,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function syncedWriteKey(op: { type: string; value?: unknown; key?: unknown }): string | null {
         if (op.type !== 'insert' && op.type !== 'update') return null
         if (typeof op.key === 'string') return op.key
-        const id = (op.value as { id?: unknown } | undefined)?.id
-        return typeof id === 'string' ? id : null
+        return idOf(op.value) ?? null
     }
 
     // Guard the synced write path that pbtsdb does not otherwise control:
@@ -1213,13 +1229,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return state.optimisticUpserts.has(key) || state.optimisticDeletes.has(key)
     }
 
-    // Read the PocketBase `updated` autodate from a record, if present.
-    // Collections without an `updated` field opt out of staleness checks.
-    function recordUpdatedAt(record: unknown): string | undefined {
-        const updated = (record as { updated?: unknown } | null | undefined)?.updated
-        return typeof updated === 'string' && updated !== '' ? updated : undefined
-    }
-
     // A server record is stale relative to the synced store when an entry for
     // the same key already holds a newer `updated` timestamp. PocketBase can
     // redeliver or reorder realtime echoes (and a slow mutation response can
@@ -1237,13 +1246,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // the revert it chased was the write-back racing its own transaction,
     // fixed in writeBackAfterPersisted.)
     function isStaleServerRecord(record: unknown): boolean {
-        const id = (record as { id?: unknown } | null | undefined)?.id
-        if (typeof id !== 'string') return false
-        const incoming = recordUpdatedAt(record)
+        const id = idOf(record)
+        if (!id) return false
+        const incoming = updatedAtOf(record)
         if (!incoming) return false
-        const current = recordUpdatedAt(
-            collection._state.syncedData.get(id) as RecordType | undefined
-        )
+        const current = updatedAtOf(collection._state.syncedData.get(id))
         if (current === undefined) return false
         return incoming < current
     }
@@ -1259,7 +1266,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!isStaleServerRecord(event.record)) return false
         logger.debug('Ignoring stale realtime echo', {
             collectionName,
-            id: (event.record as { id?: string } | undefined)?.id,
+            id: idOf(event.record),
         })
         return true
     }
@@ -1269,8 +1276,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // active query filter. Filter entries stay closed while '*' is open.
     let unsubscribeFn: (() => Promise<void>) | null = null
     let isSubscribed = false
-    let subscriptionPromise: Promise<void> | null = null
-    let subscriptionResolve: (() => void) | null = null
+    // Callers of waitForSubscription blocked until the next entry opens.
+    const subscriptionWaiters = new Set<() => void>()
     // The `expand` string sent with the currently live '*' entry, so a
     // caller that widened requestedExpand mid-flight can tell whether the
     // subscription that just landed already covers it.
@@ -1303,16 +1310,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return isSubscribed || filterEntries.size > 0
     }
 
-    function ensureSubscriptionPromise(): void {
-        if (subscriptionPromise) return
-        subscriptionPromise = new Promise<void>(resolve => {
-            subscriptionResolve = resolve
-        })
-    }
-
-    function clearSubscriptionPromise(): void {
-        subscriptionPromise = null
-        subscriptionResolve = null
+    function notifySubscribed(): void {
+        for (const resolve of subscriptionWaiters) resolve()
+        subscriptionWaiters.clear()
     }
 
     // All start/stop/restart work is serialized onto this promise tail so
@@ -1361,13 +1361,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                         case 'update':
                             collection.utils.writeUpsert(stored)
                             break
-                        case 'delete':
-                            if (event.record && 'id' in event.record) {
-                                // Throws DeleteOperationItemNotFoundError if the key
-                                // is no longer in the synced store (see catch below).
-                                collection.utils.writeDelete((event.record as { id: string }).id)
-                            }
+                        case 'delete': {
+                            const id = idOf(event.record)
+                            if (id) collection.utils.writeDelete(id)
                             break
+                        }
                     }
                 })
             )
@@ -1390,7 +1388,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (error instanceof DeleteOperationItemNotFoundError) {
                 logger.debug('Ignoring delete echo for already-removed record', {
                     collectionName,
-                    id: (event.record as { id?: string } | undefined)?.id,
+                    id: idOf(event.record),
                 })
             } else {
                 throw error
@@ -1543,7 +1541,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Open the '*' entry. Only ever run through enqueueSubscriptionWork.
     const doStartSubscription = async () => {
         if (isSubscribed) return
-        ensureSubscriptionPromise()
         const pendingExpand = pendingSubscribeExpand()
         try {
             unsubscribeFn = await pb
@@ -1553,7 +1550,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             subscribedExpand = pendingExpand
             syncHeldSubscriptions(activeExpandTargets())
             logger.debug('Subscription started', { collectionName })
-            subscriptionResolve?.()
+            notifySubscribed()
         } catch (error) {
             logger.error('Failed to start subscription', { collectionName, error })
         }
@@ -1602,7 +1599,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             })
             return false
         }
-        ensureSubscriptionPromise()
         const pendingExpand = pendingSubscribeExpand()
         try {
             const unsubscribe = await pb
@@ -1611,7 +1607,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             filterEntries.set(filter, { unsubscribe, expand: pendingExpand })
             syncHeldSubscriptions(activeExpandTargets())
             logger.debug('Filtered subscription started', { collectionName, filter })
-            subscriptionResolve?.()
+            notifySubscribed()
         } catch (error) {
             // Not retried on a timer: the next reconcile trigger (a ref change
             // or a restart) tries this filter again.
@@ -1683,10 +1679,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const wanted = wantedFilters()
             await closeFilterEntries(filter => wanted.has(filter))
         }
-        if (!anyEntryOpen() && !wantsStar() && wantedFilters().size === 0) {
-            clearSubscriptionPromise()
-            releaseAll()
-        }
+        if (!anyEntryOpen() && !wantsStar() && wantedFilters().size === 0) releaseAll()
         if (expandDrifted()) restartSubscription()
     }
 
@@ -1696,7 +1689,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!anyEntryOpen()) return
         await doStopSubscription()
         await closeFilterEntries()
-        clearSubscriptionPromise()
         await doReconcile()
     }
 
@@ -1764,34 +1756,20 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         restartSubscription()
     }
 
-    // Wait for subscription to be established (for testing)
-    const waitForSubscription = async (timeout = 5000): Promise<void> => {
-        if (anyEntryOpen()) return
-
-        if (!subscriptionPromise) {
-            // No subscription in progress, wait for one to start
-            await new Promise<void>(resolve => {
-                const checkInterval = setInterval(() => {
-                    if (subscriptionPromise) {
-                        clearInterval(checkInterval)
-                        resolve()
-                    }
-                }, 10)
-                setTimeout(() => {
-                    clearInterval(checkInterval)
-                    resolve()
-                }, timeout)
-            })
-        }
-
-        if (subscriptionPromise) {
-            await Promise.race([
-                subscriptionPromise,
-                new Promise<void>((_, reject) =>
-                    setTimeout(() => reject(new Error('Subscription timeout')), timeout)
-                ),
-            ])
-        }
+    // Resolves once an entry is open; rejects when none opens within `timeout`.
+    const waitForSubscription = (timeout = 5000): Promise<void> => {
+        if (anyEntryOpen()) return Promise.resolve()
+        return new Promise((resolve, reject) => {
+            const onOpen = () => {
+                clearTimeout(timer)
+                resolve()
+            }
+            const timer = setTimeout(() => {
+                subscriptionWaiters.delete(onOpen)
+                reject(new Error('Subscription timeout'))
+            }, timeout)
+            subscriptionWaiters.add(onOpen)
+        })
     }
 
     registerMarkInvalidationEvents(
