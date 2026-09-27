@@ -21,19 +21,36 @@ import {
     splitPaths,
     validateExpandPath,
 } from './expand-paths'
-import { matchesSubset, subsetFilters, subsetFromWhere, type WhereSubset } from './keyed-where'
+import {
+    matchesSubset,
+    REALTIME_MAX_FILTER_LENGTH,
+    REALTIME_TOPIC_MAX_LENGTH,
+    realtimeTopicLength,
+    subsetFilters,
+    subsetFromWhere,
+    type WhereSubset,
+} from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
     CreateCollectionOptions,
     ExpandTargetCollection,
     ExtractRecordType,
+    HeldTarget,
+    RealtimeMode,
     SchemaDeclaration,
 } from './types'
 
-// Subscriptions created through a view, mapped to the view's expand paths. Keyed
+// What a view adds to every subscription made through it: extra expand paths
+// and, when set, a realtime mode that overrides the collection default. Keyed
 // by the subscription object TanStack hands back to loadSubset/unloadSubset.
-const viewPaths = new WeakMap<object, string[]>()
+interface ViewTag {
+    paths: string[]
+    realtime: RealtimeMode | undefined
+}
+const viewTags = new WeakMap<object, ViewTag>()
+
+const REALTIME_MODES: readonly RealtimeMode[] = ['collection', 'query']
 
 // A correlated subquery over a relation target (e.g. a `materialize` include
 // keyed off the parent row's id) can have its own `loadSubset` dispatched by
@@ -110,9 +127,10 @@ export interface CreateCollectionFactoryOptions {
      * Extra options passed to every real-time subscription this factory creates,
      * such as `headers`, `filter`, `expand` or `fields`.
      *
-     * Invoked at subscribe time rather than read once, because a subscription is
-     * re-established on reconnect and whenever the subscriber count rises from
-     * zero — a value captured at build time would go stale exactly then.
+     * Invoked on every subscribe attempt rather than read once: each filtered
+     * entry of a `realtime: 'query'` collection and each restart (reconnect,
+     * wider expand) calls it again, so a value captured at build time would go
+     * stale.
      *
      * Returning `undefined` subscribes with no extra options.
      */
@@ -138,6 +156,8 @@ export interface CollectionSubscriptionHelpers {
     markSubsetLoaded: (field: string, value: string) => void
     /** Number of field/value pairs currently marked loaded */
     loadedSubsetCount: () => number
+    /** Hold this collection live as a relation target; see ExpandTargetCollection.holdLive */
+    holdLive: () => HeldTarget
 }
 
 /**
@@ -176,6 +196,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const alwaysFetch = normalizePaths(options?.alwaysFetchRelations ?? [])
     for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
+    const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
+    if (realtimeMode === 'query' && syncMode !== 'on-demand') {
+        throw new Error(
+            `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
+        )
+    }
 
     // Paths requested by views that have subscribed at least once. Eager fetches
     // read it because they cannot receive per-subset options; the realtime
@@ -342,6 +368,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return [...byId.values()]
     }
 
+    function recordFiledGroup(
+        target: ExpandTargetCollection,
+        key: string,
+        group: ExpandedGroup,
+        values: object[]
+    ): void {
+        const via = parseViaKey(key)
+        if (via) {
+            recordFiled(
+                target,
+                via.field,
+                group.byParent.map(([parentId]) => parentId)
+            )
+        } else {
+            recordFiled(
+                target,
+                'id',
+                values.map(value => (value as { id: string }).id)
+            )
+        }
+    }
+
     // One write per relation key for the whole batch: a write pushes the
     // target's entire row set into every cached query for it.
     async function upsertExpanded(
@@ -359,6 +407,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const filed = await upsertInto(key, target, values)
             await upsertExpanded(values, target.relationTargets)
             if (!filed) continue
+            recordFiledGroup(target, key, group, values)
             for (const [parentId, parentValues] of group.byParent) {
                 markFiledSubset(target, key, parentValues, parentId)
             }
@@ -374,7 +423,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const { id, expand } = item as { id?: unknown; expand?: Record<string, unknown> }
             if (typeof id !== 'string') continue
             for (const { target, key, field } of heads) {
-                if (expand?.[key] === undefined) target.markSubsetLoaded?.(field, id)
+                if (expand?.[key] === undefined) {
+                    target.markSubsetLoaded?.(field, id)
+                    recordFiled(target, field, [id])
+                }
             }
         }
     }
@@ -883,20 +935,96 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return false
     }
 
-    // A view's subscription is tagged in viewPaths (see createView below); this
+    // A view's subscription is tagged in viewTags (see createView below); this
     // adds the view's expand paths to load options for a tagged subscription so
     // loadSubset/unloadSubset fetch (and later untrack) with the right `expand`.
     // A subscription's initial snapshot loads synchronously inside
     // collection.subscribeChanges, before that call returns the subscription
-    // object a view tags in viewPaths — so that first loadSubset cannot yet be
+    // object a view tags in viewTags — so that first loadSubset cannot yet be
     // looked up by identity. While a view's subscribeChanges call is on the
     // stack, its paths are used for load options with no tagged subscription;
     // every later call (untracked demand growth, unloadSubset) is tagged by then.
-    let subscribingViewPaths: string[] | undefined
+    let subscribingViewTag: ViewTag | undefined
+
+    function tagFor(opts: LoadSubsetOptions): ViewTag | undefined {
+        return (opts.subscription && viewTags.get(opts.subscription)) ?? subscribingViewTag
+    }
+
+    // The filter strings a query's fetch sends: every chunk of a keyed subset,
+    // or the single converted filter. `undefined` means the whole collection.
+    function filtersFor(opts: LoadSubsetOptions): string[] | undefined {
+        const request = toRequest(opts)
+        if (request.subset) return subsetFilters(request.subset, REALTIME_MAX_FILTER_LENGTH)
+        return request.filter ? [request.filter] : undefined
+    }
+
+    function realtimeModeFor(opts: LoadSubsetOptions): RealtimeMode {
+        return tagFor(opts)?.realtime ?? realtimeMode
+    }
+
+    function addFilterRef(refs: Map<string, number>, filter: string): void {
+        refs.set(filter, (refs.get(filter) ?? 0) + 1)
+    }
+
+    function dropFilterRef(refs: Map<string, number>, filter: string): void {
+        const count = (refs.get(filter) ?? 0) - 1
+        if (count > 0) {
+            refs.set(filter, count)
+            return
+        }
+        refs.delete(filter)
+        if (!filterRefs.has(filter) && !holdFilterRefs.has(filter)) oversizedFilters.delete(filter)
+    }
+
+    function swapHoldFilterRefs(previous: readonly string[], next: readonly string[]): void {
+        for (const filter of next)
+            if (!previous.includes(filter)) addFilterRef(holdFilterRefs, filter)
+        for (const filter of previous)
+            if (!next.includes(filter)) dropFilterRef(holdFilterRefs, filter)
+    }
+
+    // What each loadSubset retained, keyed by the options object TanStack
+    // passes again to unloadSubset. Release reads this record instead of
+    // re-deriving it: the view tag in effect can differ between the two calls.
+    // Replaced on sync cleanup, so a stale unload cannot drop a newer ref.
+    type RetainedFilters = { filters: string[] | undefined }
+    let retainedFilters = new WeakMap<LoadSubsetOptions, RetainedFilters[]>()
+
+    function retainQueryFilters(opts: LoadSubsetOptions): void {
+        if (realtimeModeFor(opts) !== 'query') return
+        const filters = filtersFor(opts)
+        if (!filters) unfilteredQueryRefs += 1
+        else for (const filter of filters) addFilterRef(filterRefs, filter)
+        const records = retainedFilters.get(opts) ?? []
+        records.push({ filters })
+        retainedFilters.set(opts, records)
+        reconcile().catch(() => {})
+    }
+
+    // TanStack drops a discarded sync session's demands without unloadSubset
+    // and reloads them on the next session, so its cleanup must zero the refs.
+    function resetQueryFilters(): void {
+        filterRefs.clear()
+        unfilteredQueryRefs = 0
+        retainedFilters = new WeakMap()
+        for (const filter of oversizedFilters) {
+            if (!holdFilterRefs.has(filter)) oversizedFilters.delete(filter)
+        }
+        reconcile().catch(() => {})
+    }
+
+    function releaseQueryFilters(opts: LoadSubsetOptions): void {
+        const records = retainedFilters.get(opts)
+        const retained = records?.shift()
+        if (!retained) return
+        if (records?.length === 0) retainedFilters.delete(opts)
+        if (!retained.filters) unfilteredQueryRefs -= 1
+        else for (const filter of retained.filters) dropFilterRef(filterRefs, filter)
+        reconcile().catch(() => {})
+    }
 
     function withViewExpand(opts: LoadSubsetOptions): LoadOptions {
-        const paths =
-            (opts.subscription && viewPaths.get(opts.subscription)) ?? subscribingViewPaths
+        const paths = tagFor(opts)?.paths
         return paths ? { ...opts, expand: paths } : opts
     }
 
@@ -915,15 +1043,31 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return params.write(message)
             }
             const res = innerSync({ ...params, write: guardedWrite })
-            if (!res || typeof res === 'function') return res
-            const { loadSubset, unloadSubset } = res
+            if (!res) return res
+            const parts = typeof res === 'function' ? { cleanup: res } : res
+            const { cleanup, loadSubset, unloadSubset } = parts
             return {
-                ...res,
+                ...parts,
+                cleanup: () => {
+                    resetQueryFilters()
+                    return cleanup?.()
+                },
                 loadSubset: loadSubset
-                    ? (opts: LoadSubsetOptions) => loadSubset(withViewExpand(opts))
+                    ? (opts: LoadSubsetOptions) => {
+                          retainQueryFilters(opts)
+                          try {
+                              return loadSubset(withViewExpand(opts))
+                          } catch (error) {
+                              releaseQueryFilters(opts)
+                              throw error
+                          }
+                      }
                     : undefined,
                 unloadSubset: unloadSubset
-                    ? (opts: LoadSubsetOptions) => unloadSubset(withViewExpand(opts))
+                    ? (opts: LoadSubsetOptions) => {
+                          releaseQueryFilters(opts)
+                          return unloadSubset(withViewExpand(opts))
+                      }
                     : undefined,
             }
         },
@@ -933,43 +1077,133 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     const views = new Map<string, object>()
 
-    function createView(paths: string[]): object {
+    function assertRealtimeMode(mode: RealtimeMode): void {
+        if (!REALTIME_MODES.includes(mode)) {
+            throw new Error(
+                `Collection '${collectionName}': unknown realtime mode '${String(mode)}'`
+            )
+        }
+        if (mode === 'query' && syncMode !== 'on-demand') {
+            throw new Error(
+                `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
+            )
+        }
+    }
+
+    // Captured before the base collection's own subscribeChanges is replaced
+    // below, so views and the base both reach TanStack's original.
+    const originalSubscribeChanges = collection.subscribeChanges.bind(collection)
+
+    type ChangesSubscription = ReturnType<typeof originalSubscribeChanges>
+
+    function subscribeTagged(
+        tag: ViewTag | undefined,
+        args: Parameters<typeof originalSubscribeChanges>
+    ): ChangesSubscription {
+        subscribingViewTag = tag
+        try {
+            const subscription = originalSubscribeChanges(...args)
+            if (tag) viewTags.set(subscription, tag)
+            return subscription
+        } finally {
+            subscribingViewTag = undefined
+        }
+    }
+
+    function subscribeCollectionMode(
+        tag: ViewTag | undefined,
+        args: Parameters<typeof originalSubscribeChanges>
+    ): ChangesSubscription {
+        collectionModeSubscribers += 1
+        let subscription: ChangesSubscription
+        try {
+            subscription = subscribeTagged(tag, args)
+        } catch (error) {
+            collectionModeSubscribers -= 1
+            throw error
+        }
+        const unsubscribe = subscription.unsubscribe.bind(subscription)
+        let released = false
+        subscription.unsubscribe = () => {
+            if (!released) {
+                released = true
+                collectionModeSubscribers -= 1
+                reconcile().catch(() => {})
+            }
+            unsubscribe()
+        }
+        return subscription
+    }
+
+    function subscribeChangesFor(tag: ViewTag | undefined) {
+        return (...args: Parameters<typeof originalSubscribeChanges>) => {
+            if (tag) noteViewSubscribed(tag.paths)
+            const subscription =
+                (tag?.realtime ?? realtimeMode) === 'collection'
+                    ? subscribeCollectionMode(tag, args)
+                    : subscribeTagged(tag, args)
+            reconcile().catch(() => {})
+            return subscription
+        }
+    }
+
+    Object.defineProperty(collection, 'subscribeChanges', {
+        value: subscribeChangesFor(undefined),
+    })
+
+    function createView(tag: ViewTag): object {
+        const query: string[] = []
+        if (tag.paths.length > 0) query.push(`expand=${tag.paths.join(',')}`)
+        if (tag.realtime) query.push(`realtime=${tag.realtime}`)
         const view = Object.create(collection)
         Object.defineProperties(view, {
-            id: { value: `${collectionName}?expand=${paths.join(',')}` },
-            subscribeChanges: {
-                value: (...args: Parameters<typeof collection.subscribeChanges>) => {
-                    noteViewSubscribed(paths)
-                    subscribingViewPaths = paths
-                    try {
-                        const subscription = collection.subscribeChanges(...args)
-                        viewPaths.set(subscription, paths)
-                        return subscription
-                    } finally {
-                        subscribingViewPaths = undefined
-                    }
-                },
-            },
+            id: { value: `${collectionName}?${query.join('&')}` },
+            subscribeChanges: { value: subscribeChangesFor(tag) },
             fetchRelations: {
-                value: () => {
-                    throw new Error(`A view of "${collectionName}" cannot fetch further relations`)
+                value: (...more: string[]) => viewFor([...tag.paths, ...more], tag.realtime),
+            },
+            withRealtime: {
+                value: (mode: RealtimeMode) => {
+                    assertRealtimeMode(mode)
+                    const override = mode === realtimeMode ? undefined : mode
+                    if (tag.realtime !== undefined && tag.realtime !== override) {
+                        throw new Error(
+                            `A view of "${collectionName}" already uses realtime '${tag.realtime}'`
+                        )
+                    }
+                    return viewFor(tag.paths, mode)
                 },
             },
         })
         return view
     }
 
-    function fetchRelations(...paths: string[]): object {
+    // A view is identified by its normalized expand paths plus its realtime
+    // override; the collection default is stored as `undefined` so a mode equal
+    // to the default never creates a distinct view.
+    function viewFor(paths: readonly string[], realtime: RealtimeMode | undefined): object {
         for (const path of paths) validateExpandPath(collectionName, relationTargets, path)
         const all = normalizePaths([...alwaysFetch, ...paths])
-        if (all.every(path => alwaysFetch.includes(path))) return collection
-        const key = all.join(',')
+        const override = realtime === realtimeMode ? undefined : realtime
+        if (override === undefined && all.every(path => alwaysFetch.includes(path))) {
+            return collection
+        }
+        const key = `${all.join(',')}|${override ?? ''}`
         let view = views.get(key)
         if (!view) {
-            view = createView(all)
+            view = createView({ paths: all, realtime: override })
             views.set(key, view)
         }
         return view
+    }
+
+    function fetchRelations(...paths: string[]): object {
+        return viewFor(paths, undefined)
+    }
+
+    function withRealtime(mode: RealtimeMode): object {
+        assertRealtimeMode(mode)
+        return viewFor([], mode)
     }
 
     // True when the key has an in-flight (not yet settled) optimistic mutation.
@@ -1035,22 +1269,63 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return true
     }
 
-    // Real-time subscription state
+    // Real-time subscription state. The '*' entry is one PocketBase
+    // subscription over the whole collection; a filter entry is one per
+    // active query filter. Filter entries stay closed while '*' is open.
     let unsubscribeFn: (() => Promise<void>) | null = null
     let isSubscribed = false
     let subscriptionPromise: Promise<void> | null = null
     let subscriptionResolve: (() => void) | null = null
-    // The `expand` string sent with the currently live subscription, so a
+    // The `expand` string sent with the currently live '*' entry, so a
     // caller that widened requestedExpand mid-flight can tell whether the
     // subscription that just landed already covers it.
     let subscribedExpand: string | undefined
 
+    const filterEntries = new Map<
+        string,
+        { unsubscribe: () => Promise<void>; expand: string | undefined }
+    >()
+    let collectionModeSubscribers = 0
+    let unfilteredQueryRefs = 0
+    const filterRefs = new Map<string, number>()
+    // Held-target refs live apart from loadSubset refs: a sync cleanup resets
+    // only the latter, while the hold outlives the sync session.
+    const holdFilterRefs = new Map<string, number>()
+    // Wanted filters whose topic is over PocketBase's cap. The SDK keeps a
+    // rejected topic and re-posts it with every later change, breaking
+    // realtime for the whole client, so these widen to '*' instead.
+    const oversizedFilters = new Set<string>()
+
+    function wantedFilters(): Set<string> {
+        return new Set([...filterRefs.keys(), ...holdFilterRefs.keys()])
+    }
+
+    function wantsStar(): boolean {
+        return collectionModeSubscribers > 0 || unfilteredQueryRefs > 0 || oversizedFilters.size > 0
+    }
+
+    function anyEntryOpen(): boolean {
+        return isSubscribed || filterEntries.size > 0
+    }
+
+    function ensureSubscriptionPromise(): void {
+        if (subscriptionPromise) return
+        subscriptionPromise = new Promise<void>(resolve => {
+            subscriptionResolve = resolve
+        })
+    }
+
+    function clearSubscriptionPromise(): void {
+        subscriptionPromise = null
+        subscriptionResolve = null
+    }
+
     // All start/stop/restart work is serialized onto this promise tail so
     // overlapping callers (two views created back-to-back, a reconnect
-    // racing a widened expand) never run startSubscription/stopSubscription
-    // concurrently — the tail is what lets a later caller's restart observe
-    // the outcome of an earlier caller's in-flight start. Errors are caught
-    // and logged so a failed step never poisons the tail for later work.
+    // racing a widened expand) never open or close entries concurrently —
+    // the tail is what lets a later caller's restart observe the outcome of
+    // an earlier caller's in-flight start. Errors are caught and logged so a
+    // failed step never poisons the tail for later work.
     let subscriptionWork: Promise<void> = Promise.resolve()
     function enqueueSubscriptionWork(fn: () => Promise<void>): Promise<void> {
         const run = subscriptionWork.then(fn, fn).catch(error => {
@@ -1162,16 +1437,59 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return targets
     }
 
-    // The only place held target subscriptions are added or removed, so the
-    // map always mirrors the last desired set exactly.
-    const heldTargetSubscriptions = new Map<ExpandTargetCollection, { unsubscribe: () => void }>()
+    // The only place held targets are added or removed, so the map always
+    // mirrors the last desired set exactly.
+    const heldTargetSubscriptions = new Map<ExpandTargetCollection, HeldTarget>()
+
+    // What this collection filed into each target, per field: filed ids for a
+    // forward relation, parent ids for a back-relation. A query-mode target
+    // subscribes to exactly these rows while held. Kept across hold releases,
+    // since a cached refetch re-holds without filing again; cleared on
+    // cleanup or truncate.
+    const filedByTarget = new Map<ExpandTargetCollection, Map<string, Set<string>>>()
+
+    function filedFiltersFor(target: ExpandTargetCollection): string[] {
+        const byField = filedByTarget.get(target)
+        if (!byField) return []
+        const filters: string[] = []
+        for (const [field, values] of byField) {
+            filters.push(
+                ...subsetFilters({ field, values: [...values] }, REALTIME_MAX_FILTER_LENGTH)
+            )
+        }
+        return filters
+    }
+
+    function recordFiled(
+        target: ExpandTargetCollection,
+        field: string,
+        values: Iterable<string>
+    ): void {
+        let byField = filedByTarget.get(target)
+        if (!byField) {
+            byField = new Map()
+            filedByTarget.set(target, byField)
+        }
+        let recorded = byField.get(field)
+        if (!recorded) {
+            recorded = new Set()
+            byField.set(field, recorded)
+        }
+        let grew = false
+        for (const value of values) {
+            if (recorded.has(value)) continue
+            recorded.add(value)
+            grew = true
+        }
+        if (grew) heldTargetSubscriptions.get(target)?.setFilters(filedFiltersFor(target))
+    }
 
     function releaseHeldTarget(target: ExpandTargetCollection): void {
         const held = heldTargetSubscriptions.get(target)
         if (!held) return
         heldTargetSubscriptions.delete(target)
         try {
-            held.unsubscribe()
+            held.release()
         } catch (error) {
             logger.error('Failed to release relation target subscription', {
                 collectionName,
@@ -1181,10 +1499,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     function holdTarget(target: ExpandTargetCollection): void {
-        if (heldTargetSubscriptions.has(target) || !target.subscribeChanges) return
+        if (heldTargetSubscriptions.has(target)) return
         try {
-            const held = target.subscribeChanges(() => {}, { includeInitialState: false })
-            heldTargetSubscriptions.set(target, held)
+            if (target.holdLive) {
+                const held = target.holdLive()
+                heldTargetSubscriptions.set(target, held)
+                held.setFilters(filedFiltersFor(target))
+            } else if (target.subscribeChanges) {
+                const held = target.subscribeChanges(() => {}, { includeInitialState: false })
+                heldTargetSubscriptions.set(target, {
+                    setFilters: () => {},
+                    release: () => held.unsubscribe(),
+                })
+            }
         } catch (error) {
             logger.error('Failed to hold relation target subscription', { collectionName, error })
         }
@@ -1210,18 +1537,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return expand ? { ...base, expand } : base
     }
 
-    // Start PocketBase real-time subscription. Only ever run through
-    // enqueueSubscriptionWork so it never overlaps a stop/restart.
+    // Every held target and every subset mark exists to serve rows realtime
+    // keeps fresh; with nothing live and nothing wanted, release them all.
+    function releaseAll(): void {
+        syncHeldSubscriptions(new Set())
+        invalidateAllMarkedSubsets()
+        loadedSubsets.clear()
+    }
+
+    // Open the '*' entry. Only ever run through enqueueSubscriptionWork.
     const doStartSubscription = async () => {
         if (isSubscribed) return
-
-        // Create promise before starting so waiters can await it
-        if (!subscriptionPromise) {
-            subscriptionPromise = new Promise<void>(resolve => {
-                subscriptionResolve = resolve
-            })
-        }
-
+        ensureSubscriptionPromise()
         const pendingExpand = pendingSubscribeExpand()
         try {
             unsubscribeFn = await pb
@@ -1231,39 +1558,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             subscribedExpand = pendingExpand
             syncHeldSubscriptions(activeExpandTargets())
             logger.debug('Subscription started', { collectionName })
-            // Resolve the promise to notify waiters
-            if (subscriptionResolve) {
-                subscriptionResolve()
-            }
+            subscriptionResolve?.()
         } catch (error) {
             logger.error('Failed to start subscription', { collectionName, error })
         }
-
-        // requestedExpand can grow while the subscribe() call above was in
-        // flight (a view mounted mid-round-trip sees no live subscription
-        // yet, and would otherwise never schedule a restart). Comparing
-        // against the pure expand union (not realtimeSubscribeOptions,
-        // which would re-invoke the factory's own subscribeOptions()
-        // callback) lets this check run after every start with no
-        // observable side effect.
-        if (pendingSubscribeExpand() !== subscribedExpand) {
-            enqueueSubscriptionWork(doRestartSubscription).catch(() => {})
-        }
     }
 
-    // Stop PocketBase real-time subscription. Only ever run through
-    // enqueueSubscriptionWork so it never overlaps a start/restart.
-    const doStopSubscription = async (releaseTargets = true) => {
-        // Before the guard below: a restart whose subscribe() threw leaves
-        // isSubscribed false with targets still held, and this real stop is
-        // the only remaining chance to release them.
-        if (releaseTargets) {
-            syncHeldSubscriptions(new Set())
-            invalidateAllMarkedSubsets()
-            loadedSubsets.clear()
-        }
+    // Close the '*' entry. Only ever run through enqueueSubscriptionWork.
+    const doStopSubscription = async () => {
         if (!isSubscribed || !unsubscribeFn) return
-
         try {
             await unsubscribeFn()
             logger.debug('Subscription stopped', { collectionName })
@@ -1274,28 +1577,175 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             })
         } finally {
             // Unconditional: a throwing unsubscribe must not leave the state
-            // machine believing it is still subscribed after targets were
-            // released, or the next start would return early and never re-hold.
+            // machine believing it is still subscribed.
             unsubscribeFn = null
             isSubscribed = false
             subscribedExpand = undefined
-            subscriptionPromise = null
-            subscriptionResolve = null
         }
     }
 
-    // Restart the live subscription, e.g. after the requested expand union
-    // grows. A no-op when there is no live subscription to restart — the
-    // next first-subscriber start already picks up the current union.
-    const doRestartSubscription = async () => {
-        if (!isSubscribed) return
-        await doStopSubscription(false)
-        await doStartSubscription()
+    // A factory-supplied filter narrows every entry; the query filter narrows
+    // further, so the two are conjoined rather than one replacing the other.
+    function filteredSubscribeOptions(filter: string): RecordSubscribeOptions {
+        const base = realtimeSubscribeOptions()
+        const combined = base?.filter ? `(${base.filter}) && (${filter})` : filter
+        return { ...base, filter: combined }
     }
 
-    const startSubscription = () => enqueueSubscriptionWork(doStartSubscription)
-    const stopSubscription = () => enqueueSubscriptionWork(() => doStopSubscription())
+    // Returns false when the filter's topic is over the cap: the filter is
+    // then marked oversized and the collection widens to '*'.
+    const openFilterEntry = async (filter: string): Promise<boolean> => {
+        if (filterEntries.has(filter)) return true
+        const subscribeOptions = filteredSubscribeOptions(filter)
+        const topicLength = realtimeTopicLength(collectionName, subscribeOptions)
+        if (topicLength > REALTIME_TOPIC_MAX_LENGTH) {
+            oversizedFilters.add(filter)
+            logger.warn('Realtime filter too long; subscribing to the whole collection', {
+                collectionName,
+                filterLength: filter.length,
+                topicLength,
+            })
+            return false
+        }
+        ensureSubscriptionPromise()
+        const pendingExpand = pendingSubscribeExpand()
+        try {
+            const unsubscribe = await pb
+                .collection(collectionName)
+                .subscribe('*', handleRealtimeEvent, subscribeOptions)
+            filterEntries.set(filter, { unsubscribe, expand: pendingExpand })
+            syncHeldSubscriptions(activeExpandTargets())
+            logger.debug('Filtered subscription started', { collectionName, filter })
+            subscriptionResolve?.()
+        } catch (error) {
+            // Not retried on a timer: the next reconcile trigger (a ref change
+            // or a restart) tries this filter again.
+            logger.error('Failed to start filtered subscription', {
+                collectionName,
+                filter,
+                error,
+            })
+        }
+        return true
+    }
+
+    const closeFilterEntry = async (filter: string) => {
+        const entry = filterEntries.get(filter)
+        if (!entry) return
+        filterEntries.delete(filter)
+        try {
+            await entry.unsubscribe()
+            logger.debug('Filtered subscription stopped', { collectionName, filter })
+        } catch (error) {
+            logger.debug('Unsubscribe failed (expected if connection closed)', {
+                collectionName,
+                filter,
+                error,
+            })
+        }
+    }
+
+    // requestedExpand can grow while a subscribe() call is in flight (a view
+    // mounted mid-round-trip sees no live entry yet, and would otherwise
+    // never schedule a restart). Compares against the pure expand union, not
+    // realtimeSubscribeOptions, which would re-invoke the factory's own
+    // subscribeOptions() callback.
+    function expandDrifted(): boolean {
+        const pending = pendingSubscribeExpand()
+        if (isSubscribed && subscribedExpand !== pending) return true
+        for (const entry of filterEntries.values()) {
+            if (entry.expand !== pending) return true
+        }
+        return false
+    }
+
+    const closeFilterEntries = async (keep: (filter: string) => boolean = () => false) => {
+        for (const filter of [...filterEntries.keys()]) {
+            if (!keep(filter)) await closeFilterEntry(filter)
+        }
+    }
+
+    const openWantedFilters = async () => {
+        if (wantsStar()) return
+        for (const filter of wantedFilters()) {
+            if (!(await openFilterEntry(filter))) return
+        }
+    }
+
+    // Bring the open entries in line with the counters. The single place
+    // entries are opened or closed, so a later caller on the work tail always
+    // observes the outcome of an earlier caller's in-flight change. Wanted
+    // entries open before unwanted ones close: an overlap only duplicates
+    // events, while a gap loses them. A filter found oversized while opening
+    // flips wantsStar, so '*' opens in this same pass.
+    const doReconcile = async () => {
+        await openWantedFilters()
+        if (wantsStar()) {
+            await doStartSubscription()
+            if (isSubscribed) await closeFilterEntries()
+        } else {
+            await doStopSubscription()
+            const wanted = wantedFilters()
+            await closeFilterEntries(filter => wanted.has(filter))
+        }
+        if (!anyEntryOpen() && !wantsStar() && wantedFilters().size === 0) {
+            clearSubscriptionPromise()
+            releaseAll()
+        }
+        if (expandDrifted()) {
+            enqueueSubscriptionWork(doRestartSubscription).catch(() => {})
+        }
+    }
+
+    // Close every open entry and reopen what the counters want, e.g. after
+    // the requested expand union grows. A no-op when nothing is live.
+    const doRestartSubscription = async () => {
+        if (!anyEntryOpen()) return
+        await doStopSubscription()
+        await closeFilterEntries()
+        clearSubscriptionPromise()
+        await doReconcile()
+    }
+
+    const reconcile = () => enqueueSubscriptionWork(doReconcile)
     const restartSubscription = () => enqueueSubscriptionWork(doRestartSubscription)
+
+    // A parent's hold on this collection as a relation target. Keeps sync
+    // alive and GC blocked like any subscriber. In collection mode the hold
+    // counts toward '*'; in query mode it is uncounted and the parent
+    // supplies the filters covering the rows it filed here.
+    function holdLive(): HeldTarget {
+        const counted = realtimeMode === 'collection'
+        if (counted) collectionModeSubscribers += 1
+        let subscription: ChangesSubscription
+        try {
+            subscription = originalSubscribeChanges(() => {}, { includeInitialState: false })
+        } catch (error) {
+            if (counted) collectionModeSubscribers -= 1
+            throw error
+        }
+        let current: string[] = []
+        let released = false
+        reconcile().catch(() => {})
+        return {
+            setFilters: filters => {
+                if (released) return
+                const next = [...new Set(filters)]
+                swapHoldFilterRefs(current, next)
+                current = next
+                reconcile().catch(() => {})
+            },
+            release: () => {
+                if (released) return
+                released = true
+                for (const filter of current) dropFilterRef(holdFilterRefs, filter)
+                current = []
+                if (counted) collectionModeSubscribers -= 1
+                subscription.unsubscribe()
+                reconcile().catch(() => {})
+            },
+        }
+    }
 
     // Record which expand paths a view has subscribed with at least once.
     // Eager collections cannot request per-subset options, so a wider union
@@ -1334,7 +1784,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // Wait for subscription to be established (for testing)
     const waitForSubscription = async (timeout = 5000): Promise<void> => {
-        if (isSubscribed) return
+        if (anyEntryOpen()) return
 
         if (!subscriptionPromise) {
             // No subscription in progress, wait for one to start
@@ -1362,29 +1812,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    // Manage subscription based on collection subscriber count
-    collection.on(
-        'subscribers:change',
-        (event: { subscriberCount: number; previousSubscriberCount: number }) => {
-            const newCount = event.subscriberCount
-            const previousCount = event.previousSubscriberCount
-
-            if (newCount > 0 && previousCount === 0) {
-                // First subscriber - start real-time subscription
-                startSubscription().catch(() => {})
-            } else if (newCount === 0 && previousCount > 0) {
-                // Last subscriber removed - stop real-time subscription
-                stopSubscription().catch(() => {})
-            }
-        }
-    )
-
     registerMarkInvalidationEvents(
         {
             onStatusChange: callback => collection.on('status:change', callback),
             onTruncate: callback => collection.on('truncate', callback),
         },
-        () => loadedSubsets.clear()
+        () => {
+            loadedSubsets.clear()
+            filedByTarget.clear()
+        }
     )
 
     // Add collectionName and subscription helpers
@@ -1392,11 +1828,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         collectionName,
         relationTargets,
         waitForSubscription,
-        isSubscribed: () => isSubscribed,
+        isSubscribed: () => anyEntryOpen(),
         heldRelationTargetCount: () => heldTargetSubscriptions.size,
         markSubsetLoaded,
         loadedSubsetCount,
+        holdLive,
         fetchRelations,
+        withRealtime,
     })
 
     return collection as unknown as BuiltCollection<RecordType>

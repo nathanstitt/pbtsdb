@@ -190,6 +190,10 @@ describe('Collection - Relations', () => {
 
         const factory = createCollectionFactory(queryClient)
         const bookTagsCollection = factory.create('book_tags', { syncMode: 'eager' })
+        // The parent holds the target live once its realtime entry opens, which
+        // would start the eager load and race the filing; keep the target's sync
+        // from ever starting so the filing must no-op.
+        vi.spyOn(bookTagsCollection._sync, 'startSync').mockImplementation(() => {})
         const booksCollection = factory.create('books', {
             syncMode: 'on-demand',
             relations: { book_tags_via_book: bookTagsCollection },
@@ -206,8 +210,7 @@ describe('Collection - Relations', () => {
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // book_tags_via_book was never actually filed into bookTagsCollection
-        // (eager, no subscriber, sync never started), so the fix in
-        // upsertExpandedField must not have marked the subset complete.
+        // (its sync never started), so the subset must not be marked complete.
         const notReadyWarnings = testLogger.messages.warn.filter(
             w => w.msg.includes('not syncing') && w.msg.includes('not yet ready')
         )

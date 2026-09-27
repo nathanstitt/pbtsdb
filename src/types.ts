@@ -6,6 +6,9 @@ import type {
     UpdateMutationFn,
 } from '@tanstack/db'
 
+/** Which rows a collection's realtime subscription covers. */
+export type RealtimeMode = 'collection' | 'query'
+
 // ============================================================================
 // Schema Type Definitions
 // ============================================================================
@@ -158,7 +161,18 @@ export interface ExpandTargetCollection {
     preload?: () => Promise<void>
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded?: (field: string, value: string) => void
+    /**
+     * pbtsdb-built targets: hold this collection live for a parent, with the
+     * filters covering the rows the parent filed here (query mode only).
+     */
+    holdLive?: () => HeldTarget
 }
+
+/**
+ * A parent's hold on a relation target, returned by `holdLive`.
+ * @internal
+ */
+export type HeldTarget = { setFilters: (filters: readonly string[]) => void; release: () => void }
 
 /**
  * Maps relation field names to the collections that receive their expanded records.
@@ -429,6 +443,29 @@ export interface CreateCollectionOptions<
      * ```
      */
     syncMode?: 'eager' | 'on-demand'
+
+    /**
+     * Which rows the realtime subscription covers.
+     *
+     * - `'collection'` (default): one subscription to every row.
+     * - `'query'`: one subscription per active query filter, using the same
+     *   filter the query's fetch sends. Requires `syncMode: 'on-demand'`.
+     *   An update that moves a row out of every active filter sends no
+     *   event; the row stays until its query refetches.
+     *
+     * A single query overrides this with `collection.withRealtime(mode)`.
+     *
+     * @default 'collection'
+     *
+     * @example
+     * ```ts
+     * const books = createCollection<Schema>(pb, queryClient)('books', {
+     *     syncMode: 'on-demand',
+     *     realtime: 'query',
+     * });
+     * ```
+     */
+    realtime?: RealtimeMode
 
     /**
      * Whether to ignore PocketBase auto-cancellation errors.

@@ -349,17 +349,14 @@ describe('Fetch relations', () => {
             })
         }, 15000)
 
-        it('throws for an undeclared path and for expanding a view', () => {
+        it('throws for an undeclared path and composes further fetchRelations', () => {
             const { books } = make()
             // @ts-expect-error runtime check of an undeclared path
             expect(() => books.fetchRelations('nope')).toThrow(
                 'Cannot expand "nope" on collection "books": segment "nope" is not a declared relation'
             )
             const view = books.fetchRelations('author')
-            // @ts-expect-error views are leaves
-            expect(() => view.fetchRelations('author')).toThrow(
-                'view of "books" cannot fetch further relations'
-            )
+            expect(view.fetchRelations('author')).toBe(view)
         })
 
         it('keys a view fetch by its expand string', async () => {
@@ -693,12 +690,13 @@ describe('Fetch relations', () => {
             const realSubscribe = pb
                 .collection('book_tags')
                 .subscribe.bind(pb.collection('book_tags'))
-            let failNext = false
+            let failing = false
+            let failures = 0
             const subscribeSpy = vi
                 .spyOn(pb.collection('book_tags'), 'subscribe')
                 .mockImplementation(async (...args) => {
-                    if (failNext) {
-                        failNext = false
+                    if (failing) {
+                        failures += 1
                         throw new Error('subscribe rejected')
                     }
                     return realSubscribe(...args)
@@ -718,8 +716,9 @@ describe('Fetch relations', () => {
                 await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
                 expect(internals(bookTags).heldRelationTargetCount()).toBe(1)
 
-                // The union grows, forcing a restart whose subscribe() rejects.
-                failNext = true
+                // The union grows, forcing a restart whose subscribe() rejects
+                // every time, so nothing is open afterwards.
+                failing = true
                 const second = renderHook(() =>
                     useLiveQuery(q =>
                         q
@@ -728,13 +727,16 @@ describe('Fetch relations', () => {
                             .limit(1)
                     )
                 )
-                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), { timeout: 10000 })
+                await waitFor(() => expect(failures).toBeGreaterThan(0), { timeout: 10000 })
+                await waitFor(() => expect(bookTags.isSubscribed()).toBe(false), {
+                    timeout: 10000,
+                })
 
                 first.unmount()
                 second.unmount()
 
                 // The real stop must still release every held target, even though
-                // the failed restart already cleared isSubscribed/unsubscribeFn.
+                // a restart's subscribe() rejected along the way.
                 await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(0), {
                     timeout: 10000,
                 })

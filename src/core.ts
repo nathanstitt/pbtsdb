@@ -37,6 +37,7 @@ export type {
     ExtractRecordType,
     ExtractRelations,
     OmittableFields,
+    RealtimeMode,
     RelationAsCollection,
     RelationsConfig,
     SchemaDeclaration,

@@ -358,6 +358,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `alwaysFetchRelations?: readonly string[]` - Expand paths fetched with every request and filed into their `relations` targets; never kept on the row
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
+- `realtime?: 'collection' | 'query'` - Which rows the realtime subscription covers (default: `'collection'`; `'query'` requires `syncMode: 'on-demand'`; see [Realtime Scope](#realtime-scope))
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable
@@ -601,6 +602,54 @@ Wait for subscription to be established (useful in tests).
 await collection.waitForSubscription(); // Wait with default 5s timeout
 await collection.waitForSubscription(10000); // Wait with custom timeout (ms)
 ```
+
+#### Realtime Scope
+
+By default a collection subscribes to every row (`realtime: 'collection'`).
+An on-demand collection can instead subscribe per active query, using the
+same filter its fetch sends:
+
+```typescript
+const books = c('books', { syncMode: 'on-demand', realtime: 'query' });
+
+// subscribes with filter genre = "Fantasy"
+useLiveQuery((q) => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')));
+```
+
+One PocketBase subscription is opened per distinct filter string and closed
+when the last query using it unmounts. A query with no `where` subscribes to
+the whole collection. While any whole-collection subscription is open, the
+filtered ones stay closed.
+
+PocketBase caps a realtime subscription topic at 2500 characters. An id
+subset is split into smaller chunks for realtime than for fetches, one
+subscription per chunk. A filter whose topic is still too long (a long
+non-subset `where`, or one combined with a factory `subscribeOptions` filter)
+is not sent. The collection logs a warning and subscribes to every row while
+that filter is in use.
+
+A `'query'` collection held live as a relation target subscribes only to the
+rows the parent filed into it: the expanded records' ids for a forward
+relation (`author`), or `field = parentId` for a back-relation
+(`books_via_author`), so new children still arrive. A `'collection'` target
+subscribes to every row while held, as before.
+
+Override the mode for one query with `withRealtime()`, which returns a view
+and composes with `fetchRelations()` in either order:
+
+```typescript
+useLiveQuery((q) => q.from({ b: books.withRealtime('collection') }));
+useLiveQuery((q) => q.from({ b: books.fetchRelations('author').withRealtime('query') }));
+```
+
+**Known limit.** PocketBase checks an update against the row's state after
+the change. An update that moves a row out of every active filter sends no
+event, so the row stays in the store until its query refetches. Deletes and
+creates are delivered correctly. Use `'collection'` mode where that matters.
+
+A held `'query'` target keeps the ids filed into it until the parent
+collection is cleaned up, so a long session with many distinct filed ids
+opens many subscriptions, one per id chunk.
 
 #### Subscription Options
 

@@ -9,6 +9,7 @@ import type {
     ExtractRecordType,
     InsertInputOf,
     PbMeta,
+    RealtimeMode,
     RelationsOf,
     SchemaDeclaration,
 } from './types'
@@ -19,8 +20,8 @@ export type { BaseRecord, CreateCollectionOptions, SchemaDeclaration } from './t
 /**
  * A pbtsdb collection or view: a TanStack DB collection over
  * `ExtractRecordType<Schema, C>` rows, plus pbtsdb's subscription helpers.
- * Views are created by {@link PbCollection.fetchRelations} and are leaves:
- * they have no further `fetchRelations()`.
+ * Views are created by {@link PbCollectionView.fetchRelations} and
+ * {@link PbCollectionView.withRealtime}, and compose in either order.
  */
 export type PbCollectionView<
     Schema extends SchemaDeclaration,
@@ -53,17 +54,6 @@ export type PbCollectionView<
     readonly loadedSubsetCount: () => number
     /** @internal phantom; never present at runtime */
     readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
-}
-
-/**
- * The collection returned by {@link createCollection}: a {@link PbCollectionView}
- * plus `fetchRelations()` for per-query views.
- */
-export type PbCollection<
-    Schema extends SchemaDeclaration,
-    C extends keyof Schema & string,
-    Opts,
-> = PbCollectionView<Schema, C, Opts> & {
     /**
      * A view of this collection whose queries also fetch `paths` and file the
      * expanded records into their target collections. Rows are unchanged; read
@@ -72,7 +62,24 @@ export type PbCollection<
     fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
         ...paths: P
     ): PbCollectionView<Schema, C, Opts>
+    /**
+     * A view of this collection whose live queries subscribe to realtime in
+     * `mode`, overriding the collection's `realtime` option for those queries.
+     * `'query'` requires `syncMode: 'on-demand'`. Returns the collection itself
+     * when `mode` equals the collection default.
+     */
+    withRealtime(mode: RealtimeMode): PbCollectionView<Schema, C, Opts>
 }
+
+/**
+ * The collection returned by {@link createCollection}. Identical to
+ * {@link PbCollectionView}; kept as the name for the root collection.
+ */
+export type PbCollection<
+    Schema extends SchemaDeclaration,
+    C extends keyof Schema & string,
+    Opts,
+> = PbCollectionView<Schema, C, Opts>
 
 type AlwaysFetchRelationsCheck<Opts> = {
     alwaysFetchRelations?: readonly ExpandPath<RelationsOf<Opts>>[]
