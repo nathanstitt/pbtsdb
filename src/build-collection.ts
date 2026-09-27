@@ -75,20 +75,12 @@ function isObject(value: unknown): value is object {
     return typeof value === 'object' && value !== null
 }
 
-// A correlated subquery over a relation target (e.g. a `materialize` include
-// keyed off the parent row's id) can have its own `loadSubset` dispatched by
-// TanStack DB's query planner before the parent's own fetch — the one that
-// would file and mark this exact subset — has resolved. Keyed by the target
-// collection instance and via-field, this lets the target's own fetch wait
-// for a same-tick parent fetch that might satisfy it instead of racing it.
+// Parent fetches that may file and mark a subset on a target, keyed by target
+// and via-field. A target's own fetch for that field waits for them instead of
+// racing them (see docs/internals.md, "Pending filings").
 const pendingFilings = new WeakMap<object, Map<string, Promise<void>[]>>()
 
-// Called by a PARENT collection's own fetch, on the relation TARGET instance,
-// to register that it might mark `field` once that fetch's upsertExpanded
-// settles. The target's own fetchItems awaits these (see awaitPendingFiling)
-// before issuing a request for a not-yet-loaded subset on that field. Returns
-// an unregister function the caller runs once its fetch settles, so a
-// long-lived target never accumulates promises for fetches that finished.
+// Returns the unregister function the parent runs once its fetch settles.
 function registerPendingFiling(target: object, field: string, settles: Promise<void>): () => void {
     let byField = pendingFilings.get(target)
     if (!byField) {
@@ -582,12 +574,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         invalidateMarkedQueries((field, value) => loadedSubsets.get(field)?.has(value) ?? false)
     }
 
-    // A row leaving the store other than by a server-confirmed delete means the
-    // subsets it belonged to are no longer complete. Deferred with
-    // queueMicrotask: this runs inside the guarded sync write, i.e. inside
-    // TanStack's write batch, and invalidateQueries can start a queryFn
-    // synchronously up to its first await — which must not re-enter
-    // fetchRecords/registerPendingFiling mid-batch.
+    // A row pruned from the store leaves its subsets incomplete. The
+    // invalidation is deferred: this runs inside TanStack's write batch, and
+    // invalidateQueries may start a queryFn synchronously.
     function forgetMarksFor(row: unknown): void {
         if (!row || typeof row !== 'object') return
         for (const [field, marked] of loadedSubsets) {
@@ -610,12 +599,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return rows
     }
 
-    // A row already in the store was fetched (and filed) with this collection's own
-    // alwaysFetchRelations, so that part of `expand` is already reflected. Only
-    // `request.expand` — the extra paths a fetchRelations() view adds — may not have
-    // been filed for this row yet, so only that forces a real fetch. An empty subset
-    // (e.g. `in(id, [])`) selects nothing and must never fall through to a request,
-    // which an empty id filter would turn into "fetch everything".
+    // Stored rows were filed with alwaysFetchRelations already; only a view's
+    // extra `request.expand` forces a fetch. An empty subset selects nothing
+    // and must never become a request, which would fetch everything.
     function idSubsetFromStore(
         subset: WhereSubset,
         limit: number | undefined
@@ -655,14 +641,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     async function fetchItems(request: PbRequest): Promise<RecordType[]> {
         const served = servedFromStore(request)
         if (served) return served
-        // A same-tick parent fetch may be about to file and mark exactly this
-        // subset (see pendingFilings above); give it the chance before fetching.
-        // Invariant: a registering fetch never waits. This fetch's own active
-        // expand (alwaysFetchRelations included, not just request.expand) may
-        // itself register pending filings on other targets (backRelationTargetsFor
-        // below, in fetchRecords); waiting here too would let two mutually
-        // back-related collections each register before either awaits, and then
-        // await each other forever.
+        // Give a same-tick parent fetch the chance to file this subset first.
+        // Invariant: a fetch that registers pending filings never waits on
+        // them, or two mutually back-related collections deadlock.
         if (
             request.subset &&
             request.subset.field !== 'id' &&
@@ -703,25 +684,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return items
     }
 
-    // Each in-flight fetch registers a set here before its request goes out;
-    // authoritative local writes (mutation write-backs and realtime echoes)
-    // add the confirmed record ids to every registered set. An id added
-    // after a fetch was issued is newer than that fetch's view of the
-    // server, so the result cannot speak to the id's absence. The merge
-    // deliberately ignores the fetch's filter: the manual-write cache push
-    // grants every active query ownership of every synced row, so even a
-    // row outside this subset's filter must be shielded from its reconcile.
-    //
-    // Why this exists: @tanstack/query-db-collection's applySuccessfulResult
-    // reconcile-DELETES every row a query owns that its result omits, and the
-    // synced-write guard below deliberately exempts deletes. A subset read
-    // issued before a row existed can therefore resolve late and delete the
-    // just-confirmed row (rows a query owns include rows pushed into its
-    // cache by the manual-write path that runs on every write-back). The fix
-    // is applied to the RESULT rather than the delete: fetchRecords merges
-    // such rows back in, which both prevents the delete and keeps the row
-    // owned by the query — a dropped delete alone would still strip
-    // ownership and leave the row to a later GC pass.
+    // One set per in-flight fetch; confirmed writes (write-backs, echoes) add
+    // their ids to every set. A fetch issued before a row was confirmed cannot
+    // speak to its absence, so its result is merged with those rows before
+    // query-db-collection reconciles (see docs/internals.md, "Confirmed rows
+    // and in-flight fetches").
     const inFlightConfirmedIds = new Set<Set<string>>()
 
     function markConfirmedPresent(records: RecordType[]): void {
@@ -783,14 +750,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     error instanceof Error &&
                     error.message.includes('autocancelled')
                 ) {
-                    // PocketBase auto-cancelled this in-flight read because a newer
-                    // request superseded it. Resolve to THIS subset's own cached rows
-                    // (keyed by the full query key) so the reconcile is a no-op for the
-                    // subset. The base key ([collectionName]) holds the full-collection
-                    // snapshot — returning that here would let applySuccessfulResult
-                    // reconcile foreign rows into a filtered subset (re-introducing rows
-                    // the subset's filter excludes). Re-throwing instead would error the
-                    // subset and empty/retry it.
+                    // Superseded by a newer request. Resolve to this subset's own
+                    // cached rows so its reconcile is a no-op; the base key's
+                    // snapshot would reconcile foreign rows into the subset.
                     return withRowsConfirmedMidFlight(
                         queryClient.getQueryData<RecordType[]>(queryKey) ?? [],
                         confirmedMidFlight
@@ -840,46 +802,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         onDelete: resolveHandler(options?.onDelete, defaultDelete),
     })
 
-    // queryCollectionOptions consumes `gcTime` for the underlying react-query
-    // observer and never forwards it to the collection options it returns, so
-    // the DB collection's own lifecycle GC (what controls when an idle
-    // collection reaches 'cleaned-up') would silently fall back to its
-    // 5-minute default. Re-apply it explicitly so a caller-supplied value
-    // reaches both layers.
+    // queryCollectionOptions keeps `gcTime` for its react-query observer and
+    // does not forward it to the collection's own lifecycle GC.
     const collectionOptions =
         options?.collectionOptions?.gcTime === undefined
             ? queryCollectionConfig
             : { ...queryCollectionConfig, gcTime: options.collectionOptions.gcTime }
 
-    // Write the server's copy of a mutation's rows back AFTER the transaction
-    // has persisted — never from inside its handler.
-    //
-    // TanStack DB keeps a completed transaction's optimistic draft visible
-    // until a synced write for the key arrives, so a record the server
-    // fills in (a number, a timestamp) reaches the screen only through that
-    // later synced write. A write-back issued from inside the handler lands
-    // while the transaction is still `persisting`; TanStack applies it,
-    // then on completion re-adds the draft as a "confirmed but unsynced"
-    // overlay and waits for a synced write that already happened. If the
-    // realtime echo has ALSO already been consumed (it arrives before the
-    // create resolves under load, and an echo carrying the same `updated`
-    // as the write-back is dropped as stale), nothing ever clears the
-    // overlay: the row shows the draft — minus every server-assigned field
-    // — until a reload. Deferring the write-back to after persistence makes
-    // it the synced write TanStack is waiting for.
-    //
-    // `markConfirmedPresent` still runs immediately: the in-flight fetch
-    // bookkeeping needs to know the rows are confirmed the moment the
-    // server said so, not a tick later.
-    //
-    // The deferred write itself: a no-op until the collection is ready
-    // (writing into the synced store before sync has initialized throws,
-    // and with no live query there is nothing to keep in sync — the next
-    // query fetches the already-persisted state; the transaction can
-    // outlive the last subscriber), and it drops any row the store already
-    // supersedes — a realtime echo may have landed a newer copy while the
-    // transaction was settling, and writing the response over it would
-    // revert the row.
+    // Write the server's copy of a mutation's rows back only after the
+    // transaction has persisted: a synced write that lands while it is still
+    // persisting leaves the optimistic draft on screen until a reload (see
+    // docs/internals.md, "Write-back timing"). Rows are marked confirmed at
+    // once; the write skips a collection that is not ready and any row the
+    // store already supersedes.
     function writeBackAfterPersisted(
         transaction: { isPersisted: { promise: Promise<unknown> } },
         records: RecordType[]
@@ -898,13 +833,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         )
     }
 
-    // Set while pbtsdb performs its own authoritative writes (mutation-response
-    // write-backs and realtime echoes) through collection.utils.*. Those writes
-    // share the same sync `write` primitive as the query-result reconcile path
-    // (see the sync.sync wrapper below), so the guard uses this flag to tell them
-    // apart: pbtsdb's own writes are exempt from the optimistic-pending arm of the
-    // guard (the mutation-response write-back intentionally lands the confirmed
-    // value while that very mutation's optimistic overlay is still in flight).
+    // Set during pbtsdb's own writes (write-backs and echoes). They share the
+    // sync `write` primitive with query-result reconciles, and only the latter
+    // must yield to a pending optimistic mutation.
     let applyingOwnWrite = false
     function writeOwn(fn: () => void): void {
         applyingOwnWrite = true
@@ -923,25 +854,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return idOf(op.value) ?? null
     }
 
-    // Guard the synced write path that pbtsdb does not otherwise control:
-    // @tanstack/query-db-collection's applySuccessfulResult reconciles every query
-    // result into the synced store via this same `write`, with no recency or
-    // optimistic check. Under on-demand contention a single-row/subset read can
-    // resolve with a pre-mutation row and land here after the row already moved on,
-    // reverting it. We drop such a synced insert/update when either it targets a key
-    // with a pending optimistic mutation (see the arm below) or it is strictly older
-    // than the synced row (an out-of-order read). pbtsdb's own writes
-    // (applyingOwnWrite) skip the optimistic arm; they are staleness-filtered
-    // upstream by writeBackAfterPersisted/isStaleEcho.
+    // query-db-collection reconciles every query result into the synced store
+    // with no recency check, so a read that resolves late can revert a row.
+    // Drop a synced insert/update that targets a key with a pending optimistic
+    // mutation, or that is strictly older than the synced row.
     function shouldDropSyncedWrite(op: { type: string; value?: unknown; key?: unknown }): boolean {
         const key = syncedWriteKey(op)
         if (key === null) return false
-        // Optimistic arm: only guard a key already present in the synced store. A
-        // write to a key the synced store doesn't yet hold is populating it (e.g. the
-        // initial fetch landing a row the user just optimistically inserted) and must
-        // pass — dropping it would leave the row absent once the overlay clears. A
-        // write to a key already synced, while an optimistic mutation is pending, is a
-        // racing read that would revert the in-flight value, so drop it.
+        // A write to a key the synced store lacks is populating it and must
+        // pass, or the row is absent once the overlay clears.
         if (
             !applyingOwnWrite &&
             hasPendingOptimisticMutation(key) &&
@@ -960,15 +881,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return false
     }
 
-    // A view's subscription is tagged in viewTags (see createView below); this
-    // adds the view's expand paths to load options for a tagged subscription so
-    // loadSubset/unloadSubset fetch (and later untrack) with the right `expand`.
-    // A subscription's initial snapshot loads synchronously inside
-    // collection.subscribeChanges, before that call returns the subscription
-    // object a view tags in viewTags — so that first loadSubset cannot yet be
-    // looked up by identity. While a view's subscribeChanges call is on the
-    // stack, its paths are used for load options with no tagged subscription;
-    // every later call (untracked demand growth, unloadSubset) is tagged by then.
+    // A subscription's first loadSubset runs inside subscribeChanges, before
+    // the subscription object exists to tag. While a view's subscribeChanges
+    // is on the stack its tag applies to untagged load options.
     let subscribingViewTag: ViewTag | undefined
 
     function tagFor(opts: LoadSubsetOptions): ViewTag | undefined {
@@ -1229,22 +1144,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return state.optimisticUpserts.has(key) || state.optimisticDeletes.has(key)
     }
 
-    // A server record is stale relative to the synced store when an entry for
-    // the same key already holds a newer `updated` timestamp. PocketBase can
-    // redeliver or reorder realtime echoes (and a slow mutation response can
-    // resolve after a newer echo), so applying an older write would revert the
-    // row. ISO 8601 timestamps sort lexicographically, so string comparison is
-    // chronological. When either side lacks a comparable timestamp we cannot
-    // tell, so we treat the write as fresh and let it through.
-    //
-    // Strictly older, never equal. PocketBase stamps `updated` to the
-    // millisecond and bumps it on every write, so an equal timestamp is the
-    // same version of the row: re-landing it changes nothing, and it is what
-    // lets a confirmed value clear a lingering optimistic overlay. (An earlier
-    // `<=` variant on the query-result path guarded against a read carrying
-    // old content under a new timestamp, which a real server cannot produce;
-    // the revert it chased was the write-back racing its own transaction,
-    // fixed in writeBackAfterPersisted.)
+    // Stale means strictly older by `updated` than the synced row; ISO 8601
+    // strings compare chronologically. Equal is the same version and must
+    // pass, since that is what clears a lingering optimistic overlay. Without
+    // a timestamp on either side the write is treated as fresh.
     function isStaleServerRecord(record: unknown): boolean {
         const id = idOf(record)
         if (!id) return false
@@ -1255,12 +1158,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return incoming < current
     }
 
-    // Decide whether a realtime echo should be dropped as stale. Under realtime
-    // contention PocketBase can redeliver or reorder events, so an echo carrying
-    // a pre-mutation value can arrive after the row already moved on (e.g. the
-    // local mutation that just wrote the fresh value back). Applying a
-    // strictly-older create/update echo would revert the row, so it is ignored.
-    // Deletes are terminal and not timestamp-guarded.
+    // PocketBase can redeliver or reorder echoes; a strictly older
+    // create/update would revert the row. Deletes are terminal.
     function isStaleEcho(event: RecordSubscription<RecordType>): boolean {
         if (event.action !== 'create' && event.action !== 'update') return false
         if (!isStaleServerRecord(event.record)) return false
@@ -1315,12 +1214,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         subscriptionWaiters.clear()
     }
 
-    // All start/stop/restart work is serialized onto this promise tail so
-    // overlapping callers (two views created back-to-back, a reconnect
-    // racing a widened expand) never open or close entries concurrently —
-    // the tail is what lets a later caller's restart observe the outcome of
-    // an earlier caller's in-flight start. Errors are caught and logged so a
-    // failed step never poisons the tail for later work.
+    // Every start/stop/restart runs on this tail, so entries are never opened
+    // or closed concurrently. A failed step is logged and never poisons it.
     let subscriptionWork: Promise<void> = Promise.resolve()
     function enqueueSubscriptionWork(fn: () => Promise<void>): Promise<void> {
         const run = subscriptionWork.then(fn, fn).catch(error => {
@@ -1330,17 +1225,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return run
     }
 
-    // Handle real-time events from PocketBase.
-    //
-    // The write primitives differ in how they treat a key that is absent from
-    // the *synced* store (collection._state.syncedData, which is what they
-    // validate against — not the optimistic view exposed by collection.has()):
-    //   - writeInsert / writeUpsert: idempotent, never throw on an absent key.
-    //   - writeDelete: throws DeleteOperationItemNotFoundError on an absent key.
-    // So only the delete branch can throw, and we make it idempotent below.
-    // Runs BEFORE the stale-echo filter: even a stale create/update echo
-    // proves the server holds the row. Delete echoes need no marking — the
-    // merge checks the synced store, which the delete's writeDelete empties.
+    // Runs before the stale-echo filter: even a stale create/update echo
+    // proves the server holds the row. Delete echoes need no marking; the
+    // merge checks the synced store, which the delete empties.
     function markEchoPresence(event: RecordSubscription<RecordType>): void {
         if (event.action !== 'delete') markConfirmedPresent([event.record])
     }
@@ -1370,21 +1257,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 })
             )
         } catch (error) {
-            // How a delete echo throws: writeDelete fails when its key is already
-            // gone from the synced store. That happens when something removed it
-            // before the echo arrived:
-            //   1. on-demand sync — each useLiveQuery refetches with a server
-            //      filter, and query-db-collection prunes rows no longer owned by
-            //      any active query out of the synced store. If that prune (or a
-            //      concurrent query's reconcile) runs before this client's own
-            //      delete echo lands, the key is already gone -> throw. This is
-            //      the on-demand-only race; eager collections have no such second
-            //      writer to the synced store, so they cannot hit it.
-            //   2. a re-delivered SSE delete (e.g. after a reconnect) for a key
-            //      that was already deleted -> throw on the second echo.
-            // In both cases the record is already in its intended end state
-            // (gone), so the echo is a no-op and the error is safe to ignore.
-            // Anything that is NOT a missing-key delete is a real error: rethrow.
+            // writeDelete throws when a prune or an earlier echo already removed
+            // the key; the row is gone either way, so the echo is a no-op.
             if (error instanceof DeleteOperationItemNotFoundError) {
                 logger.debug('Ignoring delete echo for already-removed record', {
                     collectionName,
@@ -1663,12 +1537,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    // Bring the open entries in line with the counters. The single place
-    // entries are opened or closed, so a later caller on the work tail always
-    // observes the outcome of an earlier caller's in-flight change. Wanted
-    // entries open before unwanted ones close: an overlap only duplicates
-    // events, while a gap loses them. A filter found oversized while opening
-    // flips wantsStar, so '*' opens in this same pass.
+    // The single place entries are opened or closed. Wanted entries open
+    // before unwanted ones close: an overlap duplicates events, a gap loses
+    // them. A filter found oversized while opening flips wantsStar in this pass.
     const doReconcile = async () => {
         await openWantedFilters()
         if (wantsStar()) {
