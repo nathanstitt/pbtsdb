@@ -3,16 +3,17 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
-    createCollectionFactory,
     createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Collection - Query Operators', () => {
     let queryClient: QueryClient
@@ -272,7 +273,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should throw error for unsupported operators', async () => {
-        const factory = createCollectionFactory(queryClient)
+        const c = createCollection<Schema>(pb, queryClient)
 
         // This test verifies that unsupported operators are rejected
         // by the query compilation, not by our converter
@@ -282,7 +283,7 @@ describe('Collection - Query Operators', () => {
             renderHook(() =>
                 useLiveQuery(q =>
                     q
-                        .from({ books: factory.create('books') })
+                        .from({ books: c('books') })
                         // Testing unsupported structure
                         // biome-ignore lint/suspicious/noExplicitAny: deliberately bypassing types to assert the converter rejects an unsupported operator at runtime
                         .where(() => ({ op: 'unsupported', field: ['name'], value: 'test' }) as any)

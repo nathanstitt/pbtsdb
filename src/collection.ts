@@ -2,7 +2,11 @@ import type { Collection } from '@tanstack/db'
 import type { QueryCollectionUtils } from '@tanstack/query-db-collection'
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
-import { buildCollection, type CreateCollectionFactoryOptions } from './build-collection'
+import {
+    buildCollection,
+    type CollectionSubscriptionHelpers,
+    type CreateCollectionFactoryOptions,
+} from './build-collection'
 import type {
     CreateCollectionOptions,
     ExpandPath,
@@ -37,39 +41,28 @@ export type PbCollectionView<
     >,
     never,
     InsertInputOf<Schema, C, Opts>
-> & {
-    /** The PocketBase collection name */
-    readonly collectionName: C
-    /** Wait for the real-time subscription to be established (useful in tests) */
-    waitForSubscription: (timeout?: number) => Promise<void>
-    /** Whether the collection has an active real-time subscription */
-    isSubscribed: () => boolean
-    /** @internal relation targets declared through `relations` */
-    readonly relationTargets: Record<string, unknown> | undefined
-    /** @internal number of relation targets currently held live */
-    readonly heldRelationTargetCount: () => number
-    /** @internal record that every row with `field === value` is now in this collection's store */
-    readonly markSubsetLoaded: (field: string, value: string) => void
-    /** @internal number of field/value pairs currently marked loaded */
-    readonly loadedSubsetCount: () => number
-    /** @internal phantom; never present at runtime */
-    readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
-    /**
-     * A view of this collection whose queries also fetch `paths` and file the
-     * expanded records into their target collections. Rows are unchanged; read
-     * related records through `materialize()`, a join, or the target's `get()`.
-     */
-    fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
-        ...paths: P
-    ): PbCollectionView<Schema, C, Opts>
-    /**
-     * A view of this collection whose live queries subscribe to realtime in
-     * `mode`, overriding the collection's `realtime` option for those queries.
-     * `'query'` requires `syncMode: 'on-demand'`. Returns the collection itself
-     * when `mode` equals the collection default.
-     */
-    withRealtime(mode: RealtimeMode): PbCollectionView<Schema, C, Opts>
-}
+> &
+    CollectionSubscriptionHelpers & {
+        /** The PocketBase collection name */
+        readonly collectionName: C
+        /** @internal phantom; never present at runtime */
+        readonly __pbtsdb: PbMeta<Schema, C, RelationsOf<Opts>>
+        /**
+         * A view of this collection whose queries also fetch `paths` and file the
+         * expanded records into their target collections. Rows are unchanged; read
+         * related records through `materialize()`, a join, or the target's `get()`.
+         */
+        fetchRelations<const P extends readonly ExpandPath<RelationsOf<Opts>>[]>(
+            ...paths: P
+        ): PbCollectionView<Schema, C, Opts>
+        /**
+         * A view of this collection whose live queries subscribe to realtime in
+         * `mode`, overriding the collection's `realtime` option for those queries.
+         * `'query'` requires `syncMode: 'on-demand'`. Returns the collection itself
+         * when `mode` equals the collection default.
+         */
+        withRealtime(mode: RealtimeMode): PbCollectionView<Schema, C, Opts>
+    }
 
 /**
  * The collection returned by {@link createCollection}. Identical to

@@ -3,18 +3,18 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
     pb,
 } from './helpers'
-import type { Books } from './schema'
+import type { Books, Schema } from './schema'
 
 /**
  * Regression coverage for the stale-ABSENCE delete: the missing arm of the
@@ -62,7 +62,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
 
     it('keeps a row confirmed while the subset fetch was in flight', async () => {
         const slug = getTestSlug('absent')
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -132,7 +132,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         // last confirmed write, its result speaks authoritatively — an absence
         // must still prune, or moved/deleted rows would be retained forever.
         const slug = getTestSlug('prune')
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })

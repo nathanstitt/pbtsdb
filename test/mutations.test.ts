@@ -3,19 +3,18 @@ import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { RecordService } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
     pb,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
-import type { Books } from './schema'
+import type { Books, Schema } from './schema'
 
 describe('Collection - Mutations', () => {
     let queryClient: QueryClient
@@ -38,8 +37,8 @@ describe('Collection - Mutations', () => {
     })
 
     it('should support insert mutations with automatic PocketBase sync', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const collection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const collection = c('books', {
             omitOnInsert: ['created', 'updated'] as const,
         })
 
@@ -83,8 +82,8 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should support update mutations on existing records', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const collection = factory.create('books', { syncMode: 'eager' })
+        const c = createCollection<Schema>(pb, queryClient)
+        const collection = c('books', { syncMode: 'eager' })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
 
@@ -115,8 +114,8 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should update liveQuery data when a record is inserted', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const collection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const collection = c('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -177,8 +176,8 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should handle insert and delete in same batch (optimistic cancellation)', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const collection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const collection = c('books', {
             syncMode: 'eager',
             onInsert: async () => {},
             onUpdate: async () => {},
@@ -195,7 +194,7 @@ describe('Collection - Mutations', () => {
             },
             { timeout: 10000 }
         )
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         const initialCount = result.current.data.length
 
         const authorId = await getTestAuthorId()
@@ -251,13 +250,13 @@ describe('Collection - Mutations', () => {
             return realSubscribe.call(this, topic, callback, options)
         })
 
-        const factory = createCollectionFactory(queryClient)
-        const collection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const collection = c('books', {
             omitOnInsert: ['created', 'updated'] as const,
         })
         // The subscription starts with the first live query, not on preload.
         const { unmount } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         expect(echo).not.toBeNull()
 
         const realCreate = RecordService.prototype.create
@@ -302,14 +301,14 @@ describe('Collection - Mutations', () => {
 
     describe('refetchOnMutation behavior', () => {
         it('default (false) — insert does not trigger a refetch', async () => {
-            const factory = createCollectionFactory(queryClient)
-            const collection = factory.create('books', {
+            const c = createCollection<Schema>(pb, queryClient)
+            const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })
 
             const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
             await waitForLoadFinish(result)
-            await waitForSubscription(collection)
+            await collection.waitForSubscription()
 
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
 
@@ -337,14 +336,14 @@ describe('Collection - Mutations', () => {
         }, 15000)
 
         it('default (false) — update does not trigger a refetch', async () => {
-            const factory = createCollectionFactory(queryClient)
-            const collection = factory.create('books', {
+            const c = createCollection<Schema>(pb, queryClient)
+            const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })
 
             const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
             await waitForLoadFinish(result)
-            await waitForSubscription(collection)
+            await collection.waitForSubscription()
 
             const authorId = await getTestAuthorId()
             const seedIsbn = getTestSlug('nru')
@@ -380,14 +379,14 @@ describe('Collection - Mutations', () => {
         }, 15000)
 
         it('default (false) — delete does not trigger a refetch', async () => {
-            const factory = createCollectionFactory(queryClient)
-            const collection = factory.create('books', {
+            const c = createCollection<Schema>(pb, queryClient)
+            const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })
 
             const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
             await waitForLoadFinish(result)
-            await waitForSubscription(collection)
+            await collection.waitForSubscription()
 
             const authorId = await getTestAuthorId()
             const seed = await pb.collection('books').create({

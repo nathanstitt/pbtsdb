@@ -125,47 +125,36 @@ export type ExcludeUndefined<T> = T extends infer U | undefined ? U : T
 export type RelationAsCollection<T> =
     T extends Array<infer U>
         ? U extends object
-            ? Collection<U, string | number, any, any, any>
-            : Collection<object, string | number, any, any, any>
+            ? Collection<U, string | number, any, any, any> & RelationTarget
+            : Collection<object, string | number, any, any, any> & RelationTarget
         : T extends object
-          ? Collection<T, string | number, any, any, any>
-          : Collection<object, string | number, any, any, any>
+          ? Collection<T, string | number, any, any, any> & RelationTarget
+          : Collection<object, string | number, any, any, any> & RelationTarget
 // biome-ignore-end lint/suspicious/noExplicitAny: see above
 
 /**
- * Runtime representation of a collection that can receive upserted expand data.
- * This is the minimal interface needed for the LoaderHost to insert expanded records.
+ * What a pbtsdb collection exposes to a parent that files expanded rows into
+ * it. Every value in `relations` implements it; `createCollection` builds one.
  * @internal
  */
-export interface ExpandTargetCollection {
-    utils?: {
-        writeUpsert: (records: object[]) => void
-    }
-    isReady: () => boolean
-    _sync: {
-        startSync: () => Promise<void>
-    }
-    config?: {
-        syncMode?: 'eager' | 'on-demand'
-    }
-    /** Relation targets of this collection, when it was built by pbtsdb. */
-    relationTargets?: Record<string, ExpandTargetCollection>
-    /** Subscribe without requesting data; keeps the target live while held. */
-    subscribeChanges?: (
-        callback: () => void,
-        options: { includeInitialState: false }
-    ) => { unsubscribe: () => void }
-    subscriberCount?: number
-    status?: string
-    /** Resolves once the collection's first load is ready (eager mode). */
-    preload?: () => Promise<void>
-    /** Record that every row with `field === value` is now in this collection's store. */
-    markSubsetLoaded?: (field: string, value: string) => void
+export interface RelationTarget {
+    /** Relation targets of this collection, for nested expand paths. */
+    readonly relationTargets: Record<string, RelationTarget> | undefined
+    /** Upsert filed rows into the store. False when the store cannot take them yet. */
+    writeFiled: (records: object[]) => Promise<boolean>
     /**
-     * pbtsdb-built targets: hold this collection live for a parent, with the
-     * filters covering the rows the parent filed here (query mode only).
+     * A parent's fetch may file and mark `field` once `settles` resolves; the
+     * target's own fetch for that subset waits for it (see docs/internals.md,
+     * "Pending filings"). Returns the unregister function.
      */
-    holdLive?: () => HeldTarget
+    expectFiling: (field: string, settles: Promise<void>) => () => void
+    /** Record that every row with `field === value` is now in this collection's store. */
+    markSubsetLoaded: (field: string, value: string) => void
+    /**
+     * Hold this collection live for a parent, with the filters covering the
+     * rows the parent filed here (query mode only).
+     */
+    holdLive: () => HeldTarget
 }
 
 /**

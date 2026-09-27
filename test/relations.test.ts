@@ -3,11 +3,11 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestLogger,
     createTestQueryClient,
     pb,
@@ -15,6 +15,7 @@ import {
     setLogger,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Collection - Relations', () => {
     let queryClient: QueryClient
@@ -40,11 +41,11 @@ describe('Collection - Relations', () => {
     })
 
     it('should join books with authors using manual join pattern', async () => {
-        const factory = createCollectionFactory(queryClient)
+        const c = createCollection<Schema>(pb, queryClient)
 
         // Create collections with relations config
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', { syncMode: 'eager' })
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', { syncMode: 'eager' })
 
         const { result } = renderHook(() =>
             useLiveQuery(q =>
@@ -95,9 +96,9 @@ describe('Collection - Relations', () => {
     }, 15000)
 
     it('should auto-expand relations when configured with alwaysFetchRelations', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],
@@ -116,9 +117,9 @@ describe('Collection - Relations', () => {
     })
 
     it('should filter on relation fields with auto-expand', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],
@@ -158,9 +159,9 @@ describe('Collection - Relations', () => {
     })
 
     it('should warn when an eager expand target has not started', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],
@@ -188,13 +189,13 @@ describe('Collection - Relations', () => {
         })
         if (!seeded) throw new Error('seed data has no book with tags')
 
-        const factory = createCollectionFactory(queryClient)
-        const bookTagsCollection = factory.create('book_tags', { syncMode: 'eager' })
+        const c = createCollection<Schema>(pb, queryClient)
+        const bookTagsCollection = c('book_tags', { syncMode: 'eager' })
         // The parent holds the target live once its realtime entry opens, which
         // would start the eager load and race the filing; keep the target's sync
         // from ever starting so the filing must no-op.
         vi.spyOn(bookTagsCollection._sync, 'startSync').mockImplementation(() => {})
-        const booksCollection = factory.create('books', {
+        const booksCollection = c('books', {
             syncMode: 'on-demand',
             relations: { book_tags_via_book: bookTagsCollection },
         })
@@ -219,9 +220,9 @@ describe('Collection - Relations', () => {
     })
 
     it('should start an eager expand target through a live query and upsert into it', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', {
             syncMode: 'eager',
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],
@@ -243,9 +244,9 @@ describe('Collection - Relations', () => {
     })
 
     it('should allow chaining where() and orderBy() with auto-expand', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'eager' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'eager' })
+        const booksCollection = c('books', {
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],
         })
@@ -278,9 +279,9 @@ describe('Collection - Relations', () => {
         }
     })
     it("files a fetch's expanded relations in one write per target, not one per parent", async () => {
-        const factory = createCollectionFactory(queryClient)
-        const authorsCollection = factory.create('authors', { syncMode: 'on-demand' })
-        const booksCollection = factory.create('books', {
+        const c = createCollection<Schema>(pb, queryClient)
+        const authorsCollection = c('authors', { syncMode: 'on-demand' })
+        const booksCollection = c('books', {
             syncMode: 'on-demand',
             relations: { author: authorsCollection },
             alwaysFetchRelations: ['author'],

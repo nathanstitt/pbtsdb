@@ -6,69 +6,73 @@ This directory contains the test suite for pbtsdb, organized by testing concern 
 
 ### Core Test Suites
 
-#### `collection-basic.test.ts` (3 tests)
-Basic collection operations and creation.
-
-**Tests:**
-- Fetching jobs using PocketBase API directly
-- Fetching jobs using TanStack DB collection
-- Type-safe relations configuration
-
-**Use this file for:**
-- Tests of fundamental collection creation and fetching
-- Basic API surface validation
-- Type safety verification
+#### `basic.test.ts`
+Collection creation and fetching, and type-safe relations configuration.
 
 ---
 
-#### `collection-queries.test.ts` (10 tests)
-Query operators and filtering capabilities.
-
-**Tests:**
-- Equality operator (`eq`)
-- Comparison operators (`gt`, `gte`, `lt`, `lte`)
-- Logical operators (`and`, `or`)
-- Sorting (`orderBy`)
-- Complex nested queries
-- Unsupported operator error handling
-
-**Use this file for:**
-- Adding new query operator tests
-- Testing query combinations
-- Validating filter behavior
+#### `queries.test.ts`
+Query operators: `eq`, `gt`, `gte`, `lt`, `lte`, `and`, `or`, `orderBy`, nested queries, and the unsupported-operator error.
 
 ---
 
-#### `collection-relations.test.ts` (3 tests)
-Relationship handling and data expansion.
-
-**Tests:**
-- Manual joins using TanStack DB join API
-- Type-safe PocketBase expand feature
-- Filtering on relation fields
-
-**Use this file for:**
-- Testing join operations
-- Validating expand functionality
-- Relation-based filtering tests
+#### `query-converter.test.ts`
+Unit tests for the `where` and `orderBy` to PocketBase filter and sort conversion.
 
 ---
 
-#### `collection-subscriptions.test.ts` (11 tests)
-Real-time subscription and live data updates.
+#### `server-side-filtering.test.ts`
+On-demand sync mode: each query sends its own filter and sort to PocketBase.
 
-**Tests:**
-- Automatic subscription on collection creation
-- Create/update/delete event handling
-- Specific record subscriptions
-- Subscription lifecycle (subscribe/unsubscribe)
-- Batch update handling
-- Subscription opt-out functionality
+---
 
-**Use this file for:**
-- Real-time update tests
-- Subscription management tests
-- WebSocket/SSE integration tests
+#### `pagination.test.ts`
+Full-list fetches past the default page size, and `limit` against on-demand collections.
+
+---
+
+#### `relations.test.ts`
+Joins through the TanStack DB join API, `relations` and `alwaysFetchRelations`, and filtering on relation fields.
+
+---
+
+#### `includes.test.ts`
+Subquery includes with `findOne()` and `toArray()`, and reading a filed relation through an include.
+
+---
+
+#### `mutations.test.ts`
+Built-in insert, update, and delete handlers, `omitOnInsert`, batched insert and delete, the write-back after a realtime echo, and the `refetchOnMutation` default.
+
+---
+
+#### `subscriptions.test.ts`
+Realtime create, update, and delete events, `writeBatch` handling, and subscription lifecycle tied to live queries.
+
+---
+
+#### `subscribe-options.test.ts`
+The factory `subscribeOptions` callback: headers, filter, expand, and re-invocation on each subscribe.
+
+---
+
+#### `realtime-mode.test.ts`
+The `realtime` option and `withRealtime` views: one subscription per query filter, filter ref counting, the topic-length cap and the widen-to-`'*'` fallback, and held targets subscribing to filed rows in query mode.
+
+---
+
+#### `realtime-delete-echo.test.ts`
+A delete echo for a row already gone from the synced store is ignored.
+
+---
+
+#### `query-result-revert.test.ts`, `refetch-on-mutation-revert.test.ts`, `stale-absence-delete.test.ts`
+Races between optimistic mutations, stale query results, and stale realtime echoes under on-demand sync. Each file names the race it pins.
+
+---
+
+#### `react.test.tsx`
+`createReactProvider`, `Provider`, and `useStore`.
 
 ---
 
@@ -98,7 +102,7 @@ Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidati
 ---
 
 #### `tanstack-internals.test.ts`
-Pins the two undocumented TanStack DB behaviours per-query expand relies on. If this fails after an upgrade, read the assertion message before touching anything else.
+Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, and `_state.syncedData` behind the write guard. If this fails after an upgrade, read the assertion message before touching anything else.
 
 ---
 

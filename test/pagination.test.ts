@@ -3,16 +3,17 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTagsCollection,
     createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Collection - Pagination', () => {
     let queryClient: QueryClient
@@ -88,8 +89,8 @@ describe('Collection - Pagination', () => {
 
     it('should fetch only limited records when limit is specified', async () => {
         // Use on-demand sync so the fetch happens when query with limit is executed
-        const factory = createCollectionFactory(queryClient)
-        const tagsCollection = factory.create('tags', { syncMode: 'on-demand' })
+        const c = createCollection<Schema>(pb, queryClient)
+        const tagsCollection = c('tags', { syncMode: 'on-demand' })
         const LIMIT = 50
 
         // Query with a limit - should only fetch LIMIT records from server

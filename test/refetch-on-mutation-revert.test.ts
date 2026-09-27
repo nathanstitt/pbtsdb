@@ -4,11 +4,11 @@ import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestLogger,
     createTestQueryClient,
     getTestAuthorId,
@@ -18,9 +18,8 @@ import {
     setLogger,
     type TestLogger,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
-import type { Books } from './schema'
+import type { Books, Schema } from './schema'
 
 /**
  * Regression coverage for the optimistic-move "snap back" race reported when a
@@ -135,7 +134,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         const handlerRef = captureRealtimeHandler()
         const seed = await seedBook(SOURCE_GENRE)
 
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -145,7 +144,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
             )
         )
         await waitForLoadFinish(result, 10000)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined(), {
             timeout: 10000,
@@ -239,7 +238,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
 
     it('respects optimistic:false — the move only shows after the server confirms', async () => {
         const seed = await seedBook(SOURCE_GENRE)
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -249,7 +248,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
             )
         )
         await waitForLoadFinish(result, 10000)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined(), {
             timeout: 10000,
         })

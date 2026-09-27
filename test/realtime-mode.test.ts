@@ -19,7 +19,7 @@ import {
     REALTIME_TOPIC_MAX_LENGTH,
     realtimeTopicLength,
     subsetFilters,
-} from '../src/keyed-where'
+} from '../src/pocketbase-limits'
 import {
     authenticateTestUser,
     clearAuth,
@@ -32,7 +32,6 @@ import {
     resetLogger,
     setLogger,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
 import type { Schema } from './schema'
 
@@ -194,7 +193,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
             )
             await waitForLoadFinish(result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
 
             expect(books.isSubscribed()).toBe(true)
             expect(filtersSubscribed()).toEqual([FANTASY])
@@ -214,7 +213,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
             )
             await waitForLoadFinish(result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
 
             const book = await seedBook('Mystery')
             await new Promise(resolve => setTimeout(resolve, 3000))
@@ -228,7 +227,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
             )
             await waitForLoadFinish(result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             expect(result.current.data.some(r => r.id === book.id)).toBe(true)
 
             await pb.collection('books').delete(book.id)
@@ -250,7 +249,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
             )
             await waitForLoadFinish(result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             expect(result.current.data.some(r => r.id === book.id)).toBe(true)
 
             await pb.collection('books').update(book.id, { genre: 'Mystery' })
@@ -268,7 +267,7 @@ describe('realtime mode', () => {
             )
             await waitForLoadFinish(first.result)
             await waitForLoadFinish(second.result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             expect(filtersSubscribed()).toEqual([FANTASY])
 
             first.unmount()
@@ -286,7 +285,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books.withRealtime('collection') }))
             )
             await waitForLoadFinish(all.result, 10000)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
 
             const fantasy = renderHook(() =>
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
@@ -312,7 +311,7 @@ describe('realtime mode', () => {
                 )
             )
             await waitForLoadFinish(result, 10000)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             await waitFor(() => expect(books.heldRelationTargetCount()).toBe(1))
 
             await books.cleanup()
@@ -326,7 +325,7 @@ describe('realtime mode', () => {
             const { books } = make()
             const { result } = renderHook(() => useLiveQuery(q => q.from({ b: books })))
             await waitForLoadFinish(result, 10000)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             expect(filtersSubscribed()).toEqual([undefined])
         }, 20000)
 
@@ -336,7 +335,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
             )
             await waitForLoadFinish(plain.result)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
             expect(subscribeSpy.mock.calls.map(call => call[2])).toEqual([{ filter: FANTASY }])
 
             const expanded = renderHook(() =>
@@ -365,7 +364,7 @@ describe('realtime mode', () => {
                 useLiveQuery(q => q.from({ b: books }).where(({ b }) => inArray(b.id, ids)))
             )
             await waitForLoadFinish(result, 10000)
-            await waitForSubscription(books)
+            await books.waitForSubscription()
 
             const filters = filtersSubscribed().filter((f): f is string => f !== undefined)
             expect(filters).toEqual(
@@ -403,7 +402,7 @@ describe('realtime mode', () => {
                     useLiveQuery(q => q.from({ b: other }).where(({ b }) => eq(b.genre, 'Mystery')))
                 )
                 await waitForLoadFinish(probe.result)
-                await waitForSubscription(other)
+                await other.waitForSubscription()
                 expect(other.isSubscribed()).toBe(true)
                 expect(logger.messages.error).toEqual([])
                 probe.unmount()
@@ -420,7 +419,7 @@ describe('realtime mode', () => {
                     )
                 )
                 await waitForLoadFinish(result, 10000)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
 
                 expect(filtersSubscribed()).toEqual([undefined])
                 expect(books.isSubscribed()).toBe(true)
@@ -442,7 +441,7 @@ describe('realtime mode', () => {
                     useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
                 )
                 await waitForLoadFinish(result)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
 
                 expect(filtersSubscribed()).toEqual([`(${base}) && (${FANTASY})`])
                 expect(tooLong()).toEqual([])
@@ -470,7 +469,7 @@ describe('realtime mode', () => {
                     useLiveQuery(q => q.from({ b: books }).where(({ b }) => inArray(b.id, ids)))
                 )
                 await waitForLoadFinish(result, 10000)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
 
                 expect(filtersSubscribed()).toEqual([base])
                 expect(books.isSubscribed()).toBe(true)
@@ -515,7 +514,7 @@ describe('realtime mode', () => {
                     )
                 )
                 await waitForLoadFinish(result, 10000)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
 
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
@@ -560,7 +559,7 @@ describe('realtime mode', () => {
                     )
                 )
                 await waitForLoadFinish(result, 10000)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
                 await waitFor(
                     () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
@@ -605,7 +604,7 @@ describe('realtime mode', () => {
 
                 const first = mount()
                 await waitForLoadFinish(first.result, 10000)
-                await waitForSubscription(books)
+                await books.waitForSubscription()
                 const authorIds = [...new Set(first.result.current.data.map(b => b.author))].sort()
                 await waitFor(
                     () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
@@ -740,7 +739,7 @@ describe('realtime mode', () => {
                     )
                 )
                 await waitForLoadFinish(result, 10000)
-                await waitForSubscription(authors)
+                await authors.waitForSubscription()
                 await waitFor(() => expect(booksSpy.mock.calls.length).toBeGreaterThan(0), {
                     timeout: 8000,
                 })

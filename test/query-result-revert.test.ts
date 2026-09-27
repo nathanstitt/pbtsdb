@@ -3,11 +3,11 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestLogger,
     createTestQueryClient,
     getTestAuthorId,
@@ -17,9 +17,8 @@ import {
     setLogger,
     type TestLogger,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
-import type { Books } from './schema'
+import type { Books, Schema } from './schema'
 
 /**
  * Regression coverage for the residual optimistic-move "snap back" reported in 0.6.1:
@@ -118,7 +117,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
      */
     const moveWithIdResolverMounted = async (staleRow: Books) => {
         const seed = staleRow
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -149,7 +148,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         )
         await waitForLoadFinish(folderResult, 10000)
         await waitForLoadFinish(idResult, 10000)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         await waitFor(
             () => expect(folderResult.current.data.find(b => b.id === seed.id)).toBeDefined(),
             { timeout: 10000 }
@@ -203,7 +202,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         const seed = await seedBook(SOURCE_GENRE)
         const staleRow: Books = { ...seed } // genre = SOURCE, identical `updated`
 
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -246,7 +245,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         )
         await waitForLoadFinish(folderResult, 10000)
         await waitForLoadFinish(idResult, 10000)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         await waitFor(
             () => expect(folderResult.current.data.find(b => b.id === seed.id)).toBeDefined(),
             { timeout: 10000 }
@@ -302,7 +301,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
     it('still applies a genuinely newer query result for an owned row', async () => {
         const seed = await seedBook(SOURCE_GENRE)
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -332,7 +331,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
             )
         )
         await waitForLoadFinish(idResult, 10000)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         await waitFor(
             () => expect(idResult.current.data.find(b => b.id === seed.id)).toBeDefined(),
             {
