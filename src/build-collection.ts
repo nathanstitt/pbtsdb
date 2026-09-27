@@ -21,7 +21,13 @@ import {
     splitPaths,
     validateExpandPath,
 } from './expand-paths'
-import { matchesSubset, subsetFilters, subsetFromWhere, type WhereSubset } from './keyed-where'
+import {
+    matchesSubset,
+    REALTIME_MAX_FILTER_LENGTH,
+    subsetFilters,
+    subsetFromWhere,
+    type WhereSubset,
+} from './keyed-where'
 import { logger } from './logger'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
@@ -947,7 +953,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // or the single converted filter. `undefined` means the whole collection.
     function filtersFor(opts: LoadSubsetOptions): string[] | undefined {
         const request = toRequest(opts)
-        if (request.subset) return subsetFilters(request.subset)
+        if (request.subset) return subsetFilters(request.subset, REALTIME_MAX_FILTER_LENGTH)
         return request.filter ? [request.filter] : undefined
     }
 
@@ -1421,7 +1427,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!byField) return []
         const filters: string[] = []
         for (const [field, values] of byField) {
-            filters.push(...subsetFilters({ field, values: [...values].sort() }))
+            filters.push(
+                ...subsetFilters({ field, values: [...values].sort() }, REALTIME_MAX_FILTER_LENGTH)
+            )
         }
         return filters
     }

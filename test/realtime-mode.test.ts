@@ -1,4 +1,4 @@
-import { eq, useLiveQuery } from '@tanstack/react-db'
+import { eq, inArray, useLiveQuery } from '@tanstack/react-db'
 import { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
@@ -14,13 +14,14 @@ import {
 } from 'vitest'
 
 import { createCollection } from '../src'
-import { subsetFilters } from '../src/keyed-where'
+import { REALTIME_MAX_FILTER_LENGTH, subsetFilters } from '../src/keyed-where'
 import {
     authenticateTestUser,
     clearAuth,
     createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
+    newRecordId,
     pb,
     waitForLoadFinish,
     waitForSubscription,
@@ -300,6 +301,55 @@ describe('realtime mode', () => {
             await waitForLoadFinish(result, 10000)
             await waitForSubscription(books)
             expect(filtersSubscribed()).toEqual([undefined])
+        }, 20000)
+
+        it('restarts filter entries with a wider expand when a fetchRelations view mounts', async () => {
+            const { books } = make()
+            const plain = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(plain.result)
+            await waitForSubscription(books)
+            expect(subscribeSpy.mock.calls.map(call => call[2])).toEqual([{ filter: FANTASY }])
+
+            const expanded = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books.fetchRelations('author') })
+                        .where(({ b }) => eq(b.genre, 'Fantasy'))
+                )
+            )
+            await waitForLoadFinish(expanded.result)
+            await waitFor(
+                () =>
+                    expect(subscribeSpy.mock.calls.at(-1)?.[2]).toEqual({
+                        filter: FANTASY,
+                        expand: 'author',
+                    }),
+                { timeout: 8000 }
+            )
+            expect(books.isSubscribed()).toBe(true)
+        }, 30000)
+
+        it('opens one entry per chunk of an oversized id subset', async () => {
+            const { books } = make()
+            const ids = Array.from({ length: 130 }, () => newRecordId())
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => inArray(b.id, ids)))
+            )
+            await waitForLoadFinish(result, 10000)
+            await waitForSubscription(books)
+
+            const filters = filtersSubscribed().filter((f): f is string => f !== undefined)
+            expect(filters).toEqual(
+                subsetFilters({ field: 'id', values: [...ids].sort() }, REALTIME_MAX_FILTER_LENGTH)
+            )
+            expect(filters.length).toBeGreaterThan(1)
+            for (const filter of filters) {
+                const topic = `books/*?options=${encodeURIComponent(JSON.stringify({ query: { filter } }))}`
+                expect(topic.length).toBeLessThanOrEqual(2500)
+            }
+            expect(filters.join(' || ').split(' || ')).toHaveLength(130)
         }, 20000)
     })
 
