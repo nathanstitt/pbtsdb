@@ -24,6 +24,8 @@ import {
 import {
     matchesSubset,
     REALTIME_MAX_FILTER_LENGTH,
+    REALTIME_TOPIC_MAX_LENGTH,
+    realtimeTopicLength,
     subsetFilters,
     subsetFromWhere,
     type WhereSubset,
@@ -34,6 +36,7 @@ import type {
     CreateCollectionOptions,
     ExpandTargetCollection,
     ExtractRecordType,
+    HeldTarget,
     RealtimeMode,
     SchemaDeclaration,
 } from './types'
@@ -124,17 +127,15 @@ export interface CreateCollectionFactoryOptions {
      * Extra options passed to every real-time subscription this factory creates,
      * such as `headers`, `filter`, `expand` or `fields`.
      *
-     * Invoked at subscribe time rather than read once, because a subscription is
-     * re-established on reconnect and whenever the subscriber count rises from
-     * zero — a value captured at build time would go stale exactly then.
+     * Invoked on every subscribe attempt rather than read once: each filtered
+     * entry of a `realtime: 'query'` collection and each restart (reconnect,
+     * wider expand) calls it again, so a value captured at build time would go
+     * stale.
      *
      * Returning `undefined` subscribes with no extra options.
      */
     subscribeOptions?: () => RecordSubscribeOptions | undefined
 }
-
-/** @internal */
-export type HeldTarget = { setFilters: (filters: readonly string[]) => void; release: () => void }
 
 /**
  * Subscription helpers added to collection instances.
@@ -967,8 +968,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     function dropFilterRef(refs: Map<string, number>, filter: string): void {
         const count = (refs.get(filter) ?? 0) - 1
-        if (count > 0) refs.set(filter, count)
-        else refs.delete(filter)
+        if (count > 0) {
+            refs.set(filter, count)
+            return
+        }
+        refs.delete(filter)
+        if (!filterRefs.has(filter) && !holdFilterRefs.has(filter)) oversizedFilters.delete(filter)
     }
 
     function swapHoldFilterRefs(previous: readonly string[], next: readonly string[]): void {
@@ -978,11 +983,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (!next.includes(filter)) dropFilterRef(holdFilterRefs, filter)
     }
 
+    // What each loadSubset retained, keyed by the options object TanStack
+    // passes again to unloadSubset. Release reads this record instead of
+    // re-deriving it: the view tag in effect can differ between the two calls.
+    // Replaced on sync cleanup, so a stale unload cannot drop a newer ref.
+    type RetainedFilters = { filters: string[] | undefined }
+    let retainedFilters = new WeakMap<LoadSubsetOptions, RetainedFilters[]>()
+
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if (realtimeModeFor(opts) !== 'query') return
         const filters = filtersFor(opts)
         if (!filters) unfilteredQueryRefs += 1
         else for (const filter of filters) addFilterRef(filterRefs, filter)
+        const records = retainedFilters.get(opts) ?? []
+        records.push({ filters })
+        retainedFilters.set(opts, records)
         reconcile().catch(() => {})
     }
 
@@ -991,14 +1006,20 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function resetQueryFilters(): void {
         filterRefs.clear()
         unfilteredQueryRefs = 0
+        retainedFilters = new WeakMap()
+        for (const filter of oversizedFilters) {
+            if (!holdFilterRefs.has(filter)) oversizedFilters.delete(filter)
+        }
         reconcile().catch(() => {})
     }
 
     function releaseQueryFilters(opts: LoadSubsetOptions): void {
-        if (realtimeModeFor(opts) !== 'query') return
-        const filters = filtersFor(opts)
-        if (!filters) unfilteredQueryRefs = Math.max(0, unfilteredQueryRefs - 1)
-        else for (const filter of filters) dropFilterRef(filterRefs, filter)
+        const records = retainedFilters.get(opts)
+        const retained = records?.shift()
+        if (!retained) return
+        if (records?.length === 0) retainedFilters.delete(opts)
+        if (!retained.filters) unfilteredQueryRefs -= 1
+        else for (const filter of retained.filters) dropFilterRef(filterRefs, filter)
         reconcile().catch(() => {})
     }
 
@@ -1270,13 +1291,17 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Held-target refs live apart from loadSubset refs: a sync cleanup resets
     // only the latter, while the hold outlives the sync session.
     const holdFilterRefs = new Map<string, number>()
+    // Wanted filters whose topic is over PocketBase's cap. The SDK keeps a
+    // rejected topic and re-posts it with every later change, breaking
+    // realtime for the whole client, so these widen to '*' instead.
+    const oversizedFilters = new Set<string>()
 
     function wantedFilters(): Set<string> {
         return new Set([...filterRefs.keys(), ...holdFilterRefs.keys()])
     }
 
     function wantsStar(): boolean {
-        return collectionModeSubscribers > 0 || unfilteredQueryRefs > 0
+        return collectionModeSubscribers > 0 || unfilteredQueryRefs > 0 || oversizedFilters.size > 0
     }
 
     function anyEntryOpen(): boolean {
@@ -1297,9 +1322,10 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // All start/stop/restart work is serialized onto this promise tail so
     // overlapping callers (two views created back-to-back, a reconnect
-    // racing a widened expand) never open or close entries concurrently — the tail is what lets a later caller's restart observe
-    // the outcome of an earlier caller's in-flight start. Errors are caught
-    // and logged so a failed step never poisons the tail for later work.
+    // racing a widened expand) never open or close entries concurrently —
+    // the tail is what lets a later caller's restart observe the outcome of
+    // an earlier caller's in-flight start. Errors are caught and logged so a
+    // failed step never poisons the tail for later work.
     let subscriptionWork: Promise<void> = Promise.resolve()
     function enqueueSubscriptionWork(fn: () => Promise<void>): Promise<void> {
         const run = subscriptionWork.then(fn, fn).catch(error => {
@@ -1428,7 +1454,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const filters: string[] = []
         for (const [field, values] of byField) {
             filters.push(
-                ...subsetFilters({ field, values: [...values].sort() }, REALTIME_MAX_FILTER_LENGTH)
+                ...subsetFilters({ field, values: [...values] }, REALTIME_MAX_FILTER_LENGTH)
             )
         }
         return filters
@@ -1566,25 +1592,41 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return { ...base, filter: combined }
     }
 
-    const openFilterEntry = async (filter: string) => {
-        if (filterEntries.has(filter)) return
+    // Returns false when the filter's topic is over the cap: the filter is
+    // then marked oversized and the collection widens to '*'.
+    const openFilterEntry = async (filter: string): Promise<boolean> => {
+        if (filterEntries.has(filter)) return true
+        const subscribeOptions = filteredSubscribeOptions(filter)
+        const topicLength = realtimeTopicLength(collectionName, subscribeOptions)
+        if (topicLength > REALTIME_TOPIC_MAX_LENGTH) {
+            oversizedFilters.add(filter)
+            logger.warn('Realtime filter too long; subscribing to the whole collection', {
+                collectionName,
+                filterLength: filter.length,
+                topicLength,
+            })
+            return false
+        }
         ensureSubscriptionPromise()
         const pendingExpand = pendingSubscribeExpand()
         try {
             const unsubscribe = await pb
                 .collection(collectionName)
-                .subscribe('*', handleRealtimeEvent, filteredSubscribeOptions(filter))
+                .subscribe('*', handleRealtimeEvent, subscribeOptions)
             filterEntries.set(filter, { unsubscribe, expand: pendingExpand })
             syncHeldSubscriptions(activeExpandTargets())
             logger.debug('Filtered subscription started', { collectionName, filter })
             subscriptionResolve?.()
         } catch (error) {
+            // Not retried on a timer: the next reconcile trigger (a ref change
+            // or a restart) tries this filter again.
             logger.error('Failed to start filtered subscription', {
                 collectionName,
                 filter,
                 error,
             })
         }
+        return true
     }
 
     const closeFilterEntry = async (filter: string) => {
@@ -1617,24 +1659,34 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return false
     }
 
-    // Bring the open entries in line with the counters. The single place
-    // entries are opened or closed, so a later caller on the work tail always
-    // observes the outcome of an earlier caller's in-flight change.
     const closeFilterEntries = async (keep: (filter: string) => boolean = () => false) => {
         for (const filter of [...filterEntries.keys()]) {
             if (!keep(filter)) await closeFilterEntry(filter)
         }
     }
 
+    const openWantedFilters = async () => {
+        if (wantsStar()) return
+        for (const filter of wantedFilters()) {
+            if (!(await openFilterEntry(filter))) return
+        }
+    }
+
+    // Bring the open entries in line with the counters. The single place
+    // entries are opened or closed, so a later caller on the work tail always
+    // observes the outcome of an earlier caller's in-flight change. Wanted
+    // entries open before unwanted ones close: an overlap only duplicates
+    // events, while a gap loses them. A filter found oversized while opening
+    // flips wantsStar, so '*' opens in this same pass.
     const doReconcile = async () => {
+        await openWantedFilters()
         if (wantsStar()) {
-            await closeFilterEntries()
             await doStartSubscription()
+            if (isSubscribed) await closeFilterEntries()
         } else {
             await doStopSubscription()
             const wanted = wantedFilters()
             await closeFilterEntries(filter => wanted.has(filter))
-            for (const filter of wanted) await openFilterEntry(filter)
         }
         if (!anyEntryOpen() && !wantsStar() && wantedFilters().size === 0) {
             clearSubscriptionPromise()
@@ -1665,7 +1717,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     function holdLive(): HeldTarget {
         const counted = realtimeMode === 'collection'
         if (counted) collectionModeSubscribers += 1
-        const subscription = originalSubscribeChanges(() => {}, { includeInitialState: false })
+        let subscription: ChangesSubscription
+        try {
+            subscription = originalSubscribeChanges(() => {}, { includeInitialState: false })
+        } catch (error) {
+            if (counted) collectionModeSubscribers -= 1
+            throw error
+        }
         let current: string[] = []
         let released = false
         reconcile().catch(() => {})

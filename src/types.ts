@@ -165,8 +165,14 @@ export interface ExpandTargetCollection {
      * pbtsdb-built targets: hold this collection live for a parent, with the
      * filters covering the rows the parent filed here (query mode only).
      */
-    holdLive?: () => { setFilters: (filters: readonly string[]) => void; release: () => void }
+    holdLive?: () => HeldTarget
 }
+
+/**
+ * A parent's hold on a relation target, returned by `holdLive`.
+ * @internal
+ */
+export type HeldTarget = { setFilters: (filters: readonly string[]) => void; release: () => void }
 
 /**
  * Maps relation field names to the collections that receive their expanded records.

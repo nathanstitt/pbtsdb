@@ -1,4 +1,5 @@
 import type { IR } from '@tanstack/db'
+import type { RecordSubscribeOptions } from 'pocketbase'
 import { escapeValue } from './pocketbase-query-converter'
 
 export type WhereSubset = { field: string; values: string[] }
@@ -78,6 +79,51 @@ const MAX_FILTER_LENGTH = 2500
 // SDK URI-encodes the filter into the topic at roughly 2.1x its length; this
 // leaves room for `expand` and factory headers in the same topic.
 export const REALTIME_MAX_FILTER_LENGTH = 1000
+
+/** PocketBase rejects a realtime subscription topic longer than this. */
+export const REALTIME_TOPIC_MAX_LENGTH = 2500
+
+// Option keys the PocketBase SDK keeps out of `query` (normalizeUnknownQueryParams).
+const SDK_RESERVED_OPTIONS = new Set([
+    'requestKey',
+    '$cancelKey',
+    '$autoCancel',
+    'fetch',
+    'headers',
+    'body',
+    'query',
+    'params',
+    'cache',
+    'credentials',
+    'integrity',
+    'keepalive',
+    'method',
+    'mode',
+    'redirect',
+    'referrer',
+    'referrerPolicy',
+    'signal',
+    'window',
+])
+
+/**
+ * The length of the topic the PocketBase SDK builds for a `subscribe('*', ..., options)`
+ * call on `collectionName`. PocketBase rejects a topic over
+ * `REALTIME_TOPIC_MAX_LENGTH`, and the SDK keeps a rejected topic in its list.
+ */
+export function realtimeTopicLength(
+    collectionName: string,
+    options: RecordSubscribeOptions | undefined
+): number {
+    const topic = `${collectionName}/*`
+    if (!options) return topic.length
+    const query: Record<string, unknown> = { ...options.query }
+    for (const [key, value] of Object.entries(options)) {
+        if (!SDK_RESERVED_OPTIONS.has(key)) query[key] = value
+    }
+    const encoded = encodeURIComponent(JSON.stringify({ query, headers: options.headers }))
+    return `${topic}?options=${encoded}`.length
+}
 
 /**
  * The PocketBase filters that select `subset`, each short enough for the server

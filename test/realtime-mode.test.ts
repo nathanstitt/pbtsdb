@@ -1,4 +1,4 @@
-import { eq, inArray, useLiveQuery } from '@tanstack/react-db'
+import { and, eq, inArray, useLiveQuery } from '@tanstack/react-db'
 import { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
@@ -14,15 +14,23 @@ import {
 } from 'vitest'
 
 import { createCollection } from '../src'
-import { REALTIME_MAX_FILTER_LENGTH, subsetFilters } from '../src/keyed-where'
+import {
+    REALTIME_MAX_FILTER_LENGTH,
+    REALTIME_TOPIC_MAX_LENGTH,
+    realtimeTopicLength,
+    subsetFilters,
+} from '../src/keyed-where'
 import {
     authenticateTestUser,
     clearAuth,
+    createTestLogger,
     createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
     pb,
+    resetLogger,
+    setLogger,
     waitForLoadFinish,
     waitForSubscription,
 } from './helpers'
@@ -370,6 +378,107 @@ describe('realtime mode', () => {
             }
             expect(filters.join(' || ').split(' || ')).toHaveLength(130)
         }, 20000)
+
+        describe('topic cap', () => {
+            const logger = createTestLogger()
+
+            beforeEach(() => {
+                logger.clear()
+                setLogger(logger)
+            })
+
+            afterEach(() => {
+                resetLogger()
+            })
+
+            const tooLong = () =>
+                logger.messages.warn.filter(m => m.msg.startsWith('Realtime filter too long'))
+
+            async function expectClientStillSubscribes() {
+                const other = createCollection<Schema>(pb, queryClient)('books', {
+                    syncMode: 'on-demand',
+                    realtime: 'query',
+                })
+                const probe = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: other }).where(({ b }) => eq(b.genre, 'Mystery')))
+                )
+                await waitForLoadFinish(probe.result)
+                await waitForSubscription(other)
+                expect(other.isSubscribed()).toBe(true)
+                expect(logger.messages.error).toEqual([])
+                probe.unmount()
+            }
+
+            it('widens to the whole collection when a general filter is over the cap', async () => {
+                const { books } = make()
+                const ids = Array.from({ length: 60 }, () => newRecordId())
+                const { result } = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books })
+                            .where(({ b }) => and(inArray(b.id, ids), eq(b.genre, 'Fantasy')))
+                    )
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitForSubscription(books)
+
+                expect(filtersSubscribed()).toEqual([undefined])
+                expect(books.isSubscribed()).toBe(true)
+                expect(tooLong()).toHaveLength(1)
+                expect(tooLong()[0].context).toMatchObject({ collectionName: 'books' })
+                const { topicLength } = tooLong()[0].context as { topicLength: number }
+                expect(topicLength).toBeGreaterThan(REALTIME_TOPIC_MAX_LENGTH)
+
+                await expectClientStillSubscribes()
+            }, 30000)
+
+            it('conjoins a factory filter with the query filter when it fits', async () => {
+                const base = 'page_count >= 0'
+                const c = createCollection<Schema>(pb, queryClient, {
+                    subscribeOptions: () => ({ filter: base }),
+                })
+                const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
+                const { result } = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+                )
+                await waitForLoadFinish(result)
+                await waitForSubscription(books)
+
+                expect(filtersSubscribed()).toEqual([`(${base}) && (${FANTASY})`])
+                expect(tooLong()).toEqual([])
+            }, 20000)
+
+            it('widens to the whole collection when the conjoined filter is over the cap', async () => {
+                const base = `title != "${'x'.repeat(800)}"`
+                const c = createCollection<Schema>(pb, queryClient, {
+                    subscribeOptions: () => ({ filter: base }),
+                })
+                const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
+                const ids = Array.from({ length: 60 }, () => newRecordId())
+                const chunks = subsetFilters(
+                    { field: 'id', values: [...ids].sort() },
+                    REALTIME_MAX_FILTER_LENGTH
+                )
+                expect(
+                    realtimeTopicLength('books', { filter: `(${base}) && (${chunks[0]})` })
+                ).toBeGreaterThan(REALTIME_TOPIC_MAX_LENGTH)
+                expect(realtimeTopicLength('books', { filter: base })).toBeLessThanOrEqual(
+                    REALTIME_TOPIC_MAX_LENGTH
+                )
+
+                const { result } = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => inArray(b.id, ids)))
+                )
+                await waitForLoadFinish(result, 10000)
+                await waitForSubscription(books)
+
+                expect(filtersSubscribed()).toEqual([base])
+                expect(books.isSubscribed()).toBe(true)
+                expect(tooLong().length).toBeGreaterThan(0)
+
+                await expectClientStillSubscribes()
+            }, 30000)
+        })
     })
 
     describe('held targets in query mode', () => {
@@ -387,6 +496,9 @@ describe('realtime mode', () => {
 
         const filtersOf = (spy: MockInstance<ReturnType<typeof pb.collection>['subscribe']>) =>
             spy.mock.calls.map(call => call[2]?.filter)
+
+        const idsIn = (filter: string | undefined) =>
+            [...(filter ?? '').matchAll(/id = "([^"]+)"/g)].map(match => match[1]).sort()
 
         it('subscribes a forward relation target to the filed ids only', async () => {
             const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
@@ -408,11 +520,14 @@ describe('realtime mode', () => {
 
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
                 expect(authorIds.length).toBeGreaterThan(0)
-                const expected = subsetFilters({ field: 'id', values: authorIds })
-                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
-                    timeout: 8000,
-                })
+                await waitFor(
+                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    {
+                        timeout: 8000,
+                    }
+                )
                 expect(filtersOf(authorsSpy)).not.toContain(undefined)
+                expect(filtersOf(authorsSpy).at(-1)?.startsWith('id = "')).toBe(true)
 
                 const authorId = authorIds[0]
                 const before = await pb.collection('authors').getOne(authorId)
@@ -447,10 +562,12 @@ describe('realtime mode', () => {
                 await waitForLoadFinish(result, 10000)
                 await waitForSubscription(books)
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
-                const expected = subsetFilters({ field: 'id', values: authorIds })
-                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
-                    timeout: 8000,
-                })
+                await waitFor(
+                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    {
+                        timeout: 8000,
+                    }
+                )
                 await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
 
                 await authors.cleanup()
@@ -490,10 +607,13 @@ describe('realtime mode', () => {
                 await waitForLoadFinish(first.result, 10000)
                 await waitForSubscription(books)
                 const authorIds = [...new Set(first.result.current.data.map(b => b.author))].sort()
-                const expected = subsetFilters({ field: 'id', values: authorIds })
-                await waitFor(() => expect(filtersOf(authorsSpy).at(-1)).toBe(expected[0]), {
-                    timeout: 8000,
-                })
+                await waitFor(
+                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    {
+                        timeout: 8000,
+                    }
+                )
+                const filed = filtersOf(authorsSpy).at(-1)
 
                 first.unmount()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
@@ -506,7 +626,7 @@ describe('realtime mode', () => {
                     () => expect(authorsSpy.mock.calls.length).toBeGreaterThan(callsBefore),
                     { timeout: 8000 }
                 )
-                expect(filtersOf(authorsSpy).slice(callsBefore)).toEqual([expected[0]])
+                expect(filtersOf(authorsSpy).slice(callsBefore)).toEqual([filed])
                 expect(authors.isSubscribed()).toBe(true)
                 expect(fetches()).toBe(fetchesBefore)
                 second.unmount()
@@ -514,6 +634,90 @@ describe('realtime mode', () => {
                 authorsSpy.mockRestore()
                 getListSpy.mockRestore()
                 getFullListSpy.mockRestore()
+            }
+        }, 30000)
+
+        it('opens the grown filter before closing the old one', async () => {
+            const events: string[] = []
+            const realSubscribe = pb.collection('authors').subscribe.bind(pb.collection('authors'))
+            const authorsSpy = vi
+                .spyOn(pb.collection('authors'), 'subscribe')
+                .mockImplementation(async (topic, callback, options) => {
+                    const unsubscribe = await realSubscribe(topic, callback, options)
+                    events.push(`open ${options?.filter}`)
+                    return async () => {
+                        events.push(`close ${options?.filter}`)
+                        await unsubscribe()
+                    }
+                })
+            const author = await pb.collection('authors').create({
+                name: `Growth ${getTestSlug('grow')}`,
+                bio: '',
+                email: `${getTestSlug('grow')}@example.com`,
+            })
+            const book = await pb.collection('books').create({
+                title: `Growth ${getTestSlug('grow')}`,
+                isbn: getTestSlug('isbn'),
+                genre: 'Fiction',
+                author: author.id,
+                published_date: '',
+                page_count: 1,
+            })
+            createdIds.push(book.id)
+            const c = createCollection<Schema>(pb, queryClient)
+            const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
+            const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
+            let dropped = false
+            const poll = setInterval(() => {
+                if (!authors.isSubscribed()) dropped = true
+            }, 2)
+            try {
+                const fantasy = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.genre, 'Fantasy'))
+                    )
+                )
+                await waitForLoadFinish(fantasy.result, 10000)
+                await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
+                const before = filtersOf(authorsSpy).at(-1)
+                expect(idsIn(before)).not.toContain(author.id)
+                dropped = false
+
+                const grown = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.id, book.id))
+                    )
+                )
+                await waitForLoadFinish(grown.result, 10000)
+                await waitFor(() => expect(events).toContain(`close ${before}`), {
+                    timeout: 8000,
+                })
+                const after = filtersOf(authorsSpy).at(-1)
+                expect(idsIn(after)).toContain(author.id)
+                expect(events.indexOf(`open ${after}`)).toBeLessThan(
+                    events.indexOf(`close ${before}`)
+                )
+                expect(dropped).toBe(false)
+                expect(authors.isSubscribed()).toBe(true)
+
+                fantasy.unmount()
+                grown.unmount()
+            } finally {
+                clearInterval(poll)
+                authorsSpy.mockRestore()
+                await pb
+                    .collection('books')
+                    .delete(book.id)
+                    .catch(() => {})
+                createdIds.splice(createdIds.indexOf(book.id), 1)
+                await pb
+                    .collection('authors')
+                    .delete(author.id)
+                    .catch(() => {})
             }
         }, 30000)
 
