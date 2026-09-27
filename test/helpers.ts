@@ -59,17 +59,6 @@ export function createTestLogger(): TestLogger {
 
 export { resetLogger, setLogger }
 
-/**
- * Compatibility shim for old CollectionFactory API.
- * Returns an object with a create() method that matches the old factory pattern.
- */
-export function createCollectionFactory(queryClient: QueryClient) {
-    const factory = createCollection<Schema>(pb, queryClient)
-    return {
-        create: factory,
-    }
-}
-
 if (!process.env.TESTING_PB_ADDR) {
     throw new Error('TESTING_PB_ADDR environment variable is not set')
 }
@@ -147,24 +136,21 @@ export function createAuthorsCollection(queryClient: QueryClient) {
  * Create a book_metadata collection with the given query client
  */
 export function createBookMetadataCollection(queryClient: QueryClient) {
-    const factory = createCollectionFactory(queryClient)
-    return factory.create('book_metadata')
+    return createCollection<Schema>(pb, queryClient)('book_metadata')
 }
 
 /**
  * Create a tags collection with the given query client
  */
 export function createTagsCollection(queryClient: QueryClient) {
-    const factory = createCollectionFactory(queryClient)
-    return factory.create('tags')
+    return createCollection<Schema>(pb, queryClient)('tags')
 }
 
 /**
  * Create a book_tags collection with the given query client
  */
 export function createBookTagsCollection(queryClient: QueryClient) {
-    const factory = createCollectionFactory(queryClient)
-    return factory.create('book_tags')
+    return createCollection<Schema>(pb, queryClient)('book_tags')
 }
 
 /**
@@ -195,25 +181,4 @@ export async function waitForLoadFinish(
         },
         { timeout }
     )
-}
-
-/**
- * Collection type with subscription helpers exposed for testing.
- */
-interface CollectionWithSubscription {
-    waitForSubscription: (timeout?: number) => Promise<void>
-    isSubscribed: () => boolean
-}
-
-/**
- * Wait for a collection's real-time subscription to be established.
- * Use this instead of arbitrary setTimeout delays in tests.
- * @param collection - The collection to wait for subscription on
- * @param timeout - Optional timeout in ms (default: 5000)
- */
-export async function waitForSubscription(
-    collection: CollectionWithSubscription,
-    timeout = 5000
-): Promise<void> {
-    await collection.waitForSubscription(timeout)
 }

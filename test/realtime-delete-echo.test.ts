@@ -2,11 +2,11 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createCollectionFactory,
     createTestLogger,
     createTestQueryClient,
     getTestAuthorId,
@@ -16,8 +16,8 @@ import {
     setLogger,
     type TestLogger,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
+import type { Schema } from './schema'
 
 /**
  * Regression coverage for the realtime delete echo throwing
@@ -81,7 +81,7 @@ describe('realtime delete echo idempotency', () => {
         testLogger.messages.debug.filter(m => m.msg.includes('Ignoring delete echo'))
 
     it('on-demand: delete echo for an already-pruned key is swallowed', async () => {
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -93,7 +93,7 @@ describe('realtime delete echo idempotency', () => {
             },
             { timeout: 10000 }
         )
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
@@ -120,7 +120,7 @@ describe('realtime delete echo idempotency', () => {
     }, 25000)
 
     it('on-demand: real delete echo for a pruned key does not surface an uncaught error', async () => {
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -132,7 +132,7 @@ describe('realtime delete echo idempotency', () => {
             },
             { timeout: 10000 }
         )
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
@@ -151,7 +151,7 @@ describe('realtime delete echo idempotency', () => {
     }, 25000)
 
     it('on-demand: normal delete echo still removes the row', async () => {
-        const collection = createCollectionFactory(queryClient).create('books', {
+        const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
 
@@ -163,7 +163,7 @@ describe('realtime delete echo idempotency', () => {
             },
             { timeout: 10000 }
         )
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
@@ -181,11 +181,11 @@ describe('realtime delete echo idempotency', () => {
     }, 25000)
 
     it('eager default: optimistic delete + echo does not throw', async () => {
-        const collection = createCollectionFactory(queryClient).create('books')
+        const collection = createCollection<Schema>(pb, queryClient)('books')
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
         await waitForLoadFinish(result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())

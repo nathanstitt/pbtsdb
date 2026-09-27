@@ -2,7 +2,10 @@ import {
     BTreeIndex,
     type Collection,
     createCollection as createTanStackCollection,
+    type DeleteMutationFn,
+    type InsertMutationFn,
     type LoadSubsetOptions,
+    type UpdateMutationFn,
 } from '@tanstack/db'
 import {
     DeleteOperationItemNotFoundError,
@@ -197,11 +200,20 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
     const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
-    if (realtimeMode === 'query' && syncMode !== 'on-demand') {
-        throw new Error(
-            `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
-        )
+
+    function assertRealtimeMode(mode: RealtimeMode): void {
+        if (!REALTIME_MODES.includes(mode)) {
+            throw new Error(
+                `Collection '${collectionName}': unknown realtime mode '${String(mode)}'`
+            )
+        }
+        if (mode === 'query' && syncMode !== 'on-demand') {
+            throw new Error(
+                `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
+            )
+        }
     }
+    assertRealtimeMode(realtimeMode)
 
     // Paths requested by views that have subscribed at least once. Eager fetches
     // read it because they cannot receive per-subset options; the realtime
@@ -283,6 +295,49 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
     const refetchOnMutation = options?.refetchOnMutation ?? false
+
+    // `false` disables the mutation; `undefined` selects the built-in handler.
+    function resolveHandler<H>(option: H | false | undefined, fallback: H): H | undefined {
+        return option === false ? undefined : (option ?? fallback)
+    }
+
+    const defaultInsert: InsertMutationFn<RecordType> = async ({ transaction }) => {
+        const created = await Promise.all(
+            transaction.mutations.map(async mutation => {
+                const {
+                    created: _created,
+                    updated: _updated,
+                    collectionId: _collectionId,
+                    collectionName: _collectionName,
+                    ...data
+                } = mutation.modified as unknown as Record<string, unknown>
+                return pb.collection(collectionName).create(data)
+            })
+        )
+        writeBackAfterPersisted(transaction, created)
+        return { refetch: refetchOnMutation }
+    }
+
+    const defaultUpdate: UpdateMutationFn<RecordType> = async ({ transaction }) => {
+        const updated = await Promise.all(
+            transaction.mutations.map(async mutation => {
+                const recordWithId = mutation.original as { id: string }
+                return pb.collection(collectionName).update(recordWithId.id, mutation.changes)
+            })
+        )
+        writeBackAfterPersisted(transaction, updated)
+        return { refetch: refetchOnMutation }
+    }
+
+    const defaultDelete: DeleteMutationFn<RecordType> = async ({ transaction }) => {
+        await Promise.all(
+            transaction.mutations.map(async mutation => {
+                const recordWithId = mutation.original as { id: string }
+                await pb.collection(collectionName).delete(recordWithId.id)
+            })
+        )
+        return { refetch: refetchOnMutation }
+    }
 
     function eagerSyncInFlight(target: ExpandTargetCollection): boolean {
         return (
@@ -763,55 +818,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             }
             return record.id as string
         },
-        onInsert:
-            options?.onInsert === false
-                ? undefined
-                : (options?.onInsert ??
-                  (async ({ transaction }) => {
-                      const created = await Promise.all(
-                          transaction.mutations.map(async mutation => {
-                              const {
-                                  created: _created,
-                                  updated: _updated,
-                                  collectionId: _collectionId,
-                                  collectionName: _collectionName,
-                                  ...data
-                              } = mutation.modified as unknown as Record<string, unknown>
-                              return pb.collection(collectionName).create(data)
-                          })
-                      )
-                      writeBackAfterPersisted(transaction, created)
-                      return { refetch: refetchOnMutation }
-                  })),
-        onUpdate:
-            options?.onUpdate === false
-                ? undefined
-                : (options?.onUpdate ??
-                  (async ({ transaction }) => {
-                      const updated = await Promise.all(
-                          transaction.mutations.map(async mutation => {
-                              const recordWithId = mutation.original as { id: string }
-                              return pb
-                                  .collection(collectionName)
-                                  .update(recordWithId.id, mutation.changes)
-                          })
-                      )
-                      writeBackAfterPersisted(transaction, updated)
-                      return { refetch: refetchOnMutation }
-                  })),
-        onDelete:
-            options?.onDelete === false
-                ? undefined
-                : (options?.onDelete ??
-                  (async ({ transaction }) => {
-                      await Promise.all(
-                          transaction.mutations.map(async mutation => {
-                              const recordWithId = mutation.original as { id: string }
-                              await pb.collection(collectionName).delete(recordWithId.id)
-                          })
-                      )
-                      return { refetch: refetchOnMutation }
-                  })),
+        onInsert: resolveHandler(options?.onInsert, defaultInsert),
+        onUpdate: resolveHandler(options?.onUpdate, defaultUpdate),
+        onDelete: resolveHandler(options?.onDelete, defaultDelete),
     })
 
     // queryCollectionOptions consumes `gcTime` for the underlying react-query
@@ -998,7 +1007,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const records = retainedFilters.get(opts) ?? []
         records.push({ filters })
         retainedFilters.set(opts, records)
-        reconcile().catch(() => {})
+        reconcile()
     }
 
     // TanStack drops a discarded sync session's demands without unloadSubset
@@ -1010,7 +1019,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         for (const filter of oversizedFilters) {
             if (!holdFilterRefs.has(filter)) oversizedFilters.delete(filter)
         }
-        reconcile().catch(() => {})
+        reconcile()
     }
 
     function releaseQueryFilters(opts: LoadSubsetOptions): void {
@@ -1020,7 +1029,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (records?.length === 0) retainedFilters.delete(opts)
         if (!retained.filters) unfilteredQueryRefs -= 1
         else for (const filter of retained.filters) dropFilterRef(filterRefs, filter)
-        reconcile().catch(() => {})
+        reconcile()
     }
 
     function withViewExpand(opts: LoadSubsetOptions): LoadOptions {
@@ -1077,19 +1086,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     const views = new Map<string, object>()
 
-    function assertRealtimeMode(mode: RealtimeMode): void {
-        if (!REALTIME_MODES.includes(mode)) {
-            throw new Error(
-                `Collection '${collectionName}': unknown realtime mode '${String(mode)}'`
-            )
-        }
-        if (mode === 'query' && syncMode !== 'on-demand') {
-            throw new Error(
-                `Collection '${collectionName}': realtime 'query' requires syncMode 'on-demand'`
-            )
-        }
-    }
-
     // Captured before the base collection's own subscribeChanges is replaced
     // below, so views and the base both reach TanStack's original.
     const originalSubscribeChanges = collection.subscribeChanges.bind(collection)
@@ -1110,14 +1106,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    function subscribeCollectionMode(
-        tag: ViewTag | undefined,
-        args: Parameters<typeof originalSubscribeChanges>
-    ): ChangesSubscription {
+    // Subscribe while counting toward the '*' entry; the count drops once,
+    // on the first unsubscribe.
+    function subscribeCounted(subscribe: () => ChangesSubscription): ChangesSubscription {
         collectionModeSubscribers += 1
         let subscription: ChangesSubscription
         try {
-            subscription = subscribeTagged(tag, args)
+            subscription = subscribe()
         } catch (error) {
             collectionModeSubscribers -= 1
             throw error
@@ -1128,7 +1123,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (!released) {
                 released = true
                 collectionModeSubscribers -= 1
-                reconcile().catch(() => {})
+                reconcile()
             }
             unsubscribe()
         }
@@ -1140,9 +1135,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             if (tag) noteViewSubscribed(tag.paths)
             const subscription =
                 (tag?.realtime ?? realtimeMode) === 'collection'
-                    ? subscribeCollectionMode(tag, args)
+                    ? subscribeCounted(() => subscribeTagged(tag, args))
                     : subscribeTagged(tag, args)
-            reconcile().catch(() => {})
+            reconcile()
             return subscription
         }
     }
@@ -1692,9 +1687,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             clearSubscriptionPromise()
             releaseAll()
         }
-        if (expandDrifted()) {
-            enqueueSubscriptionWork(doRestartSubscription).catch(() => {})
-        }
+        if (expandDrifted()) restartSubscription()
     }
 
     // Close every open entry and reopen what the counters want, e.g. after
@@ -1707,42 +1700,36 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         await doReconcile()
     }
 
-    const reconcile = () => enqueueSubscriptionWork(doReconcile)
-    const restartSubscription = () => enqueueSubscriptionWork(doRestartSubscription)
+    // enqueueSubscriptionWork logs every failure, so neither can reject.
+    const reconcile = (): void => void enqueueSubscriptionWork(doReconcile)
+    const restartSubscription = (): void => void enqueueSubscriptionWork(doRestartSubscription)
 
     // A parent's hold on this collection as a relation target. Keeps sync
     // alive and GC blocked like any subscriber. In collection mode the hold
     // counts toward '*'; in query mode it is uncounted and the parent
     // supplies the filters covering the rows it filed here.
     function holdLive(): HeldTarget {
-        const counted = realtimeMode === 'collection'
-        if (counted) collectionModeSubscribers += 1
-        let subscription: ChangesSubscription
-        try {
-            subscription = originalSubscribeChanges(() => {}, { includeInitialState: false })
-        } catch (error) {
-            if (counted) collectionModeSubscribers -= 1
-            throw error
-        }
+        const subscribe = () => originalSubscribeChanges(() => {}, { includeInitialState: false })
+        const subscription =
+            realtimeMode === 'collection' ? subscribeCounted(subscribe) : subscribe()
         let current: string[] = []
         let released = false
-        reconcile().catch(() => {})
+        reconcile()
         return {
             setFilters: filters => {
                 if (released) return
                 const next = [...new Set(filters)]
                 swapHoldFilterRefs(current, next)
                 current = next
-                reconcile().catch(() => {})
+                reconcile()
             },
             release: () => {
                 if (released) return
                 released = true
                 for (const filter of current) dropFilterRef(holdFilterRefs, filter)
                 current = []
-                if (counted) collectionModeSubscribers -= 1
                 subscription.unsubscribe()
-                reconcile().catch(() => {})
+                reconcile()
             },
         }
     }
@@ -1774,12 +1761,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // Enqueued unconditionally (not gated on isSubscribed): the tail
         // guarantees this runs after any in-flight start/stop, and
         // doRestartSubscription itself no-ops when nothing is live.
-        restartSubscription().catch(error =>
-            logger.error('Failed to restart subscription with wider expand', {
-                collectionName,
-                error,
-            })
-        )
+        restartSubscription()
     }
 
     // Wait for subscription to be established (for testing)

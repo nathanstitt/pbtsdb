@@ -11,7 +11,6 @@ import {
     createTestQueryClient,
     pb,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
 import type { Schema } from './schema'
 
@@ -72,7 +71,7 @@ describe('Collection - subscribe options', () => {
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ gated: collection })))
         await waitForLoadFinish(result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const record = await createGatedRecord('with-token')
         createdIds.push(record.id)
@@ -90,7 +89,7 @@ describe('Collection - subscribe options', () => {
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ gated: collection })))
         await waitForLoadFinish(result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         const record = await createGatedRecord('without-token')
         createdIds.push(record.id)
@@ -115,7 +114,7 @@ describe('Collection - subscribe options', () => {
 
         const first = renderHook(() => useLiveQuery(q => q.from({ gated: collection })))
         await waitForLoadFinish(first.result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
         expect(tokens).toEqual(['stale-token'])
 
         // Drop the subscriber count to zero, then back to one, to force a
@@ -126,7 +125,7 @@ describe('Collection - subscribe options', () => {
         currentToken = VALID_TOKEN
         const second = renderHook(() => useLiveQuery(q => q.from({ gated: collection })))
         await waitForLoadFinish(second.result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         expect(tokens.length).toBeGreaterThan(1)
         expect(tokens.at(-1)).toBe(VALID_TOKEN)
@@ -152,7 +151,7 @@ describe('Collection - subscribe options', () => {
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
         await waitForLoadFinish(result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         expect(callCount).toBeGreaterThan(0)
         expect(collection.isSubscribed()).toBe(true)
@@ -166,7 +165,7 @@ describe('Collection - subscribe options', () => {
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
         await waitForLoadFinish(result)
-        await waitForSubscription(collection)
+        await collection.waitForSubscription()
 
         expect(collection.isSubscribed()).toBe(true)
         expect(result.current.data.length).toBeGreaterThan(0)

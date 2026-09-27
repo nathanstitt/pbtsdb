@@ -3,19 +3,19 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
-    createCollectionFactory,
     createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
     waitForLoadFinish,
-    waitForSubscription,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('Collection - Real-time Subscriptions', () => {
     let queryClient: QueryClient
@@ -46,7 +46,7 @@ describe('Collection - Real-time Subscriptions', () => {
         const initialCount = result.current.data.length
 
         // Wait for subscription to be ready
-        await waitForSubscription(booksCollection)
+        await booksCollection.waitForSubscription()
 
         // Create a new book via PocketBase
         const authorId = await getTestAuthorId()
@@ -98,7 +98,7 @@ describe('Collection - Real-time Subscriptions', () => {
         expect(result.current.data.length).toBeGreaterThan(0)
 
         // Wait for subscription to be ready
-        await waitForSubscription(booksCollection)
+        await booksCollection.waitForSubscription()
 
         const originalTitle = result.current.data[0].title
 
@@ -169,7 +169,7 @@ describe('Collection - Real-time Subscriptions', () => {
         await waitForLoadFinish(result)
 
         // Wait for subscription to be ready
-        await waitForSubscription(booksCollection)
+        await booksCollection.waitForSubscription()
 
         const initialCount = result.current.data.length
 
@@ -233,13 +233,13 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 20000)
 
     it('should automatically manage subscriptions based on query lifecycle', async () => {
-        const factory = createCollectionFactory(queryClient)
+        const c = createCollection<Schema>(pb, queryClient)
 
         // Spy on console.warn to detect invariant violations (TanStack Query DB Collection uses console.warn)
         const consoleWarnSpy = vi.spyOn(console, 'warn')
 
         // Create collection - no automatic subscription on creation
-        const booksCollection = factory.create('books')
+        const booksCollection = c('books')
 
         // Set up live query - subscription should start automatically
         const { result, unmount } = renderHook(() =>
@@ -249,7 +249,7 @@ describe('Collection - Real-time Subscriptions', () => {
         await waitForLoadFinish(result)
 
         // Wait for subscription to be ready
-        await waitForSubscription(booksCollection)
+        await booksCollection.waitForSubscription()
 
         // Create a new book
         const authorId = await getTestAuthorId()
@@ -301,8 +301,8 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 20000)
 
     it('should not subscribe when liveQuery returns null (conditional queries)', async () => {
-        const factory = createCollectionFactory(queryClient)
-        const booksCollection = factory.create('books')
+        const c = createCollection<Schema>(pb, queryClient)
+        const booksCollection = c('books')
 
         // Use a hook that conditionally returns null
         const { result, rerender, unmount } = renderHook(
