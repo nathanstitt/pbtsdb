@@ -618,11 +618,15 @@ useLiveQuery((q) => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')
 
 One PocketBase subscription is opened per distinct filter string and closed
 when the last query using it unmounts. A query with no `where` subscribes to
-the whole collection. PocketBase caps a realtime subscription topic at 2500
-characters, so an id subset is split into smaller chunks for realtime than
-for fetches, one subscription per chunk; a long non-subset filter that
-exceeds the cap is rejected by the server and logged. While any whole-collection subscription is open, the
+the whole collection. While any whole-collection subscription is open, the
 filtered ones stay closed.
+
+PocketBase caps a realtime subscription topic at 2500 characters. An id
+subset is split into smaller chunks for realtime than for fetches, one
+subscription per chunk. A filter whose topic is still too long (a long
+non-subset `where`, or one combined with a factory `subscribeOptions` filter)
+is not sent. The collection logs a warning and subscribes to every row while
+that filter is in use.
 
 A `'query'` collection held live as a relation target subscribes only to the
 rows the parent filed into it: the expanded records' ids for a forward
@@ -642,6 +646,10 @@ useLiveQuery((q) => q.from({ b: books.fetchRelations('author').withRealtime('que
 the change. An update that moves a row out of every active filter sends no
 event, so the row stays in the store until its query refetches. Deletes and
 creates are delivered correctly. Use `'collection'` mode where that matters.
+
+A held `'query'` target keeps the ids filed into it until the parent
+collection is cleaned up, so a long session with many distinct filed ids
+opens many subscriptions, one per id chunk.
 
 #### Subscription Options
 
