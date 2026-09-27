@@ -35,10 +35,10 @@ import {
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 import type {
     CreateCollectionOptions,
-    ExpandTargetCollection,
     ExtractRecordType,
     HeldTarget,
     RealtimeMode,
+    RelationTarget,
     SchemaDeclaration,
 } from './types'
 
@@ -171,8 +171,10 @@ export interface CollectionSubscriptionHelpers {
     markSubsetLoaded: (field: string, value: string) => void
     /** Number of field/value pairs currently marked loaded */
     loadedSubsetCount: () => number
-    /** Hold this collection live as a relation target; see ExpandTargetCollection.holdLive */
+    /** Hold this collection live as a relation target; see RelationTarget.holdLive */
     holdLive: () => HeldTarget
+    /** Receive rows a parent expanded into this collection; see RelationTarget.writeFiled */
+    writeFiled: (records: object[]) => Promise<boolean>
 }
 
 /**
@@ -211,6 +213,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     type RecordType = ExtractRecordType<Schema, C>
 
     const relationTargets = options?.relations as RelationTargets | undefined
+    for (const [key, target] of Object.entries(relationTargets ?? {})) {
+        if (typeof target?.writeFiled !== 'function' || typeof target.holdLive !== 'function') {
+            throw new Error(
+                `Collection '${collectionName}': relation '${key}' is not a pbtsdb collection`
+            )
+        }
+    }
     const alwaysFetch = normalizePaths(options?.alwaysFetchRelations ?? [])
     for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
@@ -277,9 +286,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // chance to be served from the store instead of racing this fetch.
     function backRelationTargetsFor(
         request: PbRequest
-    ): Array<{ target: ExpandTargetCollection; key: string; field: string }> {
+    ): Array<{ target: RelationTarget; key: string; field: string }> {
         if (!relationTargets) return []
-        const results: Array<{ target: ExpandTargetCollection; key: string; field: string }> = []
+        const results: Array<{ target: RelationTarget; key: string; field: string }> = []
         for (const key of splitPaths(activeExpand(request)).map(path => path.split('.')[0])) {
             const target = relationTargets[key]
             const via = target && parseViaKey(key)
@@ -352,14 +361,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return { refetch: refetchOnMutation }
     }
 
-    function eagerSyncInFlight(target: ExpandTargetCollection): boolean {
-        return (
-            target.status !== undefined &&
-            target.status !== 'idle' &&
-            target.status !== 'cleaned-up'
-        )
-    }
-
     // A filed copy never carries `expand`: any part of it with a declared
     // target was filed by the recursive upsertExpanded call right after
     // upsertInto, and any part without one has nowhere to go and is dropped.
@@ -370,32 +371,25 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         })
     }
 
-    // Returns whether a write actually happened. A silent no-op (no utils, or
-    // not ready with no way to become ready) must never be treated as a filing:
-    // the caller uses this to decide whether the values just upserted can be
-    // trusted to mark a subset complete.
-    async function upsertInto(
-        key: string,
-        target: ExpandTargetCollection,
-        values: object[]
-    ): Promise<boolean> {
-        if (!target.utils) return false
-        if (!target.isReady()) {
-            if (target.config?.syncMode === 'on-demand') {
-                await target._sync.startSync()
-            } else if (target.preload && eagerSyncInFlight(target)) {
-                // An eager target whose full load is already running (a held
-                // subscription started it) becomes ready shortly; wait rather
-                // than drop the records or race the load.
-                await target.preload()
+    // Receives rows a parent expanded through a relation to this collection.
+    // Returns whether the write happened: a caller marks a subset complete
+    // only after a real filing.
+    async function writeFiled(records: object[]): Promise<boolean> {
+        if (!collection.isReady()) {
+            if (syncMode === 'on-demand') {
+                await collection._sync.startSync()
+            } else if (collection.status !== 'idle' && collection.status !== 'cleaned-up') {
+                // A full load already running (a hold started it) becomes ready
+                // shortly; wait rather than drop the records or race the load.
+                await collection.preload()
             } else {
                 logger.warn(
-                    `not syncing ${key} on ${collectionName} because store is not yet ready`
+                    `not syncing filed rows into ${collectionName} because store is not yet ready`
                 )
                 return false
             }
         }
-        target.utils.writeUpsert(withoutExpand(values))
+        collection.utils.writeUpsert(withoutExpand(records) as RecordType[])
         return true
     }
 
@@ -434,7 +428,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     function recordFiledGroup(
-        target: ExpandTargetCollection,
+        target: RelationTarget,
         key: string,
         group: ExpandedGroup,
         values: object[]
@@ -469,7 +463,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 continue
             }
             const values = lastById(group.values)
-            const filed = await upsertInto(key, target, values)
+            const filed = await target.writeFiled(values)
             await upsertExpanded(values, target.relationTargets)
             if (!filed) continue
             recordFiledGroup(target, key, group, values)
@@ -490,7 +484,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const expand = expandOf(item)
             for (const { target, key, field } of heads) {
                 if (expand?.[key] === undefined) {
-                    target.markSubsetLoaded?.(field, id)
+                    target.markSubsetLoaded(field, id)
                     recordFiled(target, field, [id])
                 }
             }
@@ -1290,12 +1284,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // Collections along every active expand path. Held live (below) so their
     // stores stay fresh for keyed reads (materialize, joins, get()) and for
     // the store-served short circuit.
-    function activeExpandTargets(): Set<ExpandTargetCollection> {
-        const targets = new Set<ExpandTargetCollection>()
+    function activeExpandTargets(): Set<RelationTarget> {
+        const targets = new Set<RelationTarget>()
         for (const path of splitPaths(pendingSubscribeExpand())) {
             let current: RelationTargets | undefined = relationTargets
             for (const segment of path.split('.')) {
-                const target: ExpandTargetCollection | undefined = current?.[segment]
+                const target: RelationTarget | undefined = current?.[segment]
                 if (!target) break
                 targets.add(target)
                 current = target.relationTargets
@@ -1306,16 +1300,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // The only place held targets are added or removed, so the map always
     // mirrors the last desired set exactly.
-    const heldTargetSubscriptions = new Map<ExpandTargetCollection, HeldTarget>()
+    const heldTargetSubscriptions = new Map<RelationTarget, HeldTarget>()
 
     // What this collection filed into each target, per field: filed ids for a
     // forward relation, parent ids for a back-relation. A query-mode target
     // subscribes to exactly these rows while held. Kept across hold releases,
     // since a cached refetch re-holds without filing again; cleared on
     // cleanup or truncate.
-    const filedByTarget = new Map<ExpandTargetCollection, Map<string, Set<string>>>()
+    const filedByTarget = new Map<RelationTarget, Map<string, Set<string>>>()
 
-    function filedFiltersFor(target: ExpandTargetCollection): string[] {
+    function filedFiltersFor(target: RelationTarget): string[] {
         const byField = filedByTarget.get(target)
         if (!byField) return []
         const filters: string[] = []
@@ -1327,11 +1321,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return filters
     }
 
-    function recordFiled(
-        target: ExpandTargetCollection,
-        field: string,
-        values: Iterable<string>
-    ): void {
+    function recordFiled(target: RelationTarget, field: string, values: Iterable<string>): void {
         let byField = filedByTarget.get(target)
         if (!byField) {
             byField = new Map()
@@ -1351,7 +1341,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (grew) heldTargetSubscriptions.get(target)?.setFilters(filedFiltersFor(target))
     }
 
-    function releaseHeldTarget(target: ExpandTargetCollection): void {
+    function releaseHeldTarget(target: RelationTarget): void {
         const held = heldTargetSubscriptions.get(target)
         if (!held) return
         heldTargetSubscriptions.delete(target)
@@ -1365,26 +1355,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
 
-    function holdTarget(target: ExpandTargetCollection): void {
+    function holdTarget(target: RelationTarget): void {
         if (heldTargetSubscriptions.has(target)) return
         try {
-            if (target.holdLive) {
-                const held = target.holdLive()
-                heldTargetSubscriptions.set(target, held)
-                held.setFilters(filedFiltersFor(target))
-            } else if (target.subscribeChanges) {
-                const held = target.subscribeChanges(() => {}, { includeInitialState: false })
-                heldTargetSubscriptions.set(target, {
-                    setFilters: () => {},
-                    release: () => held.unsubscribe(),
-                })
-            }
+            const held = target.holdLive()
+            heldTargetSubscriptions.set(target, held)
+            held.setFilters(filedFiltersFor(target))
         } catch (error) {
             logger.error('Failed to hold relation target subscription', { collectionName, error })
         }
     }
 
-    function syncHeldSubscriptions(desired: Set<ExpandTargetCollection>): void {
+    function syncHeldSubscriptions(desired: Set<RelationTarget>): void {
         for (const target of [...heldTargetSubscriptions.keys()]) {
             if (!desired.has(target)) releaseHeldTarget(target)
         }
@@ -1664,6 +1646,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         markSubsetLoaded,
         loadedSubsetCount,
         holdLive,
+        writeFiled,
         fetchRelations,
         withRealtime,
     })

@@ -1,6 +1,6 @@
-import type { ExpandTargetCollection } from './types'
+import type { RelationTarget } from './types'
 
-export type RelationTargets = Record<string, ExpandTargetCollection>
+export type RelationTargets = Record<string, RelationTarget>
 
 export function normalizePaths(paths: Iterable<string>): string[] {
     const set = new Set<string>()
@@ -36,14 +36,14 @@ export function parseViaKey(key: string): { field: string } | undefined {
  * relation or PocketBase may have capped the expand.
  */
 export function markFiledSubset(
-    target: ExpandTargetCollection,
+    target: RelationTarget,
     key: string,
     values: readonly object[],
     parentId: string
 ): void {
     const via = parseViaKey(key)
     if (!via || values.length >= BACK_RELATION_EXPAND_CAP) return
-    target.markSubsetLoaded?.(via.field, parentId)
+    target.markSubsetLoaded(via.field, parentId)
 }
 
 export function validateExpandPath(
@@ -58,7 +58,7 @@ export function validateExpandPath(
     }
     let current: RelationTargets | undefined = targets
     for (const segment of path.split('.')) {
-        const next: ExpandTargetCollection | undefined = current?.[segment]
+        const next: RelationTarget | undefined = current?.[segment]
         if (!next) {
             throw new Error(
                 `Cannot expand "${path}" on collection "${collectionName}": segment "${segment}" is not a declared relation`

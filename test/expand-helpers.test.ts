@@ -13,13 +13,18 @@ import {
     splitPaths,
     validateExpandPath,
 } from '../src/expand-paths'
-import type { ExpandTargetCollection } from '../src/types'
+import type { RelationTarget } from '../src/types'
 
-function target(relationTargets?: RelationTargets) {
+function target(relationTargets?: RelationTargets): RelationTarget & { marks: [string, string][] } {
+    const marks: [string, string][] = []
     return {
-        isReady: () => true,
-        _sync: { startSync: async () => undefined },
+        marks,
         relationTargets,
+        writeFiled: async () => true,
+        markSubsetLoaded: (field, value) => {
+            marks.push([field, value])
+        },
+        holdLive: () => ({ setFilters: () => {}, release: () => {} }),
     }
 }
 
@@ -92,18 +97,7 @@ describe('parseViaKey', () => {
 })
 
 describe('markFiledSubset', () => {
-    function fakeTarget() {
-        const marks: [string, string][] = []
-        const target: ExpandTargetCollection & { marks: typeof marks } = {
-            marks,
-            isReady: () => true,
-            _sync: { startSync: async () => undefined },
-            markSubsetLoaded: (field, value) => {
-                marks.push([field, value])
-            },
-        }
-        return target
-    }
+    const fakeTarget = () => target()
 
     it('marks a back-relation for the parent id', () => {
         const target = fakeTarget()
@@ -131,16 +125,6 @@ describe('markFiledSubset', () => {
         const at = fakeTarget()
         markFiledSubset(at, 'comments_via_card', rows(BACK_RELATION_EXPAND_CAP), 'c1')
         expect(at.marks).toEqual([])
-    })
-
-    it('skips a target without markSubsetLoaded', () => {
-        const target: ExpandTargetCollection = {
-            isReady: () => true,
-            _sync: { startSync: async () => undefined },
-        }
-        expect(() =>
-            markFiledSubset(target, 'comments_via_card', [{ id: 'x' }], 'c1')
-        ).not.toThrow()
     })
 })
 
