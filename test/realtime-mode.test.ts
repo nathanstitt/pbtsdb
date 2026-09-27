@@ -231,6 +231,25 @@ describe('realtime mode', () => {
             )
         }, 20000)
 
+        // Pins the documented limit: PocketBase checks an update against the
+        // row's state after the change, so a row that leaves the filter sends
+        // no event. If this test starts failing, PocketBase began sending one
+        // and the README note can go.
+        it('keeps a row that leaves the filter until the query refetches', async () => {
+            const book = await seedBook('Fantasy')
+            const { books } = make()
+            const { result } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')))
+            )
+            await waitForLoadFinish(result)
+            await waitForSubscription(books)
+            expect(result.current.data.some(r => r.id === book.id)).toBe(true)
+
+            await pb.collection('books').update(book.id, { genre: 'Mystery' })
+            await new Promise(resolve => setTimeout(resolve, 3000))
+            expect(result.current.data.some(r => r.id === book.id)).toBe(true)
+        }, 20000)
+
         it('shares one filtered subscription between queries with the same filter', async () => {
             const { books } = make()
             const first = renderHook(() =>

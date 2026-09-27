@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 - Child subsets filed by a back-relation expand (`comments_via_card`) are
   served from the store: a child query filtered by that foreign key makes no
   request while the subset is marked complete.
+- `realtime: 'query'` on an on-demand collection subscribes to realtime per
+  active query filter instead of the whole collection, and
+  `collection.withRealtime(mode)` overrides the mode for one query.
 
 ### Fixed
 
