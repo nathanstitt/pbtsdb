@@ -227,19 +227,22 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     // Store accessors close over `collection`, created below; every caller
-    // runs after construction.
+    // runs after construction. The synced (pre-optimistic) row has no public
+    // accessor; `_state.syncedData` is the field @tanstack/query-db-collection
+    // itself reads, and test/tanstack-internals.test.ts pins it.
+    const syncedRow = (id: string) => collection._state.syncedData.get(id)
+    const syncedRows = () => collection._state.syncedData.values()
     const subsets = createLoadedSubsets(collectionName, queryClient)
     const held = createHeldTargets(collectionName)
     const filer = createExpandFiler(collectionName, held.recordFiled)
     const guard = createSyncedWriteGuard<RecordType>(collectionName, {
         isReady: () => collection.isReady(),
-        syncedRow: id => collection._state.syncedData.get(id),
+        syncedRow,
+        // A visible row reports its own overlay; an invisible row with a
+        // synced copy is under an optimistic delete.
         hasPendingMutation: id => {
-            const state = collection._state as unknown as {
-                optimisticUpserts: { has: (k: string) => boolean }
-                optimisticDeletes: { has: (k: string) => boolean }
-            }
-            return state.optimisticUpserts.has(id) || state.optimisticDeletes.has(id)
+            const visible = collection.get(id)
+            return visible ? !visible.$synced : syncedRow(id) !== undefined
         },
         writeUpsert: records => collection.utils.writeUpsert(records),
     })
@@ -250,8 +253,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         relationTargets,
         ignoreAutoCancellation,
         activeExpand,
-        syncedRow: id => collection._state.syncedData.get(id),
-        syncedRows: () => collection._state.syncedData.values(),
+        syncedRow,
+        syncedRows,
         subsets,
         guard,
         filer,
@@ -529,18 +532,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // only after a real filing.
     async function writeFiled(records: object[]): Promise<boolean> {
         if (!collection.isReady()) {
-            if (syncMode === 'on-demand') {
-                await collection._sync.startSync()
-            } else if (collection.status !== 'idle' && collection.status !== 'cleaned-up') {
-                // A full load already running (a hold started it) becomes ready
-                // shortly; wait rather than drop the records or race the load.
-                await collection.preload()
-            } else {
+            const idle = collection.status === 'idle' || collection.status === 'cleaned-up'
+            if (syncMode === 'eager' && idle) {
+                // Filing must not start a full eager load; a load already
+                // running (a hold started it) is worth waiting for.
                 logger.warn(
                     `not syncing filed rows into ${collectionName} because store is not yet ready`
                 )
                 return false
             }
+            await collection.preload()
         }
         collection.utils.writeUpsert(withoutExpand(records) as RecordType[])
         return true
