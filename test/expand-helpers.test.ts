@@ -21,6 +21,7 @@ function target(relationTargets?: RelationTargets): RelationTarget & { marks: [s
         marks,
         relationTargets,
         writeFiled: async () => true,
+        expectFiling: () => () => {},
         markSubsetLoaded: (field, value) => {
             marks.push([field, value])
         },

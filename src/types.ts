@@ -142,6 +142,12 @@ export interface RelationTarget {
     readonly relationTargets: Record<string, RelationTarget> | undefined
     /** Upsert filed rows into the store. False when the store cannot take them yet. */
     writeFiled: (records: object[]) => Promise<boolean>
+    /**
+     * A parent's fetch may file and mark `field` once `settles` resolves; the
+     * target's own fetch for that subset waits for it (see docs/internals.md,
+     * "Pending filings"). Returns the unregister function.
+     */
+    expectFiling: (field: string, settles: Promise<void>) => () => void
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded: (field: string, value: string) => void
     /**

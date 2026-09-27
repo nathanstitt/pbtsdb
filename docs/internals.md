@@ -1,10 +1,10 @@
 # Internals
 
-Design notes for the parts of `src/build-collection.ts` whose reason is not visible in the code. Each section names the function that holds the behavior.
+Design notes for the parts of the collection runtime whose reason is not visible in the code. Each section names the module and functions that hold the behavior.
 
 ## Write-back timing
 
-`writeBackAfterPersisted`
+`src/synced-write-guard.ts`: `writeBackAfterPersisted`
 
 TanStack DB keeps a completed transaction's optimistic draft visible until a synced write for the key arrives. A record the server fills in (a number, a timestamp) reaches the screen only through that later synced write.
 
@@ -16,7 +16,7 @@ The deferred write is a no-op when the collection is not ready. Writing into the
 
 ## Confirmed rows and in-flight fetches
 
-`inFlightConfirmedIds`, `markConfirmedPresent`, `withRowsConfirmedMidFlight`
+`src/synced-write-guard.ts`: `trackFetch`, `markConfirmedPresent`, `withRowsConfirmedMidFlight`
 
 `@tanstack/query-db-collection`'s `applySuccessfulResult` deletes every row a query owns that its result omits, and the synced-write guard exempts deletes. A subset read issued before a row existed can resolve late and delete the just-confirmed row. Rows a query owns include rows pushed into its cache by the manual-write path that runs on every write-back.
 
@@ -26,17 +26,17 @@ The fix is applied to the result, not the delete. `fetchRecords` merges such row
 
 ## Staleness
 
-`isStaleServerRecord`, `isStaleEcho`, `shouldDropSyncedWrite`
+`src/synced-write-guard.ts`: `isStaleServerRecord`, `shouldDrop`; `src/build-collection.ts`: `isStaleEcho`
 
 A server record is stale when the synced store holds a newer `updated` for the same key. PocketBase can redeliver or reorder realtime echoes, and a slow mutation response can resolve after a newer echo. Strictly older, never equal: PocketBase bumps `updated` on every write, so an equal timestamp is the same version of the row, and re-landing it is what clears a lingering optimistic overlay.
 
 An earlier `<=` variant on the query-result path guarded against a read carrying old content under a new timestamp, which a real server cannot produce. The revert it chased was the write-back racing its own transaction, fixed by the write-back timing above.
 
-`shouldDropSyncedWrite` guards the synced write path pbtsdb does not control. `applySuccessfulResult` reconciles every query result into the synced store with no recency or optimistic check, so under on-demand contention a subset read can resolve with a pre-mutation row after the row moved on. A synced insert or update is dropped when it targets a key with a pending optimistic mutation, or when it is strictly older than the synced row. Only a key already in the synced store is guarded by the optimistic arm: a write to a key the store lacks is populating it, and dropping it would leave the row absent once the overlay clears. pbtsdb's own writes skip the optimistic arm; they are filtered for staleness upstream.
+`shouldDrop` guards the synced write path pbtsdb does not control. `applySuccessfulResult` reconciles every query result into the synced store with no recency or optimistic check, so under on-demand contention a subset read can resolve with a pre-mutation row after the row moved on. A synced insert or update is dropped when it targets a key with a pending optimistic mutation, or when it is strictly older than the synced row. Only a key already in the synced store is guarded by the optimistic arm: a write to a key the store lacks is populating it, and dropping it would leave the row absent once the overlay clears. pbtsdb's own writes skip the optimistic arm; they are filtered for staleness upstream.
 
 ## Delete echoes
 
-`handleRealtimeEvent`
+`src/build-collection.ts`: `handleRealtimeEvent`
 
 `writeInsert` and `writeUpsert` never throw on an absent key. `writeDelete` throws `DeleteOperationItemNotFoundError` when the key is already gone from the synced store. That happens in two cases:
 
@@ -47,25 +47,25 @@ In both cases the row is already in its intended end state, so the echo is a no-
 
 ## Pending filings
 
-`pendingFilings`, `registerPendingFiling`, `awaitPendingFiling`, `fetchItems`
+`src/fetch-records.ts`: `expectFiling`, `awaitPendingFiling`, `fetchItems`
 
 A correlated subquery over a relation target (a `materialize` include keyed off the parent row's id) can have its own `loadSubset` dispatched by TanStack DB's query planner before the parent's fetch, the one that would file and mark that exact subset, has resolved.
 
-A parent fetch registers, on each back-relation target, that it may mark a field once its `upsertExpanded` settles. The target's own `fetchItems` awaits those registrations before requesting a not-yet-loaded subset on that field. The registration resolves once filing settles either way, including on the error and autocancel paths, so a waiter is never left hanging.
+A parent fetch calls `expectFiling` on each back-relation target to say it may mark a field once its `upsertExpanded` settles. The target's own `fetchItems` awaits those registrations before requesting a not-yet-loaded subset on that field. The registration resolves once filing settles either way, including on the error and autocancel paths, so a waiter is never left hanging.
 
 Invariant: a fetch that registers pending filings never waits on them. A fetch's own active expand can register filings on other targets; if it also waited, two mutually back-related collections would each register before either awaits and then wait on each other forever.
 
 ## Loaded-subset marks
 
-`loadedSubsets`, `forgetMarksFor`, `invalidateForgottenSubset`, `invalidateAllMarkedSubsets`
+`src/loaded-subsets.ts`: `forgetRow`, `invalidateAll`
 
 A mark records that every row with `field === value` is in the store, so a subset query on that field is served without a request. A subset query that resolved once is served from `query-db-collection`'s observer cache on the next mount regardless of marks, so forgetting a mark must also invalidate that cached query. Releasing every mark on a real subscription stop invalidates them all for the same reason.
 
-`forgetMarksFor` defers its invalidation with `queueMicrotask`. It runs inside the guarded sync write, which is inside TanStack's write batch, and `invalidateQueries` can start a `queryFn` synchronously up to its first await. That must not re-enter `fetchRecords` mid-batch.
+`forgetRow` defers its invalidation with `queueMicrotask`. It runs inside the guarded sync write, which is inside TanStack's write batch, and `invalidateQueries` can start a `queryFn` synchronously up to its first await. That must not re-enter `fetchRecords` mid-batch.
 
 ## Sync-session refs and holds
 
-`retainQueryFilters`, `resetQueryFilters`, `holdLive`
+`src/realtime-subscription.ts`: `retainQueryFilters`, `resetQueryFilters`, `swapHoldFilters`; `src/build-collection.ts`: `holdLive`
 
 TanStack drops a discarded sync session's demands without calling `unloadSubset` and reloads them on the next session, so sync cleanup zeroes the query filter refs. Held-target refs live apart because a hold outlives the sync session.
 
