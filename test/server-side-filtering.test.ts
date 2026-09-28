@@ -1,4 +1,4 @@
-import { eq, inArray } from '@tanstack/db'
+import { eq, inArray, not } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -183,6 +183,33 @@ describe('Server-Side Filtering (on-demand mode)', () => {
 
         // Verify count matches expected (proving server returned correct data)
         expect(result.current.data.length).toBe(expectedCount)
+    }, 15000)
+
+    it('should filter server-side with not(eq())', async () => {
+        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+
+        const allBooks = await pb.collection('books').getFullList()
+        const excludedGenre = allBooks[0].genre
+        const expectedCount = allBooks.filter(b => b.genre !== excludedGenre).length
+        expect(expectedCount).toBeGreaterThan(0)
+
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ books: booksCollection })
+                    .where(({ books }) => not(eq(books.genre, excludedGenre)))
+            )
+        )
+
+        await waitFor(
+            () => {
+                expect(result.current.data.length).toBe(expectedCount)
+            },
+            { timeout: 10000 }
+        )
+        result.current.data.forEach(book => {
+            expect(book.genre).not.toBe(excludedGenre)
+        })
     }, 15000)
 
     // Note: TanStack DB does NOT pass orderBy to loadSubsetOptions - sorting is always client-side.

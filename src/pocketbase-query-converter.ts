@@ -1,6 +1,6 @@
-import type { IR } from '@tanstack/db'
 import {
     type FieldPath,
+    IR,
     type ParsedOrderBy,
     parseOrderByExpression,
     parseWhereExpression,
@@ -34,6 +34,55 @@ function fieldPathToString(path: FieldPath): string {
     return path.join('.')
 }
 
+const NEGATED_OPERATORS: Record<string, string> = {
+    eq: 'neq',
+    neq: 'eq',
+    gt: 'lte',
+    gte: 'lt',
+    lt: 'gte',
+    lte: 'gt',
+    in: 'notIn',
+    notIn: 'in',
+    like: 'notLike',
+    notLike: 'like',
+    isNull: 'isNotNull',
+    isUndefined: 'isNotNull',
+    isNotNull: 'isNull',
+}
+
+function negate(expr: BasicExpression<boolean>): BasicExpression<boolean> {
+    if (expr.type !== 'func') {
+        throw new Error(
+            `Unsupported operand '${expr.type}' inside not() for PocketBase filter conversion`
+        )
+    }
+    if (expr.name === 'not') {
+        return pushDownNot(expr.args[0])
+    }
+    if (expr.name === 'and' || expr.name === 'or') {
+        return new IR.Func(expr.name === 'and' ? 'or' : 'and', expr.args.map(negate))
+    }
+    const negated = NEGATED_OPERATORS[expr.name]
+    if (!negated) {
+        throw new Error(`Unsupported operator 'not(${expr.name})' for PocketBase filter conversion`)
+    }
+    return new IR.Func(negated, expr.args)
+}
+
+// PocketBase filters have no prefix `!`, so negations are pushed down onto comparison operators
+function pushDownNot(expr: BasicExpression<boolean>): BasicExpression<boolean> {
+    if (expr.type !== 'func') {
+        return expr
+    }
+    if (expr.name === 'not') {
+        return negate(expr.args[0])
+    }
+    if (expr.name === 'and' || expr.name === 'or') {
+        return new IR.Func(expr.name, expr.args.map(pushDownNot))
+    }
+    return expr
+}
+
 export function convertToPocketBaseFilter(
     where: BasicExpression<boolean> | undefined | null
 ): string | undefined {
@@ -41,7 +90,7 @@ export function convertToPocketBaseFilter(
         return undefined
     }
 
-    const result = parseWhereExpression(where, {
+    const result = parseWhereExpression(pushDownNot(where), {
         handlers: {
             eq: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} = ${escapeValue(value)}`
@@ -68,8 +117,8 @@ export function convertToPocketBaseFilter(
                 if (conditions.length === 1) return conditions[0]
                 return `(${conditions.join(' || ')})`
             },
-            not: (condition: string) => {
-                return `!(${condition})`
+            neq: (field: FieldPath, value: unknown) => {
+                return `${fieldPathToString(field)} != ${escapeValue(value)}`
             },
             in: (field: FieldPath, values: unknown) => {
                 const valueArray = Array.isArray(values) ? values : [values]
@@ -77,6 +126,16 @@ export function convertToPocketBaseFilter(
                 const fieldStr = fieldPathToString(field)
                 const conditions = uniqueValues.map(v => `${fieldStr} = ${escapeValue(v)}`)
                 return conditions.length > 1 ? `(${conditions.join(' || ')})` : conditions[0]
+            },
+            notIn: (field: FieldPath, values: unknown) => {
+                const valueArray = Array.isArray(values) ? values : [values]
+                const uniqueValues = [...new Set(valueArray)]
+                const fieldStr = fieldPathToString(field)
+                const conditions = uniqueValues.map(v => `${fieldStr} != ${escapeValue(v)}`)
+                return conditions.length > 1 ? `(${conditions.join(' && ')})` : conditions[0]
+            },
+            notLike: (field: FieldPath, value: unknown) => {
+                return `${fieldPathToString(field)} !~ ${escapeValue(value)}`
             },
             like: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} ~ ${escapeValue(value)}`
@@ -86,6 +145,9 @@ export function convertToPocketBaseFilter(
             },
             isUndefined: (field: FieldPath) => {
                 return `${fieldPathToString(field)} = null`
+            },
+            isNotNull: (field: FieldPath) => {
+                return `${fieldPathToString(field)} != null`
             },
         },
         onUnknownOperator: (operator: string, _args: unknown[]) => {
