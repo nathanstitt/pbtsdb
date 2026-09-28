@@ -34,6 +34,26 @@ function fieldPathToString(path: FieldPath): string {
     return path.join('.')
 }
 
+// PocketBase has no boolean literals, so an empty `in` / `notIn` compiles to a constant comparison
+const NEVER_MATCH = '1 = 2'
+const ALWAYS_MATCH = '1 = 1'
+
+function membership(
+    field: FieldPath,
+    values: unknown,
+    operator: '=' | '!=',
+    joiner: '||' | '&&',
+    empty: string
+): string {
+    const valueArray = Array.isArray(values) ? values : [values]
+    const fieldStr = fieldPathToString(field)
+    const conditions = [...new Set(valueArray)].map(
+        v => `${fieldStr} ${operator} ${escapeValue(v)}`
+    )
+    if (conditions.length === 0) return empty
+    return conditions.length > 1 ? `(${conditions.join(` ${joiner} `)})` : conditions[0]
+}
+
 const NEGATED_OPERATORS: Record<string, string> = {
     eq: 'neq',
     neq: 'eq',
@@ -120,20 +140,10 @@ export function convertToPocketBaseFilter(
             neq: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} != ${escapeValue(value)}`
             },
-            in: (field: FieldPath, values: unknown) => {
-                const valueArray = Array.isArray(values) ? values : [values]
-                const uniqueValues = [...new Set(valueArray)]
-                const fieldStr = fieldPathToString(field)
-                const conditions = uniqueValues.map(v => `${fieldStr} = ${escapeValue(v)}`)
-                return conditions.length > 1 ? `(${conditions.join(' || ')})` : conditions[0]
-            },
-            notIn: (field: FieldPath, values: unknown) => {
-                const valueArray = Array.isArray(values) ? values : [values]
-                const uniqueValues = [...new Set(valueArray)]
-                const fieldStr = fieldPathToString(field)
-                const conditions = uniqueValues.map(v => `${fieldStr} != ${escapeValue(v)}`)
-                return conditions.length > 1 ? `(${conditions.join(' && ')})` : conditions[0]
-            },
+            in: (field: FieldPath, values: unknown) =>
+                membership(field, values, '=', '||', NEVER_MATCH),
+            notIn: (field: FieldPath, values: unknown) =>
+                membership(field, values, '!=', '&&', ALWAYS_MATCH),
             notLike: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} !~ ${escapeValue(value)}`
             },
