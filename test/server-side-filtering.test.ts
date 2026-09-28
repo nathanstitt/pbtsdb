@@ -1,4 +1,4 @@
-import { eq, inArray, not } from '@tanstack/db'
+import { and, eq, IR, inArray, not } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -6,6 +6,7 @@ import PocketBase from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createCollection } from '../src'
+import { convertToPocketBaseFilter } from '../src/pocketbase-query-converter'
 import {
     authenticateTestUser,
     clearAuth,
@@ -72,6 +73,33 @@ describe('Server-Side Filtering (on-demand mode)', () => {
             await Promise.all(ids.map(id => pb.collection('tags').delete(id)))
         }
     }, 20000)
+
+    it('sends a PocketBase-valid filter for an empty inArray nested in and()', async () => {
+        const [book] = await pb.collection('books').getFullList()
+        const books = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const genre = eq(new IR.PropRef(['genre']), book.genre)
+        const id = new IR.PropRef<string>(['id'])
+
+        const never = convertToPocketBaseFilter(and(genre, inArray(id, [])))
+        const always = convertToPocketBaseFilter(and(genre, not(inArray(id, []))))
+        expect(await pb.collection('books').getFullList({ filter: never })).toHaveLength(0)
+        expect(await pb.collection('books').getFullList({ filter: always })).toEqual(
+            await pb.collection('books').getFullList({ filter: `genre = "${book.genre}"` })
+        )
+
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ books })
+                    .where(({ books }) =>
+                        and(eq(books.genre, book.genre), not(inArray(books.id, [])))
+                    )
+            )
+        )
+        await waitFor(() => expect(result.current.data.length).toBeGreaterThan(0), {
+            timeout: 10000,
+        })
+    }, 15000)
 
     it('should pass filter to PocketBase getFullList when .where() is present', async () => {
         const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })

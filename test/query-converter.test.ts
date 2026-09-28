@@ -78,6 +78,19 @@ describe('PocketBase Query Converter', () => {
         expect(filter).toBe('id = "x0xz23mbkpouksb"')
     })
 
+    describe('empty in / notIn', () => {
+        const genre = mockField<string>(['genre'])
+        const pages = mockField<number>(['page_count'])
+
+        it.each([
+            ['in', and(eq(pages, 1), inArray(genre, [])), '(page_count = 1 && 1 = 2)'],
+            ['notIn', and(eq(pages, 1), not(inArray(genre, []))), '(page_count = 1 && 1 = 1)'],
+            ['in inside or', or(eq(pages, 1), inArray(genre, [])), '(page_count = 1 || 1 = 2)'],
+        ])('should compile an empty %s to a constant', (_name, whereExpr, expected) => {
+            expect(convertToPocketBaseFilter(whereExpr)).toBe(expected)
+        })
+    })
+
     describe('not', () => {
         const genre = mockField<string>(['genre'])
         const pages = mockField<number>(['page_count'])
