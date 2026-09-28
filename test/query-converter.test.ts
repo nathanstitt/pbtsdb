@@ -1,5 +1,5 @@
 import type { IR } from '@tanstack/db'
-import { and, eq, gt, or } from '@tanstack/db'
+import { and, eq, gt, inArray, isNull, like, lt, not, or } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
 import {
     convertToPocketBaseFilter,
@@ -8,7 +8,7 @@ import {
 
 // Helper to create mock field operands for testing the converter
 // The converter uses parseWhereExpression which extracts field paths from the IR structure
-const mockField = (path: string[]) => path as unknown as IR.BasicExpression<unknown>
+const mockField = <T = unknown>(path: string[]) => path as unknown as IR.BasicExpression<T>
 
 describe('PocketBase Query Converter', () => {
     it('should convert eq operator to PocketBase filter', () => {
@@ -76,5 +76,29 @@ describe('PocketBase Query Converter', () => {
         const filter = convertToPocketBaseFilter(where)
         // After deduplication, only one unique value remains
         expect(filter).toBe('id = "x0xz23mbkpouksb"')
+    })
+
+    describe('not', () => {
+        const genre = mockField<string>(['genre'])
+        const pages = mockField<number>(['page_count'])
+
+        it.each([
+            ['eq', not(eq(genre, 'Fantasy')), 'genre != "Fantasy"'],
+            ['like', not(like(genre, 'Fan%')), 'genre !~ "Fan%"'],
+            ['isNull', not(isNull(genre)), 'genre != null'],
+            ['gt', not(gt(pages, 100)), 'page_count <= 100'],
+            ['lt', not(lt(pages, 100)), 'page_count >= 100'],
+            ['in', not(inArray(genre, ['A', 'B'])), '(genre != "A" && genre != "B")'],
+            ['not', not(not(eq(genre, 'A'))), 'genre = "A"'],
+            ['and', not(and(eq(genre, 'A'), gt(pages, 1))), '(genre != "A" || page_count <= 1)'],
+            ['or', not(or(eq(genre, 'A'), eq(genre, 'B'))), '(genre != "A" && genre != "B")'],
+        ])('should push not(%s) down to a PocketBase operator', (_name, whereExpr, expected) => {
+            expect(convertToPocketBaseFilter(whereExpr)).toBe(expected)
+        })
+
+        it('should push not down inside and/or', () => {
+            const whereExpr = and(eq(genre, 'A'), not(eq(pages, 1)))
+            expect(convertToPocketBaseFilter(whereExpr)).toBe('(genre = "A" && page_count != 1)')
+        })
     })
 })
