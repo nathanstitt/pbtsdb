@@ -1,4 +1,11 @@
-import { eq, type LiveQueryWindowCollection, useLiveQuery } from '@tanstack/react-db'
+import {
+    and,
+    eq,
+    type LiveQueryWindowCollection,
+    lt,
+    materialize,
+    useLiveQuery,
+} from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -152,5 +159,90 @@ describe('paging', () => {
         const [, perPage, options] = getList.mock.calls[0]
         expect(perPage).toBeLessThanOrEqual(10)
         expect(options?.filter).toMatch(/page_count [><]=? \d+/)
+    }, 30000)
+
+    it('delivers a create echo to a sorted limited query and files its relation', async () => {
+        const { authors, books } = make()
+        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ b: books.fetchRelations('author') })
+                    .where(({ b }) => eq(b.author, authorId))
+                    .orderBy(({ b }) => b.page_count, 'desc')
+                    .limit(5)
+                    .select(({ b }) => ({
+                        ...b,
+                        author: materialize(
+                            q
+                                .from({ a: authors })
+                                .where(({ a }) => eq(a.id, b.author))
+                                .findOne()
+                        ),
+                    }))
+            )
+        )
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        expect(pageCounts(result.current.data)).toEqual([25, 24, 23, 22, 21])
+        expect(result.current.data[0].author?.id).toBe(authorId)
+
+        // The subscription carries the where only: no sort, limit, or cursor.
+        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        expect(filters).toEqual([`author = "${authorId}"`])
+
+        const created = await pb.collection('books').create({
+            title: 'Paging 100',
+            isbn: getTestSlug('isbn'),
+            genre: 'Fantasy',
+            author: authorId,
+            page_count: 100,
+            published_date: '',
+        })
+        bookIds.push(created.id)
+
+        await waitFor(() => expect(pageCounts(result.current.data)).toEqual([100, 25, 24, 23, 22]))
+        expect(result.current.data[0].author?.name).toContain('Paging')
+    }, 30000)
+
+    it('a cursor in the where subscribes to its slice only', async () => {
+        const { books } = make()
+        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ b: books })
+                    .where(({ b }) => and(eq(b.author, authorId), lt(b.page_count, 10)))
+                    .orderBy(({ b }) => b.page_count, 'desc')
+                    .limit(5)
+            )
+        )
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        expect(pageCounts(result.current.data)).toEqual([9, 8, 7, 6, 5])
+        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        expect(filters).toEqual([`(author = "${authorId}" && page_count < 10)`])
+
+        const outside = await pb.collection('books').create({
+            title: 'Paging 50',
+            isbn: getTestSlug('isbn'),
+            genre: 'Fantasy',
+            author: authorId,
+            page_count: 50,
+            published_date: '',
+        })
+        bookIds.push(outside.id)
+        const inside = await pb.collection('books').create({
+            title: 'Paging 9.5',
+            isbn: getTestSlug('isbn'),
+            genre: 'Fantasy',
+            author: authorId,
+            page_count: 9.5,
+            published_date: '',
+        })
+        bookIds.push(inside.id)
+
+        await waitFor(() => expect(pageCounts(result.current.data)).toEqual([9.5, 9, 8, 7, 6]))
+        expect(books.has(outside.id)).toBe(false)
     }, 30000)
 })
