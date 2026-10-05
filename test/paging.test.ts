@@ -201,10 +201,14 @@ describe('paging', () => {
             page_count: 100,
             published_date: '',
         })
-        bookIds.push(created.id)
-
-        await waitFor(() => expect(pageCounts(result.current.data)).toEqual([100, 25, 24, 23, 22]))
-        expect(result.current.data[0].author?.name).toContain('Paging')
+        try {
+            await waitFor(() =>
+                expect(pageCounts(result.current.data)).toEqual([100, 25, 24, 23, 22])
+            )
+            expect(result.current.data[0].author?.name).toContain('Paging')
+        } finally {
+            await pb.collection('books').delete(created.id)
+        }
     }, 30000)
 
     it('a cursor in the where subscribes to its slice only', async () => {
@@ -225,27 +229,32 @@ describe('paging', () => {
         const filters = subscribe.mock.calls.map(call => call[2]?.filter)
         expect(filters).toEqual([`(author = "${authorId}" && page_count < 10)`])
 
-        const outside = await pb.collection('books').create({
-            title: 'Paging 50',
-            isbn: getTestSlug('isbn'),
-            genre: 'Fantasy',
-            author: authorId,
-            page_count: 50,
-            published_date: '',
-        })
-        bookIds.push(outside.id)
-        const inside = await pb.collection('books').create({
-            title: 'Paging 9.5',
-            isbn: getTestSlug('isbn'),
-            genre: 'Fantasy',
-            author: authorId,
-            page_count: 9.5,
-            published_date: '',
-        })
-        bookIds.push(inside.id)
+        const created: string[] = []
+        try {
+            const outside = await pb.collection('books').create({
+                title: 'Paging 50',
+                isbn: getTestSlug('isbn'),
+                genre: 'Fantasy',
+                author: authorId,
+                page_count: 50,
+                published_date: '',
+            })
+            created.push(outside.id)
+            const inside = await pb.collection('books').create({
+                title: 'Paging 9.5',
+                isbn: getTestSlug('isbn'),
+                genre: 'Fantasy',
+                author: authorId,
+                page_count: 9.5,
+                published_date: '',
+            })
+            created.push(inside.id)
 
-        await waitFor(() => expect(pageCounts(result.current.data)).toEqual([9.5, 9, 8, 7, 6]))
-        expect(books.has(outside.id)).toBe(false)
+            await waitFor(() => expect(pageCounts(result.current.data)).toEqual([9.5, 9, 8, 7, 6]))
+            expect(books.has(outside.id)).toBe(false)
+        } finally {
+            for (const id of created) await pb.collection('books').delete(id)
+        }
     }, 30000)
 
     it('a filtered join source subscribes to its id batch', async () => {
