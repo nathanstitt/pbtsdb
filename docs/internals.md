@@ -70,3 +70,9 @@ A mark records that every row with `field === value` is in the store, so a subse
 TanStack drops a discarded sync session's demands without calling `unloadSubset` and reloads them on the next session, so sync cleanup zeroes the query filter refs. Held-target refs live apart because a hold outlives the sync session.
 
 The realtime topic and filter caps live in `src/pocketbase-limits.ts`. A filter over the cap is recorded in `oversizedFilters` and the collection widens to `'*'`, because the SDK keeps a rejected topic and re-posts it with every later change.
+
+## Realtime filter per chunk
+
+`src/realtime-where.ts`: `realtimeWhereFor`
+
+TanStack composes a boundary tie-check as `and(subscription.where, extra)` and loads it through the same subscription; it sends a cursor page with `where === subscription.where`. pbtsdb reads the subscription's base where through its private `options.whereExpression`, and retains that base where for both, so every chunk of one query shares one realtime entry. A join or include loads its lazy side as `inArray(joinKey, keys)`, and the key is a foreign key as often as `id`, so the operator, not the field, marks a batch: an `in` extra keeps its own filter, or realtime would never cover the batch. A tie-check is never a top-level `in` (`eq`, `and(gte, lt)` for a Date, or `or(isNull, isUndefined)`). If `options` or its `whereExpression` key is absent, the shape has changed under pbtsdb and it degrades to the per-chunk where rather than widening to `'*'`.
