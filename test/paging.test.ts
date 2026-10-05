@@ -27,6 +27,7 @@ const COUNT = 25
 describe('paging', () => {
     let queryClient: QueryClient
     let authorId = ''
+    let authorName = ''
     const bookIds: string[] = []
 
     beforeAll(async () => {
@@ -36,6 +37,7 @@ describe('paging', () => {
             email: `${getTestSlug('paging')}@example.com`,
         })
         authorId = author.id
+        authorName = author.name
         for (let i = 1; i <= COUNT; i++) {
             const book = await pb.collection('books').create({
                 title: `Paging ${i}`,
@@ -244,5 +246,58 @@ describe('paging', () => {
 
         await waitFor(() => expect(pageCounts(result.current.data)).toEqual([9.5, 9, 8, 7, 6]))
         expect(books.has(outside.id)).toBe(false)
+    }, 30000)
+
+    it('a filtered join source subscribes to its id batch', async () => {
+        const { authors, books } = make()
+        const subscribe = vi.spyOn(pb.collection('authors'), 'subscribe')
+        // Two authors sharing the subscription's own filter (`id = authorId`)
+        // but with the join's id batch unioned in: sizes tie at compile time,
+        // so TanStack makes `authors` (the main/`.from()` side) the lazy,
+        // id-batch-loaded source for the join against `books` (the joined side).
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ a: authors })
+                    .where(({ a }) => eq(a.id, authorId))
+                    .innerJoin(
+                        { b: q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fantasy')) },
+                        ({ a, b }) => eq(b.author, a.id)
+                    )
+                    .select(({ a, b }) => ({ ...b, authorName: a.name }))
+            )
+        )
+        await waitForLoadFinish(result)
+        await authors.waitForSubscription()
+        expect(result.current.data.length).toBeGreaterThan(0)
+        expect(result.current.data[0].authorName).toBe(authorName)
+
+        // The subscription's own where (`id = authorId`) must not be
+        // displaced by the join's id batch; dropping it would leave rows the
+        // base query itself asked for uncovered by realtime.
+        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        const idFilters = filters.filter(f => f?.includes('||'))
+        expect(idFilters.length).toBeGreaterThan(0)
+        for (const filter of idFilters) {
+            expect(filter).toContain(`id = "${authorId}"`)
+        }
+    }, 30000)
+
+    it('an unfiltered sorted, limited query opens no extra entry for the tie-check', async () => {
+        const { books } = make()
+        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ b: books })
+                    .orderBy(({ b }) => b.page_count, 'desc')
+                    .limit(5)
+            )
+        )
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+
+        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        expect(filters).toEqual([undefined])
     }, 30000)
 })
