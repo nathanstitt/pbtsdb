@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-05
+
 ### Added
 
 - Child subsets filed by a back-relation expand (`comments_via_card`) are
@@ -15,6 +17,13 @@ All notable changes to this project will be documented in this file.
 - `realtime: 'query'` on an on-demand collection subscribes to realtime per
   active query filter instead of the whole collection, and
   `collection.withRealtime(mode)` overrides the mode for one query.
+- `loadSubset` paging: the cursor TanStack DB passes for a sorted, limited
+  query is conjoined to the fetch filter, so load-more and `setWindow` fetch
+  the delta instead of the prefix; an offset without a cursor becomes a
+  PocketBase page. Realtime stays on the base `where`.
+- `convertToPocketBaseFilter` and `convertToPocketBaseSort` are exported from
+  `pbtsdb/core`, so a consumer's tests can pin the filter a predicate
+  compiles to.
 
 ### Fixed
 
@@ -28,6 +37,10 @@ All notable changes to this project will be documented in this file.
 - A parent with no children is marked complete too: PocketBase omits the
   expand key for an empty back-relation, which previously left every child
   query for a fresh parent fetching.
+- A sorted, limited query's boundary tie-check and cursor pages opened one
+  realtime entry per chunk. The realtime filter now follows the triggering
+  subscription's base `where`, so every chunk of one query shares one entry;
+  a join's id batch keeps its own filter.
 
 ## [0.9.0] - 2026-09-13
 
