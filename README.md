@@ -314,14 +314,16 @@ delta; an offset without a cursor becomes a PocketBase page.
 const { data, collection } = useLiveQuery((q) =>
     q.from({ b: books }).where(({ b }) => eq(b.author, id)).orderBy(({ b }) => b.page_count).limit(20)
 );
-collection.utils.setWindow({ offset: 20, limit: 20 }); // one request for rows 21..40
+// fetches only the rows past what is loaded: one cursor request plus a boundary tie-check
+collection.utils.setWindow({ offset: 20, limit: 20 });
 ```
 
 Realtime stays on the base `where`: every page of one query shares one
 subscription, and a new row that sorts into the window arrives on its own. A
 query whose `where` holds its own boundary (`lt(b.page_count, cursor)`)
 subscribes to that slice only, which is the shape for numbered pages: page one
-has no boundary and receives every new row. A join's id batch keeps its own filter, so lazily loaded rows stay covered.
+has no boundary and receives every new row. A join's or include's key batch
+keeps its own filter, so lazily loaded rows stay covered.
 
 TanStack applies `offset` in memory after loading, so `.offset(n)` on the
 builder still loads the first `n + limit` rows. Put a page boundary in the
