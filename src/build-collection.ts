@@ -30,10 +30,10 @@ import {
 } from './expand-paths'
 import { createFetcher } from './fetch-records'
 import { createHeldTargets } from './held-targets'
-import { subsetFromWhere } from './keyed-where'
 import { createLoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
 import { createRealtimeSubscription } from './realtime-subscription'
+import { realtimeWhereFor } from './realtime-where'
 import { idOf } from './records'
 import {
     type PbRequest,
@@ -351,53 +351,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // the two calls. Replaced on sync cleanup, so a stale unload cannot drop a
     // newer ref.
     let retainedFilters = new WeakMap<LoadSubsetOptions, { filters: string[] | undefined }[]>()
-
-    // TanStack composes a boundary tie-check or a cursor page as
-    // `and(subscription.where, extra)` and loads it through the same subscription.
-    // The subscription's own where is the query's base filter, which is the one
-    // realtime should follow: every chunk of one query then shares one entry.
-    // `options` is private in TanStack's types; a missing field falls back to the
-    // request's where, so a rename degrades to today's per-chunk behavior.
-    function subscriptionWhere(opts: LoadSubsetOptions): LoadSubsetOptions['where'] | undefined {
-        const sub = opts.subscription as
-            | { options?: { whereExpression?: LoadSubsetOptions['where'] } }
-            | undefined
-        return sub?.options?.whereExpression
-    }
-
-    // What a loadSubset asks for beyond the subscription's own where. TanStack
-    // composes every chunk as `and(subscription.where, extra)` with the same where
-    // object, or hands the extra alone when the subscription has no where.
-    function chunkExtra(
-        where: LoadSubsetOptions['where'],
-        subWhere: LoadSubsetOptions['where']
-    ): LoadSubsetOptions['where'] | null {
-        if (where === subWhere) return undefined
-        if (subWhere === undefined) return where
-        const node = where as { type?: string; name?: string; args?: unknown[] } | undefined
-        if (
-            node?.type === 'func' &&
-            node.name === 'and' &&
-            node.args?.length === 2 &&
-            node.args[0] === subWhere
-        ) {
-            return node.args[1] as LoadSubsetOptions['where']
-        }
-        return null // unknown shape: do not guess
-    }
-
-    // A join loads rows by id through its source's subscription; those ids
-    // must stay in the filter or the batch is never covered by realtime. An
-    // ordered loader's tie-check or cursor page is a slice of the base where
-    // and shares its entry.
-    function realtimeWhereFor(opts: LoadSubsetOptions): LoadSubsetOptions['where'] {
-        if (!opts.subscription) return opts.where
-        const subWhere = subscriptionWhere(opts)
-        const extra = chunkExtra(opts.where, subWhere)
-        if (extra === null) return opts.where // unknown shape: today's per-chunk behavior
-        if (extra === undefined) return subWhere // the base load itself
-        return subsetFromWhere(extra)?.field === 'id' ? opts.where : subWhere
-    }
 
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if ((registry.tagFor(opts)?.realtime ?? realtimeMode) !== 'query') return
