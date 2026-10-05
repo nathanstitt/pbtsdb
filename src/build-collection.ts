@@ -351,9 +351,23 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // newer ref.
     let retainedFilters = new WeakMap<LoadSubsetOptions, { filters: string[] | undefined }[]>()
 
+    // TanStack composes a boundary tie-check or a cursor page as
+    // `and(subscription.where, extra)` and loads it through the same subscription.
+    // The subscription's own where is the query's base filter, which is the one
+    // realtime should follow: every chunk of one query then shares one entry.
+    // `options` is private in TanStack's types; a missing field falls back to the
+    // request's where, so a rename degrades to today's per-chunk behavior.
+    function subscriptionWhere(opts: LoadSubsetOptions): LoadSubsetOptions['where'] | undefined {
+        const sub = opts.subscription as
+            | { options?: { whereExpression?: LoadSubsetOptions['where'] } }
+            | undefined
+        return sub?.options?.whereExpression
+    }
+
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if ((registry.tagFor(opts)?.realtime ?? realtimeMode) !== 'query') return
-        const filters = realtimeFiltersFor(toRequest(opts))
+        const where = subscriptionWhere(opts) ?? opts.where
+        const filters = realtimeFiltersFor(toRequest({ ...opts, where }))
         const records = retainedFilters.get(opts) ?? []
         records.push({ filters })
         retainedFilters.set(opts, records)
