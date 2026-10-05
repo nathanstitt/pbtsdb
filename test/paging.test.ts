@@ -251,10 +251,11 @@ describe('paging', () => {
     it('a filtered join source subscribes to its id batch', async () => {
         const { authors, books } = make()
         const subscribe = vi.spyOn(pb.collection('authors'), 'subscribe')
-        // Two authors sharing the subscription's own filter (`id = authorId`)
-        // but with the join's id batch unioned in: sizes tie at compile time,
-        // so TanStack makes `authors` (the main/`.from()` side) the lazy,
-        // id-batch-loaded source for the join against `books` (the joined side).
+        // TanStack makes `authors` (the `.from()` side) the lazy source here and
+        // loads it by an `in(id, …)` batch of the Fantasy books' authors. The
+        // seed data (pb_migrations/1763864662_seed_test_data.js) holds Fantasy
+        // books by other authors, so the batch carries more than one id and
+        // compiles to an `||` filter; without that seed row there is no `||`.
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -281,6 +282,32 @@ describe('paging', () => {
         for (const filter of idFilters) {
             expect(filter).toContain(`id = "${authorId}"`)
         }
+    }, 30000)
+
+    it('a lazy source joined by its foreign key subscribes to that key', async () => {
+        const { authors, books } = make()
+        const bookSubscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ a: authors })
+                    .where(({ a }) => eq(a.id, authorId))
+                    .join({ b: books }, ({ a, b }) => eq(b.author, a.id))
+                    .select(({ a, b }) => ({ authorName: a.name, title: b?.title }))
+            )
+        )
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        expect(result.current.data).toHaveLength(COUNT)
+        expect(result.current.data[0].authorName).toBe(authorName)
+
+        // `books` is the lazy side: TanStack loads it by `in(author, [authorId])`,
+        // a batch keyed on the foreign key. That key must reach the subscribe
+        // filter; folding it into `books`' empty base where would widen
+        // realtime to the whole collection.
+        const filters = bookSubscribe.mock.calls.map(call => call[2]?.filter)
+        expect(filters).toContain(`author = "${authorId}"`)
+        expect(filters).not.toContain(undefined)
     }, 30000)
 
     it('an unfiltered sorted, limited query opens no extra entry for the tie-check', async () => {
