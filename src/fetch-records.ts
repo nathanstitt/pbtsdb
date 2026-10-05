@@ -83,38 +83,83 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
     // extra `request.expand` forces a fetch. An empty subset selects nothing
     // and must never become a request, which would fetch everything. A sorted
     // and limited request must be sliced in that order, which the store's id
-    // order cannot provide.
+    // order cannot provide, and a cursor is a boundary in that order too.
     function servedFromStore(request: PbRequest): T[] | undefined {
         const { subset, sort, limit } = request
         if (!subset) return undefined
         if (subset.values.length === 0) return []
-        if (request.expand || (sort && limit)) return undefined
+        if (request.expand || request.cursor || (sort && limit)) return undefined
         const rows =
             subset.field === 'id' ? rowsFromStore(subset.values) : fieldSubsetFromStore(subset)
         return rows && limit ? rows.slice(0, limit) : rows
     }
 
+    // The cursor narrows every chunk: `(chunk) && (cursor)`.
+    function withCursor(
+        filter: string | undefined,
+        cursor: string | undefined
+    ): string | undefined {
+        if (!cursor) return filter
+        return filter ? `(${filter}) && (${cursor})` : cursor
+    }
+
     // Each chunk carries its own request key so the SDK's auto-cancellation
     // does not abort sibling chunks. A limited request returns each chunk's
-    // first rows unsliced: the live query re-applies sort and limit.
+    // first rows unsliced: the live query re-applies sort and limit. An offset
+    // without a cursor is a count of rows already acquired; PocketBase pages by
+    // page number, so an aligned offset becomes a page and any other offset is
+    // sliced from a request that starts at row one. `offset` is the one this
+    // chunk may skip: the caller passes 0 when the request splits into several
+    // chunks, since a row's position in the window is not its position in its
+    // chunk.
     async function fetchPage(
         request: PbRequest,
         expand: string | undefined,
-        filter: string | undefined,
-        index: number
+        chunkFilter: string | undefined,
+        index: number,
+        offset: number
     ): Promise<T[]> {
         const { sort, limit } = request
+        const filter = withCursor(chunkFilter, request.cursor)
         const requestKey = `${collectionName}:${index}`
         if (limit) {
+            if (offset % limit === 0) {
+                const result = await pb
+                    .collection(collectionName)
+                    .getList(offset / limit + 1, limit, {
+                        filter,
+                        sort,
+                        skipTotal: true,
+                        expand,
+                        requestKey,
+                    })
+                return result.items as unknown as T[]
+            }
+            // PocketBase clamps perPage to 1000, so a deep unaligned offset is
+            // served short. TanStack sends offset 0 or a cursor; this branch
+            // is a fallback only.
             const result = await pb
                 .collection(collectionName)
-                .getList(1, limit, { filter, sort, skipTotal: true, expand, requestKey })
-            return result.items as unknown as T[]
+                .getList(1, offset + limit, { filter, sort, skipTotal: true, expand, requestKey })
+            return (result.items as unknown as T[]).slice(offset)
         }
         const items = await pb
             .collection(collectionName)
             .getFullList({ filter, sort, expand, requestKey })
-        return items as unknown as T[]
+        return (items as unknown as T[]).slice(offset)
+    }
+
+    // Several chunks cannot skip rows each: every chunk fetches the window's
+    // full prefix (`offset + limit`, or every row with no limit) unsliced, and
+    // the live query re-sorts and re-windows the union.
+    function chunkRequest(
+        request: PbRequest,
+        chunks: number
+    ): { request: PbRequest; offset: number } {
+        const offset = request.offset ?? 0
+        if (chunks === 1 || offset === 0) return { request, offset }
+        const limit = request.limit ? offset + request.limit : undefined
+        return { request: { ...request, limit }, offset: 0 }
     }
 
     async function fetchItems(
@@ -133,8 +178,11 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         }
         const filters = request.subset ? subsetFilters(request.subset) : [request.filter]
         const expand = deps.activeExpand(request)
+        const chunk = chunkRequest(request, filters.length)
         const pages = await Promise.all(
-            filters.map((filter, index) => fetchPage(request, expand, filter, index))
+            filters.map((chunkFilter, index) =>
+                fetchPage(chunk.request, expand, chunkFilter, index, chunk.offset)
+            )
         )
         const items = pages.flat()
         filer.markEmptyBackRelations(items, heads)

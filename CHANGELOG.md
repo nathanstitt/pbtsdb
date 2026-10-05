@@ -7,6 +7,51 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-05
+
+### Added
+
+- `loadSubset` paging: the cursor TanStack DB passes for a sorted, limited
+  query is conjoined to the fetch filter, so load-more and `setWindow` fetch
+  the delta instead of the prefix; an offset without a cursor becomes a
+  PocketBase page. Realtime stays on the base `where`.
+- `convertToPocketBaseFilter` and `convertToPocketBaseSort` are exported from
+  `pbtsdb/core`, so a consumer's tests can pin the filter a predicate
+  compiles to.
+
+### Changed
+
+- The peer dependency floors are raised to `@tanstack/db` >=0.9.0,
+  `@tanstack/query-db-collection` >=1.2.13, and `@tanstack/react-db` >=0.3.8.
+  The realtime filter reads the subscription's base `where`, which these
+  versions provide.
+
+### Fixed
+
+- A sorted, limited query's boundary tie-check and cursor pages opened one
+  realtime entry per chunk. The realtime filter now follows the triggering
+  subscription's base `where`, so every chunk of one query shares one entry.
+  A join's or include's key batch (an `in` on the join key, which is often a
+  foreign key) keeps its own filter.
+
+## [0.10.2] - 2026-09-28
+
+### Fixed
+
+- An empty `inArray` / `notIn` compiles to a constant PocketBase filter
+  (`1 = 2` / `1 = 1`). It previously compiled to no condition at all, so an
+  empty `inArray` dropped out of the filter and matched every row.
+
+## [0.10.1] - 2026-09-28
+
+### Fixed
+
+- `not(...)` compiles to PocketBase's negated operators (`!=`, `!~`, flipped
+  comparisons, De Morgan for `and` / `or`). PocketBase has no prefix `!`, so
+  an on-demand query with `not()` previously sent an invalid filter.
+
+## [0.10.0] - 2026-09-26
+
 ### Added
 
 - Child subsets filed by a back-relation expand (`comments_via_card`) are

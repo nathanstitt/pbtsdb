@@ -302,6 +302,33 @@ for enter the store, and different filters are cached under different keys.
 Use on-demand for large collections; realtime keeps both modes current once rows
 are loaded.
 
+#### Paging
+
+An on-demand query with `orderBy` and `limit` fetches one page of that size.
+When TanStack DB needs more rows (`setWindow`, or a window past what is loaded)
+it hands the sync layer a cursor on the sort field and the count of rows it
+already has. pbtsdb conjoins the cursor to the fetch filter and fetches only the
+delta; an offset without a cursor becomes a PocketBase page.
+
+```typescript
+const { data, collection } = useLiveQuery((q) =>
+    q.from({ b: books }).where(({ b }) => eq(b.author, id)).orderBy(({ b }) => b.page_count).limit(20)
+);
+// fetches only the rows past what is loaded: one cursor request plus a boundary tie-check
+collection.utils.setWindow({ offset: 20, limit: 20 });
+```
+
+Realtime stays on the base `where`: every page of one query shares one
+subscription, and a new row that sorts into the window arrives on its own. A
+query whose `where` holds its own boundary (`lt(b.page_count, cursor)`)
+subscribes to that slice only, which is the shape for numbered pages: page one
+has no boundary and receives every new row. A join's or include's key batch
+keeps its own filter, so lazily loaded rows stay covered.
+
+TanStack applies `offset` in memory after loading, so `.offset(n)` on the
+builder still loads the first `n + limit` rows. Put a page boundary in the
+`where` when a deep page must not load what comes before it.
+
 ### Mutations and Refetch
 
 By default, pbtsdb does **not** refetch the entire collection after a successful insert, update, or delete. The realtime subscription delivers server-confirmed rows — including server-assigned fields like `id`, `created`, `updated`, and any values rewritten by PocketBase hooks — and TanStack DB's optimistic write keeps the UI consistent in the meantime. The post-mutation refetch is therefore redundant.

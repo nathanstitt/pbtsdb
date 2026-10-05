@@ -33,6 +33,7 @@ import { createHeldTargets } from './held-targets'
 import { createLoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
 import { createRealtimeSubscription } from './realtime-subscription'
+import { realtimeWhereFor } from './realtime-where'
 import { idOf } from './records'
 import {
     type PbRequest,
@@ -353,7 +354,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     function retainQueryFilters(opts: LoadSubsetOptions): void {
         if ((registry.tagFor(opts)?.realtime ?? realtimeMode) !== 'query') return
-        const filters = realtimeFiltersFor(toRequest(opts))
+        const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
         const records = retainedFilters.get(opts) ?? []
         records.push({ filters })
         retainedFilters.set(opts, records)
