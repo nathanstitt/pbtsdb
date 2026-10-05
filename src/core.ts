@@ -30,6 +30,7 @@ export {
     type PbCollectionView,
 } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
+export { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 export type {
     CreateCollectionOptions,
     ExcludeUndefined,
