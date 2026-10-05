@@ -99,23 +99,32 @@ describe('paging', () => {
         await waitFor(() => expect(result.current.data.length).toBe(20))
         expect(pageCounts(result.current.data)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1))
 
-        // One request for the delta, carrying the cursor on the sort field.
-        // TanStack's OrderedSourceLoader also issues a tiny tie-check request
-        // for rows sharing the new boundary's exact sort value (`page_count =
-        // N`, no `orderBy`/`limit`) once the delta settles; that one is an
-        // equality, not the cursor's `>`/`<` comparison, so it's excluded here
-        // rather than asserted on.
-        const orderedCalls = getList.mock.calls.filter(([, , options]) =>
+        // Exactly two requests: the cursor delta, plus TanStack's
+        // OrderedSourceLoader boundary tie-check for rows sharing the new
+        // window edge's exact sort value (`page_count = 20`, no
+        // `orderBy`/`limit`). A regression that re-fetches the prefix instead
+        // of the delta would add a third call (or change the delta's shape),
+        // so both calls are asserted, not just filtered down to the one we
+        // expect to find.
+        expect(getList).toHaveBeenCalledTimes(2)
+        const deltaCalls = getList.mock.calls.filter(([, , options]) =>
             /page_count [><]=? \d+/.test((options?.filter as string | undefined) ?? '')
         )
-        expect(orderedCalls).toHaveLength(1)
-        const [, perPage, options] = orderedCalls[0]
+        expect(deltaCalls).toHaveLength(1)
+        const [, perPage, options] = deltaCalls[0]
         expect(perPage).toBeLessThanOrEqual(10)
         expect(options?.filter).toContain(`author = "${authorId}"`)
+
+        const boundaryCalls = getList.mock.calls.filter(([, , options]) =>
+            /page_count = 20\b/.test((options?.filter as string | undefined) ?? '')
+        )
+        expect(boundaryCalls).toHaveLength(1)
+        expect(boundaryCalls[0][2]?.filter).toContain(`author = "${authorId}"`)
     }, 30000)
 
     it('setWindow to a deep window shows that window', async () => {
         const { books } = make()
+        const getList = vi.spyOn(pb.collection('books'), 'getList')
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -126,6 +135,7 @@ describe('paging', () => {
             )
         )
         await waitForLoadFinish(result)
+        getList.mockClear()
 
         const windowed = result.current.collection as LiveQueryWindowCollection
         const settled = windowed.utils.setWindow({ offset: 10, limit: 10 })
@@ -135,5 +145,12 @@ describe('paging', () => {
                 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
             ])
         )
+
+        // Documents which path TanStack took: like the load-more test, it
+        // asks for the delta via a cursor on the sort field, not a raw
+        // offset page.
+        const [, perPage, options] = getList.mock.calls[0]
+        expect(perPage).toBeLessThanOrEqual(10)
+        expect(options?.filter).toMatch(/page_count [><]=? \d+/)
     }, 30000)
 })
