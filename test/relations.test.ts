@@ -298,7 +298,7 @@ describe('Collection - Relations', () => {
             )
         )
         await waitForLoadFinish(result, 10000)
-        const writeUpsert = vi.spyOn(authorsCollection.utils, 'writeUpsert')
+        const writeFiled = vi.spyOn(authorsCollection, 'writeFiled')
         try {
             const { result: all } = renderHook(() =>
                 useLiveQuery(q =>
@@ -309,14 +309,14 @@ describe('Collection - Relations', () => {
             )
             await waitForLoadFinish(all, 10000)
             // Every batch of filing is one write; the parents in it share authors.
-            expect(writeUpsert).toHaveBeenCalledTimes(1)
-            const filed = writeUpsert.mock.calls[0][0] as object[]
+            expect(writeFiled).toHaveBeenCalledTimes(1)
+            const filed = writeFiled.mock.calls[0][0]
             const wanted = new Set(
                 seeded.filter(b => b.genre === seeded[0].genre).map(b => b.author)
             )
             expect(filed).toHaveLength(wanted.size)
         } finally {
-            writeUpsert.mockRestore()
+            writeFiled.mockRestore()
         }
     }, 20000)
 })

@@ -176,24 +176,20 @@ function BooksList() {
     // Delete with optimistic update
     books.delete('record_id');
 
-    // Batch mutations - merges multiple updates to same record
-    books.utils.writeBatch(() => {
-        books.update('id1', (draft) => { draft.field1 = 'value1' });
-        books.update('id1', (draft) => { draft.field2 = 'value2' }); // Merged!
-        books.update('id2', (draft) => { draft.field = 'value' });
-    });
-
-    // Wait for persistence
-    await tx.isPersisted.promise; // States: pending → persisting → completed
+    // Wait for persistence (isPersisted.promise is deprecated)
+    await tx.when('settled'); // States: pending → persisting → completed
 }
 ```
 
 **Key Points:**
 - Mutations are optimistic by default (UI updates immediately)
 - Auto-syncs to PocketBase in background
-- Batch mutations merge updates to same record
+- The built-in handlers write the server response into the collection before they settle, so the settled row is the server's row (`created`, `updated`, hook-rewritten values)
 - Transaction states: pending → persisting → completed
 - Use `newRecordId()` to generate PocketBase-compatible IDs
+- `row.$hasPendingWrites` is true while a row has an unsettled optimistic change (`$synced` is deprecated)
+- A custom `onInsert`/`onUpdate`/`onDelete` should `await collection.utils.writeUpsert(serverRows)` (or `writeDelete`) and return `{ refetch: false }`; otherwise the row shows its previous server value from settle until the realtime echo
+- `collection.utils.write*` are TanStack direct writes: they return promises that reject on validation errors, and in an `'on-demand'` collection each one refetches every active query
 
 ## Common Patterns
 
@@ -276,7 +272,8 @@ const [jobs, customers] = useStore('jobs', 'customers');
 
 ### Package Details
 
-- Requires React 18+, TypeScript 5.0+, PocketBase 0.21.0+
+- Requires React 18+, TypeScript 5.0+, PocketBase 0.22.0+
+- Requires `@tanstack/db` 0.12.1+, `@tanstack/query-db-collection` 1.4.0+, `@tanstack/react-db` 0.5.5+
 - Collections use TanStack Query for caching and TanStack DB for reactivity
 - Real-time via PocketBase Server-Sent Events (SSE), through pbtsdb's own client
 - Automatic reconnection with exponential backoff; a reconnect the server did

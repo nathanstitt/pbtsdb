@@ -38,10 +38,10 @@ npm install pbtsdb pocketbase @tanstack/db @tanstack/query-db-collection @tansta
 ### Peer Dependencies
 
 - `pocketbase` >= 0.22.0
-- `@tanstack/db` >= 0.6.0
-- `@tanstack/query-db-collection` >= 1.0.40
+- `@tanstack/db` >= 0.12.1
+- `@tanstack/query-db-collection` >= 1.4.0
 - `@tanstack/react-query` >= 5.0.0
-- `@tanstack/react-db` >= 0.1.86 (optional; only for `createReactProvider`)
+- `@tanstack/react-db` >= 0.5.5 (optional; only for `createReactProvider`)
 - `react` and `react-dom` >= 18.0.0 (optional)
 
 All peer dependencies use minimum version constraints; newer versions should work. The
@@ -346,9 +346,9 @@ builder still loads the first `n + limit` rows. Put a page boundary in the
 
 ### Mutations and Refetch
 
-By default, pbtsdb does **not** refetch the entire collection after a successful insert, update, or delete. The realtime subscription delivers server-confirmed rows — including server-assigned fields like `id`, `created`, `updated`, and any values rewritten by PocketBase hooks — and TanStack DB's optimistic write keeps the UI consistent in the meantime. The post-mutation refetch is therefore redundant.
+The built-in handlers write PocketBase's response into the collection before they return: server-assigned fields like `created` and `updated`, and any values rewritten by PocketBase hooks. A built-in delete removes the row the same way. TanStack DB drops a mutation's optimistic state when its handler settles, and rows written while the handler runs publish together with that drop, so the settled row is the server's row with no gap. The realtime echo that follows changes nothing.
 
-Set `refetchOnMutation: true` to opt back into the previous behavior — for example, when realtime is unreliable in your environment, or when a server-side hook produces a field you must read synchronously after the mutation resolves:
+By default, pbtsdb does **not** refetch after a successful insert, update, or delete. Set `refetchOnMutation: true` to refetch the collection's active queries before the handler settles — for example, when a server-side hook changes other rows you must read right after the mutation:
 
 ```typescript
 const collection = c('books', {
@@ -356,7 +356,12 @@ const collection = c('books', {
 });
 ```
 
-The option only affects the built-in default handlers. If you supply your own `onInsert`, `onUpdate`, or `onDelete`, you control its return value yourself — return `{ refetch: false }` (or omit a return) to skip the refetch, return `{ refetch: true }` to force one.
+The option only affects the built-in default handlers. A custom `onInsert`, `onUpdate`, or `onDelete` controls refetch and write-back itself:
+
+- TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back. To prevent that gap, `await collection.utils.writeUpsert(serverRows)` (or `writeDelete(ids)`) before you return.
+- Return `{ refetch: false }`. A handler that returns anything else makes `@tanstack/query-db-collection` refetch after it settles and log a deprecation warning; TanStack removes that automatic refetch in v1.0. To refetch, `await collection.utils.refetch()` in the handler.
+
+`collection.utils.writeInsert`, `writeUpdate`, `writeUpsert`, `writeDelete`, and `writeBatch` are TanStack's direct writes. They return a promise that rejects on a validation error (for example `writeDelete` of an absent key); they do not throw. In an `'on-demand'` collection, each direct write also refetches every active query of the collection. pbtsdb's own writes (realtime echoes, write-backs, and filed relation rows) do not use them, and cause no refetch.
 
 ### Type Safety
 
@@ -519,7 +524,7 @@ pbtsdb defaults `autoIndex` to `'eager'` with `defaultIndexType: BTreeIndex`, so
 TanStack DB does not warn about a missing index). Pass `autoIndex: 'off'` or a
 different `defaultIndexType` in `collectionOptions` to change that per collection.
 
-The following fields are managed by pbtsdb and excluded from `collectionOptions`: `getKey`, `syncMode`, `onInsert`, `onUpdate`, `onDelete`, `schema`.
+The following fields are managed by pbtsdb and excluded from `collectionOptions`: `getKey`, `syncMode`, `onInsert`, `onUpdate`, `onDelete`, `schema`, `utils`.
 
 ### React Integration
 
@@ -983,7 +988,7 @@ export function CreateBookForm() {
         try {
             // Optimistic insert - appears instantly
             const tx = books.insert({ id: newRecordId(), title, author: 'author_id' });
-            await tx.isPersisted.promise;
+            await tx.when('settled');
 
             if (tx.state === 'completed') setTitle('');
             else setError('Failed to create book');

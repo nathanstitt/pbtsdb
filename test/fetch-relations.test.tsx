@@ -61,9 +61,7 @@ describe('Fetch relations', () => {
             const row = result.current.data[0]
             expect((row as { expand?: unknown }).expand).toBeUndefined()
             await waitFor(() => expect(authors.has(row.author)).toBe(true))
-            const stored = (
-                books as unknown as { _state: { syncedData: Map<string, { expand?: unknown }> } }
-            )._state.syncedData.get(row.id)
+            const stored = books.base.get(row.id) as { expand?: unknown } | undefined
             expect(stored?.expand).toBeUndefined()
             const cached = queryClient
                 .getQueryCache()
@@ -412,7 +410,7 @@ describe('Fetch relations', () => {
                 await waitFor(() =>
                     expect(viaBase.result.current.data[0].title).toBe('Optimistic via view')
                 )
-                await viaViewTx.isPersisted.promise
+                await viaViewTx.when('settled')
 
                 const viaBaseTx = books.update(bookId, draft => {
                     draft.title = 'Optimistic via base'
@@ -420,7 +418,7 @@ describe('Fetch relations', () => {
                 await waitFor(() =>
                     expect(viaView.result.current.data[0].title).toBe('Optimistic via base')
                 )
-                await viaBaseTx.isPersisted.promise
+                await viaBaseTx.when('settled')
             } finally {
                 await pb.collection('books').delete(bookId)
             }
@@ -1308,21 +1306,29 @@ describe('Fetch relations', () => {
                 )
                 await waitForLoadFinish(parent.result, 10000)
                 await waitFor(() => expect(bookTags.has(tagIds[0])).toBe(true))
+                const all = renderHook(() => useLiveQuery(q => q.from({ bt: bookTags })))
+                await waitForLoadFinish(all.result, 10000)
+
+                // query-db-collection prunes a row when a refetch of the only
+                // query owning it no longer returns it; the prune deletes by key.
+                const records = pb.collection('book_tags')
+                const realGetFullList = records.getFullList.bind(records)
+                const getFullList = vi
+                    .spyOn(records, 'getFullList')
+                    .mockImplementation(async (...args: Parameters<typeof realGetFullList>) => {
+                        const items = await realGetFullList(...args)
+                        return items.filter(item => item.id !== tagIds[0]) as typeof items
+                    })
+                await bookTags.utils.refetch()
+                await waitFor(() => expect(bookTags.base.has(tagIds[0])).toBe(false))
+                getFullList.mockRestore()
+
                 const counter = countRequestsTo('/collections/book_tags/records')
                 try {
-                    const first = tagsFor(bookTags, bookId)
-                    await waitForLoadFinish(first.result, 10000)
-                    expect(first.result.current.data.length).toBe(tagIds.length)
-                    expect(counter.filters).toEqual([])
-                    first.unmount()
-
-                    bookTags.utils.writeDelete(tagIds[0])
-                    const second = tagsFor(bookTags, bookId)
-                    await waitForLoadFinish(second.result, 10000)
+                    const tags = tagsFor(bookTags, bookId)
+                    await waitForLoadFinish(tags.result, 10000)
                     await waitFor(() => expect(counter.filters).toHaveLength(1))
-                    await waitFor(() =>
-                        expect(second.result.current.data.length).toBe(tagIds.length)
-                    )
+                    await waitFor(() => expect(tags.result.current.data.length).toBe(tagIds.length))
                 } finally {
                     counter.restore()
                 }

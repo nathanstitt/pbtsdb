@@ -1,4 +1,4 @@
-import { and, eq, IR, inArray, not } from '@tanstack/db'
+import { and, concat, eq, IR, inArray, not } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
@@ -276,4 +276,47 @@ describe('Server-Side Filtering (on-demand mode)', () => {
             }
         }
     }, 15000)
+
+    // TanStack DB 0.12 joins on a nested and() of equalities; each side still
+    // loads through its own on-demand subset.
+    it('serves a compound join with and() across two on-demand collections', async () => {
+        const c = createCollection<Schema>(pb, queryClient)
+        const books = c('books', { syncMode: 'on-demand' })
+        const metadata = c('book_metadata', { syncMode: 'on-demand' })
+        const allBooks = await pb.collection('books').getFullList()
+        // A row that matches on the book but not on the genre.
+        const mismatched = await pb.collection('book_metadata').create({
+            book: allBooks[0].id,
+            genre: allBooks[0].genre === 'Other' ? 'History' : 'Other',
+            summary: getTestSlug('compound'),
+            language: 'en',
+        })
+        const allMetadata = await pb.collection('book_metadata').getFullList()
+        const genreOf = new Map(allBooks.map(book => [book.id, book.genre]))
+        const expected = allMetadata
+            .filter(meta => genreOf.get(meta.book) === meta.genre)
+            .map(meta => `${meta.book}:${meta.id}`)
+            .sort()
+        expect(expected.length).toBeGreaterThan(0)
+        expect(expected).not.toContain(`${mismatched.book}:${mismatched.id}`)
+
+        const { result } = renderHook(() =>
+            useLiveQuery(q =>
+                q
+                    .from({ m: metadata })
+                    .innerJoin({ b: books }, ({ m, b }) =>
+                        and(eq(m.book, b.id), eq(m.genre, b.genre))
+                    )
+                    .select(({ m, b }) => ({ key: concat(b.id, ':', m.id) }))
+            )
+        )
+        try {
+            await waitFor(
+                () => expect(result.current.data.map(row => row.key).sort()).toEqual(expected),
+                { timeout: 10000 }
+            )
+        } finally {
+            await pb.collection('book_metadata').delete(mismatched.id)
+        }
+    })
 })

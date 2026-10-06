@@ -1,7 +1,8 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import type { RecordSubscription } from 'pocketbase'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 
 import {
@@ -17,15 +18,14 @@ import {
     type TestLogger,
     waitForLoadFinish,
 } from './helpers'
-import type { Schema } from './schema'
+import type { Books, Schema } from './schema'
 
 /**
- * Regression coverage for the realtime delete echo throwing
- * DeleteOperationItemNotFoundError when the record was already removed from the
- * synced store before the echo arrived (see handleRealtimeEvent in collection.ts).
- *
- * The handler swallows that specific error and logs a debug breadcrumb, so the
- * tests assert on (a) no uncaught error and (b) the breadcrumb firing.
+ * Regression coverage for a realtime delete echo whose record was already
+ * removed from the synced store before the echo arrived (see
+ * handleRealtimeEvent in build-collection.ts). The handler writes nothing and
+ * logs a debug breadcrumb, so the tests assert on (a) no uncaught error and
+ * (b) the breadcrumb firing.
  */
 describe('realtime delete echo idempotency', () => {
     let queryClient: QueryClient
@@ -58,11 +58,12 @@ describe('realtime delete echo idempotency', () => {
     afterEach(() => {
         resetLogger()
         queryClient.clear()
+        vi.restoreAllMocks()
     })
 
     const seedBook = async () => {
         const authorId = await getTestAuthorId()
-        return pb.collection('books').create({
+        return pb.collection('books').create<Books>({
             title: `Echo Idempotency ${Date.now().toString().slice(-8)}`,
             isbn: getTestSlug('rde'),
             genre: 'Fiction',
@@ -72,15 +73,29 @@ describe('realtime delete echo idempotency', () => {
         })
     }
 
-    const syncedHas = (collection: unknown, id: string) =>
-        (
-            collection as { _state: { syncedData: { has: (k: string) => boolean } } }
-        )._state.syncedData.has(id)
+    /**
+     * Capture the realtime handler the collection registers, so a test can
+     * replay an event exactly as a redelivered SSE event arrives. The real
+     * subscription is still established underneath.
+     */
+    const captureRealtimeHandler = () => {
+        const ref: { current: ((event: RecordSubscription<Books>) => void) | null } = {
+            current: null,
+        }
+        const books = pb.collection('books')
+        const real = books.subscribe.bind(books)
+        vi.spyOn(books, 'subscribe').mockImplementation((topic, callback, options) => {
+            ref.current = callback as (event: RecordSubscription<Books>) => void
+            return real(topic, callback, options)
+        })
+        return ref
+    }
 
     const ignoredEchoLogs = () =>
         testLogger.messages.debug.filter(m => m.msg.includes('Ignoring delete echo'))
 
-    it('on-demand: delete echo for an already-pruned key is swallowed', async () => {
+    it('on-demand: a redelivered delete echo for an already-removed key is a no-op', async () => {
+        const handlerRef = captureRealtimeHandler()
         const collection = createCollection<Schema>(pb, queryClient)('books', {
             syncMode: 'on-demand',
         })
@@ -97,26 +112,20 @@ describe('realtime delete echo idempotency', () => {
 
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
-        expect(syncedHas(collection, seed.id)).toBe(true)
 
-        // Drive the exact failing call: the realtime delete handler calls
-        // writeDelete inside a writeBatch. Replay that against the live key so the
-        // first call removes it from the synced store, then simulate the echo
-        // arriving for the now-absent key (the on-demand prune-then-echo race).
-        collection.utils.writeBatch(() => collection.utils.writeDelete(seed.id))
-        expect(syncedHas(collection, seed.id)).toBe(false)
+        // The same delete delivered twice, as an SSE redelivery after a
+        // reconnect does: the first removes the row, the second finds it gone.
+        const echo: RecordSubscription<Books> = { action: 'delete', record: seed }
+        handlerRef.current?.(echo)
+        expect(collection.base.has(seed.id)).toBe(false)
+        expect(() => handlerRef.current?.(echo)).not.toThrow()
+        expect(ignoredEchoLogs()).toHaveLength(1)
+        await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeUndefined())
 
-        // The realtime echo for the same key. Without the fix this throws
-        // DeleteOperationItemNotFoundError out of writeBatch.
-        const echo = () => collection.utils.writeBatch(() => collection.utils.writeDelete(seed.id))
-        expect(echo).toThrowError(/Delete operation: Item with key/i)
-
-        // Cleanup
-        try {
-            await pb.collection('books').delete(seed.id)
-        } catch (_e) {
-            // already gone
-        }
+        await pb
+            .collection('books')
+            .delete(seed.id)
+            .catch(() => {})
     }, 25000)
 
     it('on-demand: real delete echo for a pruned key does not surface an uncaught error', async () => {
@@ -137,16 +146,26 @@ describe('realtime delete echo idempotency', () => {
         const seed = await seedBook()
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
 
-        // Prune from the synced store first, then fire the real server delete so the
-        // genuine SSE echo runs through handleRealtimeEvent against an absent key.
-        collection.utils.writeBatch(() => collection.utils.writeDelete(seed.id))
-        await pb.collection('books').delete(seed.id)
-        await new Promise(r => setTimeout(r, 2000))
+        // Prune the row from the synced store the way query-db-collection
+        // does: a refetch of the only query owning it no longer returns it.
+        const books = pb.collection('books')
+        const realGetFullList = books.getFullList.bind(books)
+        const getFullList = vi
+            .spyOn(books, 'getFullList')
+            .mockImplementation(async (...args: Parameters<typeof realGetFullList>) => {
+                const items = await realGetFullList(...args)
+                return items.filter(item => item.id !== seed.id) as typeof items
+            })
+        await collection.utils.refetch()
+        await waitFor(() => expect(collection.base.has(seed.id)).toBe(false))
+        getFullList.mockRestore()
 
-        expect(
-            captured.filter(e => /Delete operation: Item with key/i.test(e.message))
-        ).toHaveLength(0)
-        expect(ignoredEchoLogs().length).toBeGreaterThan(0)
+        // The genuine SSE delete echo now runs against an absent key.
+        await pb.collection('books').delete(seed.id)
+        await waitFor(() => expect(ignoredEchoLogs().length).toBeGreaterThan(0), {
+            timeout: 5000,
+        })
+        expect(captured).toHaveLength(0)
         expect(result.current.data.find(b => b.id === seed.id)).toBeUndefined()
     }, 25000)
 
@@ -177,7 +196,7 @@ describe('realtime delete echo idempotency', () => {
             }
         )
         expect(ignoredEchoLogs()).toHaveLength(0)
-        expect(syncedHas(collection, seed.id)).toBe(false)
+        expect(collection.base.has(seed.id)).toBe(false)
     }, 25000)
 
     it('eager default: optimistic delete + echo does not throw', async () => {
@@ -191,7 +210,7 @@ describe('realtime delete echo idempotency', () => {
         await waitFor(() => expect(result.current.data.find(b => b.id === seed.id)).toBeDefined())
 
         const tx = collection.delete(seed.id)
-        await tx.isPersisted.promise
+        await tx.when('settled')
         await new Promise(r => setTimeout(r, 1500))
 
         expect(

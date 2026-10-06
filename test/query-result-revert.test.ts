@@ -85,12 +85,10 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         return record as unknown as Books
     }
 
-    const syncedGet = (collection: unknown, id: string) =>
-        (
-            collection as {
-                _state: { syncedData: { get: (k: string) => Books | undefined } }
-            }
-        )._state.syncedData.get(id)
+    const syncedGet = (
+        collection: { base: { get: (k: string) => Books | undefined } },
+        id: string
+    ) => collection.base.get(id)
 
     const hasPendingOverlay = (collection: unknown, id: string): boolean => {
         const state = (
@@ -162,7 +160,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
             () => expect(folderResult.current.data.find(b => b.id === seed.id)).toBeUndefined(),
             { timeout: 2000 }
         )
-        await tx.isPersisted.promise
+        await tx.when('settled')
         expect(tx.state).toBe('completed')
         expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
 
@@ -175,7 +173,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
         // A stale read lands for the already-owning id= query: its refetch returns the
         // pre-move row (genre = SOURCE), strictly older than the just-committed synced
-        // value. applySuccessfulResult would write it into syncedData; the guard drops it.
+        // value. applySuccessfulResult would write it into the synced store; the guard drops it.
         control.serveStale = true
         await collection.utils.refetch()
         await new Promise(r => setTimeout(r, 400))
@@ -283,7 +281,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
             await collection.utils.refetch().catch(() => {})
             await new Promise(r => setTimeout(r, 50))
         }
-        await tx.isPersisted.promise
+        await tx.when('settled')
         expect(tx.state).toBe('completed')
         await new Promise(r => setTimeout(r, 300))
         clearInterval(sampler)

@@ -13,8 +13,9 @@ import {
     getTestSlug,
     newRecordId,
     pb,
+    waitForLoadFinish,
 } from './helpers'
-import type { Books, Schema } from './schema'
+import type { Schema } from './schema'
 
 /**
  * Regression coverage for the stale-ABSENCE delete: the missing arm of the
@@ -22,10 +23,10 @@ import type { Books, Schema } from './schema'
  *
  * A subset fetch is issued while the server has no matching rows. Before it
  * resolves, the client inserts a row and the mutation settles — the write-back
- * puts the confirmed row in the synced store, and query-db-collection's manual
- * write path (updateCacheData) pushes the synced store into every cached query
- * for the collection, so the in-flight query's key now OWNS the row. When the
- * slow fetch finally resolves with its pre-insert (empty) result,
+ * puts the confirmed row in the synced store, and pbtsdb's cache claim adds it
+ * to every cached query for the collection, so the in-flight query's key now
+ * OWNS the row. When the slow fetch finally resolves with its pre-insert
+ * (empty) result,
  * applySuccessfulResult diffs it against that baseline and reconcile-DELETES
  * the newer row. shouldDropSyncedWrite never sees it: deletes are exempt.
  *
@@ -53,12 +54,23 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         vi.restoreAllMocks()
     })
 
-    const syncedGet = (collection: unknown, id: string) =>
-        (
-            collection as {
-                _state: { syncedData: { get: (k: string) => Books | undefined } }
-            }
-        )._state.syncedData.get(id)
+    // Ids of every realtime event the collection's handler has received.
+    const recordEchoes = () => {
+        const echoed = new Set<string>()
+        const books = pb.collection('books')
+        const real = books.subscribe.bind(books)
+        vi.spyOn(books, 'subscribe').mockImplementation((topic, callback, options) =>
+            real(
+                topic,
+                event => {
+                    callback(event)
+                    echoed.add(event.record.id)
+                },
+                options
+            )
+        )
+        return echoed
+    }
 
     it('keeps a row confirmed while the subset fetch was in flight', async () => {
         const slug = getTestSlug('absent')
@@ -107,9 +119,9 @@ describe('stale-absence reconcile delete (on-demand)', () => {
             page_count: 1,
         }
         const tx = collection.insert(newBook)
-        await tx.isPersisted.promise
+        await tx.when('settled')
         expect(tx.state).toBe('completed')
-        await waitFor(() => expect(syncedGet(collection, newBook.id)).toBeDefined(), {
+        await waitFor(() => expect(collection.base.get(newBook.id)).toBeDefined(), {
             timeout: 5000,
         })
 
@@ -118,7 +130,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         releaseFetch()
         await new Promise(r => setTimeout(r, 400))
 
-        expect(syncedGet(collection, newBook.id)).toBeDefined()
+        expect(collection.base.get(newBook.id)).toBeDefined()
         expect(result.current.data.find(b => b.id === newBook.id)).toBeDefined()
 
         await pb
@@ -150,11 +162,16 @@ describe('stale-absence reconcile delete (on-demand)', () => {
             }
         )
 
+        const echoed = recordEchoes()
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q.from({ books: collection }).where(({ books }) => eq(books.isbn, slug))
             )
         )
+        // The refetch below must be a new request: one still in flight from
+        // the first load would be joined instead, and it predates serveEmpty.
+        await waitForLoadFinish(result, 10000)
+        await collection.waitForSubscription()
 
         const authorId = await getTestAuthorId()
         const newBook = {
@@ -167,16 +184,19 @@ describe('stale-absence reconcile delete (on-demand)', () => {
             page_count: 1,
         }
         const tx = collection.insert(newBook)
-        await tx.isPersisted.promise
-        await waitFor(() => expect(syncedGet(collection, newBook.id)).toBeDefined(), {
+        await tx.when('settled')
+        await waitFor(() => expect(collection.base.get(newBook.id)).toBeDefined(), {
             timeout: 5000,
         })
+        // The row's realtime echo is newer than any fetch issued before it
+        // arrives, so it would re-add the row after the prune below.
+        await waitFor(() => expect(echoed.has(newBook.id)).toBe(true), { timeout: 5000 })
 
         // A refetch issued now — after the write — returns empty (as if another
         // client deleted the row). The prune must apply.
         control.serveEmpty = true
         await collection.utils.refetch()
-        await waitFor(() => expect(syncedGet(collection, newBook.id)).toBeUndefined(), {
+        await waitFor(() => expect(collection.base.get(newBook.id)).toBeUndefined(), {
             timeout: 5000,
         })
         expect(result.current.data.find(b => b.id === newBook.id)).toBeUndefined()
