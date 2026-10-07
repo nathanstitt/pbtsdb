@@ -35,22 +35,26 @@ const NO_WRITES = { inserted: [], updated: [] }
 export function createMembership<T extends object>(deps: MembershipDeps<T>): Membership<T> {
     const { ledger, store } = deps
 
-    // Ordered by `rows`, the input order, rather than by insert/update bucket:
-    // a channel that journals writes should see them in the order they
-    // arrived, not grouped by kind.
+    // One write per id, in input order rather than insert/update bucket
+    // order: a duplicate id in `rows` must write once, not once per
+    // occurrence, and always as the final ledger row, since that is the
+    // object core tracks by identity once the transaction lands.
     function writesFor(
         rows: readonly T[],
         changes: LedgerWrites<T>,
         removed: readonly string[]
     ): SyncWrite<T>[] {
         const inserted = new Set(changes.inserted.map(idOf))
-        const updated = new Map(changes.updated.map(value => [idOf(value), value] as const))
+        const updated = new Set(changes.updated.map(idOf))
+        const seen = new Set<string>()
         const writes: SyncWrite<T>[] = []
         for (const row of rows) {
             const id = idOf(row)
-            if (id === undefined) continue
-            if (inserted.has(id)) writes.push({ type: 'insert', value: row })
-            else if (updated.has(id)) writes.push({ type: 'update', value: updated.get(id) as T })
+            if (id === undefined || seen.has(id) || !(inserted.has(id) || updated.has(id))) continue
+            const stored = ledger.row(id)
+            if (stored === undefined) continue
+            seen.add(id)
+            writes.push({ type: inserted.has(id) ? 'insert' : 'update', value: stored })
         }
         for (const key of removed) writes.push({ type: 'delete', key })
         return writes
@@ -114,7 +118,7 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
             }),
         dropAll: ids =>
             apply(() => {
-                const present = [...ids].filter(id => ledger.has(id))
+                const present = [...new Set(ids)].filter(id => ledger.has(id))
                 const gone = pick(rowsBefore(present), present)
                 for (const id of present) ledger.releaseAll(id)
                 return { writes: writesFor([], NO_WRITES, present), gone }

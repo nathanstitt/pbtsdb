@@ -51,6 +51,23 @@ describe('membership', () => {
         expect(log).toEqual(['begin', 'update:a', 'insert:b', 'commit'])
     })
 
+    it('land of a new row duplicated in one batch writes it once, as the final version', () => {
+        const { log, ledger, membership } = setup()
+        membership.land('t', [row('a', 'A'), row('a', 'A2', '2026-01-02 00:00:00.000Z')])
+        expect(log).toEqual(['begin', 'insert:a', 'commit'])
+        expect(ledger.row('a')?.name).toBe('A2')
+    })
+
+    it('land of a new row duplicated with an older second copy writes the first version once', () => {
+        const { log, ledger, membership } = setup()
+        membership.land('t', [
+            row('a', 'A2', '2026-01-02 00:00:00.000Z'),
+            row('a', 'A', '2026-01-01 00:00:00.000Z'),
+        ])
+        expect(log).toEqual(['begin', 'insert:a', 'commit'])
+        expect(ledger.row('a')?.name).toBe('A2')
+    })
+
     it('land of a stale row writes nothing but keeps the holder', () => {
         const { log, ledger, membership } = setup()
         membership.land('t1', [row('a', 'A', '2026-01-02 00:00:00.000Z')])

@@ -40,9 +40,14 @@ export function createSyncedStore<T extends object>(collectionName: string): Syn
             try {
                 for (const write of writes) channel.write(write)
             } catch (error) {
-                const cancel = new AbortController()
-                cancel.abort()
-                channel.commit(cancel.signal)
+                try {
+                    const cancel = new AbortController()
+                    cancel.abort()
+                    channel.commit(cancel.signal)
+                } catch {
+                    // The original write error is what matters; a failing
+                    // abort-commit must not replace or hide it.
+                }
                 throw new Error(`${collectionName}: sync write failed`, { cause: error })
             }
             // Returned unchanged: `whenSyncAccepted` reads the acceptance
