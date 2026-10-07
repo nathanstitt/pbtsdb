@@ -7,7 +7,7 @@ import {
 
 class FakeEventSource implements EventSourceLike {
     static instances: FakeEventSource[] = []
-    onerror: ((ev: unknown) => void) | null = null
+    onerror: ((ev: Event) => void) | null = null
     closed = false
     private listeners = new Map<string, Set<(ev: MessageEvent) => void>>()
 
@@ -179,5 +179,124 @@ describe('realtime client', () => {
         await unsubscribe()
         expect(source.closed).toBe(true)
         expect(client.isConnected()).toBe(false)
+    })
+
+    it('leaves subscribe pending until PB_CONNECT, not merely until queued', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        let settled = false
+        const sub = client
+            .subscribe('t1', () => undefined)
+            .then(fn => {
+                settled = true
+                return fn
+            })
+        await flush()
+        expect(settled).toBe(false)
+        expect(sent).toHaveLength(0)
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+        expect(settled).toBe(true)
+        expect(sent).toHaveLength(1)
+    })
+
+    it('keeps a subscribe made during an in-flight POST pending until the POST carrying it completes', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        expect(sent).toHaveLength(1)
+
+        let secondSettled = false
+        const second = client
+            .subscribe('t2', () => undefined)
+            .then(fn => {
+                secondSettled = true
+                return fn
+            })
+        await flush()
+        expect(secondSettled).toBe(false)
+        expect(sent).toHaveLength(1)
+
+        gate.shift()?.()
+        await first
+        await flush()
+        expect(secondSettled).toBe(false)
+        expect(sent).toHaveLength(2)
+        expect(sent[1].subscriptions).toEqual(['t1', 't2'])
+
+        gate.shift()?.()
+        await second
+        expect(secondSettled).toBe(true)
+    })
+
+    it('POSTs the full list on a resumed reconnect when a topic changed during the gap', async () => {
+        vi.useFakeTimers()
+        const { client, sent, connect } = setup({ resumed: true })
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const first = connect('client-1')
+        await sub
+        expect(sent).toHaveLength(1)
+        first.fail()
+        await vi.advanceTimersByTimeAsync(0)
+        void client.subscribe('t2', () => undefined)
+        const second = FakeEventSource.instances[1]
+        second.emit('PB_CONNECT', { clientId: 'client-1', resumed: true }, 'client-1')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(sent).toHaveLength(2)
+        expect(sent[1]).toEqual({ clientId: 'client-1', subscriptions: ['t1', 't2'] })
+    })
+
+    it('removes a topic whose POST rejected so it cannot leak into a later send', async () => {
+        FakeEventSource.instances = []
+        let shouldFail = true
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                if (shouldFail) {
+                    shouldFail = false
+                    throw new Error('boom')
+                }
+                sent.push(body)
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await expect(sub).rejects.toThrow('boom')
+        expect(client.topics()).toEqual([])
+
+        await client.subscribe('t2', () => undefined)
+        expect(sent).toEqual([{ clientId: 'client-1', subscriptions: ['t2'] }])
     })
 })

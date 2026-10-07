@@ -15,7 +15,7 @@ export type EventSourceLike = {
     addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     close(): void
-    onerror: ((ev: unknown) => void) | null
+    onerror: ((ev: Event) => void) | null
 }
 
 export interface RealtimeClientDeps {
@@ -57,8 +57,7 @@ type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     const backoff = deps.backoff ?? REALTIME_BACKOFF_MS
-    const openSource =
-        deps.eventSource ?? ((url: string) => new EventSource(url) as unknown as EventSourceLike)
+    const openSource = deps.eventSource ?? ((url: string) => new EventSource(url))
 
     const listeners = new Map<string, Set<RealtimeListener>>()
     const dispatchers = new Map<string, EventListener>()
@@ -66,7 +65,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let connected = false
     let clientId: string | undefined
     let lastSeq: number | undefined
-    let lastSent: string[] = []
+    /** The topic list the server last confirmed; survives a resumed reconnect's `close()`. */
+    let confirmed: string[] = []
     let waiters: Waiter[] = []
     let submitQueued = false
     let submitting = false
@@ -102,27 +102,21 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         return a.length === b.length && a.every(topic => b.includes(topic))
     }
 
-    function settleWaiters(error?: unknown): void {
-        const pending = waiters
-        waiters = []
+    function settleWaiters(pending: Waiter[], error?: unknown): void {
         for (const waiter of pending) error === undefined ? waiter.resolve() : waiter.reject(error)
     }
 
     async function sendTopics(): Promise<void> {
-        if (!connected || !clientId) return
         const list = topics()
         if (list.length === 0) {
-            close()
-            settleWaiters()
+            close(true)
             return
         }
-        if (sameList(list, lastSent)) {
-            settleWaiters()
-            return
-        }
+        if (sameList(list, confirmed)) return
         const id = clientId
+        if (!id) return
         await deps.send({ clientId: id, subscriptions: list })
-        if (clientId === id) lastSent = list
+        if (clientId === id) confirmed = list
     }
 
     async function runSubmit(): Promise<void> {
@@ -130,13 +124,16 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             resubmit = true
             return
         }
+        if (!connected || !clientId) return
         submitting = true
+        const pending = waiters
+        waiters = []
         try {
             await sendTopics()
-            settleWaiters()
+            settleWaiters(pending)
         } catch (error) {
             logger.error('Failed to set realtime subscriptions', { error })
-            settleWaiters(error)
+            settleWaiters(pending, error)
         } finally {
             submitting = false
             if (resubmit) {
@@ -171,13 +168,19 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         return `${deps.url}${deps.url.includes('?') ? '&' : '?'}${params}`
     }
 
-    function close(): void {
+    /**
+     * Closes the connection. `forget` clears `confirmed` because the server's
+     * state for this client is gone too (the last topic was removed, or the
+     * caller is disconnecting outright) — not on a transient error, where a
+     * resumed reconnect may still find the server holding the old list.
+     */
+    function close(forget: boolean): void {
         if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
         reconnectTimer = undefined
         source?.close()
         source = undefined
         connected = false
-        lastSent = []
+        if (forget) confirmed = []
     }
 
     function scheduleReconnect(): void {
@@ -197,7 +200,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         target.onerror = () => {
             if (source !== target) return
             logger.debug('Realtime connection lost', { clientId })
-            close()
+            close(false)
             scheduleReconnect()
         }
         target.addEventListener('PB_CONNECT', (ev: Event) => {
@@ -216,12 +219,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             attempts = 0
             if (!resumed) {
                 lastSeq = undefined
-                lastSent = []
-            } else {
-                lastSent = topics()
+                confirmed = []
             }
             attachAll(target)
-            void submit()
+            submit().catch(() => undefined)
             if (everConnected) deps.onReconnect?.(resumed)
             everConnected = true
         })
@@ -254,13 +255,27 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                 }
                 await submit().catch(() => undefined)
             }
-            return ready.then(() => unsubscribe)
+            return ready.then(
+                () => unsubscribe,
+                (error: unknown) => {
+                    const current = listeners.get(topic)
+                    if (current?.delete(listener) && current.size === 0) {
+                        listeners.delete(topic)
+                        const dispatch = dispatchers.get(topic)
+                        if (dispatch) {
+                            source?.removeEventListener(topic, dispatch)
+                            dispatchers.delete(topic)
+                        }
+                    }
+                    throw error
+                }
+            )
         },
         topics,
         isConnected: () => connected,
         clientId: () => clientId,
         disconnect() {
-            close()
+            close(true)
             clientId = undefined
             lastSeq = undefined
         },
