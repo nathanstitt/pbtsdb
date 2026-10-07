@@ -67,7 +67,7 @@ type Run = {
     abort: AbortController
     demands: Map<LoadSubsetOptions, Demand>
     eagerSeq: number
-    eagerLoad: Promise<void> | undefined
+    eagerLoad: Promise<string[]> | undefined
 }
 
 export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): SyncAdapter<T> {
@@ -129,19 +129,21 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         demand: Demand,
         wait: Wait,
         refetch: boolean
-    ): Promise<void> {
+    ): Promise<string[]> {
         const seq = ++demand.seq
         const rows = await fetchRows(run, demand.request, opts.signal, refetch).catch(error => {
             if (stopped(run, opts, wait)) return undefined
             throw error
         })
-        if (rows === undefined || stopped(run, opts, wait)) return
-        if (run.demands.get(opts)?.seq !== seq) return
+        if (rows === undefined || stopped(run, opts, wait)) return []
+        if (run.demands.get(opts) !== demand || demand.seq !== seq) return []
         const applied = membership.reconcile(opts, rows)
-        if (applied === false) return
-        ledger.release(ACCEPTED, idsOf(rows))
+        if (applied === false) return []
+        const ids = idsOf(rows)
+        ledger.release(ACCEPTED, ids)
         await settle(applied, wait)
         stopped(run, opts, wait)
+        return ids
     }
 
     function unloadSubset(run: Run, opts: LoadSubsetOptions): void {
@@ -178,22 +180,30 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 unloadSubset(run, opts)
                 throw error
             }
-            return load(run, opts, demand, 'visible', opts.refetch === true).catch(error => {
-                unloadSubset(run, opts)
-                throw error
-            })
+            return load(run, opts, demand, 'visible', opts.refetch === true).then(
+                () => undefined,
+                error => {
+                    if (run.demands.get(opts) === demand) unloadSubset(run, opts)
+                    throw error
+                }
+            )
         }
     }
 
     // A superseded eager load waits for the newer one, so readiness never
     // fires before the rows a later load brings.
-    function loadEagerRows(run: Run): Promise<void> {
+    function loadEagerRows(run: Run): Promise<string[]> {
         const seq = ++run.eagerSeq
-        const loading = (async (): Promise<void> => {
+        const loading = (async (): Promise<string[]> => {
             const rows = await fetchRows(run, {}, undefined, false)
-            if (run.abort.signal.aborted) return
-            if (run.eagerSeq !== seq) return run.eagerLoad
-            await settle(membership.reconcile(EAGER, rows), 'accepted')
+            if (run.abort.signal.aborted) return []
+            if (run.eagerSeq !== seq) return run.eagerLoad ?? []
+            const applied = membership.reconcile(EAGER, rows)
+            if (applied === false) return []
+            const ids = idsOf(rows)
+            ledger.release(ACCEPTED, ids)
+            await settle(applied, 'accepted')
+            return ids
         })()
         run.eagerLoad = loading
         return loading
@@ -225,28 +235,44 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             .map((holder): [Holder, string[]] => [holder, ledger.idsOf(holder)])
     }
 
+    async function reloadRows(run: Run): Promise<Set<string>> {
+        const loaded =
+            syncMode === 'eager'
+                ? [await loadEagerRows(run)]
+                : await Promise.all(
+                      [...run.demands].map(([opts, demand]) =>
+                          load(run, opts, demand, 'accepted', true)
+                      )
+                  )
+        return new Set(loaded.flat())
+    }
+
+    async function releaseUnconfirmed(
+        run: Run,
+        before: [Holder, string[]][],
+        confirmed: Set<string>
+    ): Promise<void> {
+        for (const [holder, ids] of before) {
+            if (run.abort.signal.aborted) return
+            const unconfirmed = ids.filter(id => !confirmed.has(id))
+            if (unconfirmed.length > 0) {
+                await settle(membership.drop([holder], unconfirmed), 'accepted')
+            }
+        }
+    }
+
     async function reload(): Promise<void> {
         const run = current
         if (!run || !store.isAttached()) return
-        const unconfirmed = releasable()
+        const before = releasable()
+        let confirmed: Set<string>
         try {
-            if (syncMode === 'eager') {
-                await loadEagerRows(run)
-            } else {
-                await Promise.all(
-                    [...run.demands].map(([opts, demand]) =>
-                        load(run, opts, demand, 'accepted', true)
-                    )
-                )
-            }
+            confirmed = await reloadRows(run)
         } catch (error) {
             if (run.abort.signal.aborted) return
             throw error
         }
-        for (const [holder, ids] of unconfirmed) {
-            if (run.abort.signal.aborted) return
-            await settle(membership.drop([holder], ids), 'accepted')
-        }
+        await releaseUnconfirmed(run, before, confirmed)
     }
 
     return {
