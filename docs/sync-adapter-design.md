@@ -481,7 +481,7 @@ Sizing (`apis/realtime.go`, fork at upstream 0.40.4):
 | `src/build-collection.ts` | Replace `queryCollectionOptions` with a `SyncConfig`. Keep view registry, realtime wiring, holds, mutation handlers. |
 | `src/fetch-records.ts` | Drop `queryClient` and `withRowsConfirmedMidFlight`. Return rows; the caller writes. |
 | `src/loaded-subsets.ts` | Drop `queryClient` and both invalidation paths. Marks only. |
-| `src/synced-write-guard.ts` | Drop `shouldDrop`, `trackFetch`, `withRowsConfirmedMidFlight`, `isOwnWrite`. Keep `isStaleServerRecord`, `markConfirmedPresent`, `writeBackAfterPersisted`. |
+| `src/synced-write-guard.ts` | Delete. Staleness is ledger rule 4; in-flight deletes are `noteDeleted` in `src/sync-adapter.ts`; the write-back is `membership.land(ACCEPTED, rows)`. |
 | `src/realtime-subscription.ts` | Pass the delivering entry with each event. Use `transport.subscribe`. |
 | `src/transport.ts` | New. REST on the SDK, realtime on pbtsdb's own SSE client. The one module that imports `pocketbase`. |
 | `src/request.ts` | Drop `queryKeyFor` / `requestFromQueryKey`; keep `toRequest`. |

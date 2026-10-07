@@ -39,7 +39,19 @@ All notable changes to this project will be documented in this file.
   0.12 drops the optimistic state when the handler settles; the settled row is
   now the server's row with no gap in which the previous row shows.
 - `refetchOnMutation: true` calls `collection.reload()` before the handler settles.
-  The built-in handlers return `void`.
+  The built-in handlers return `void`. Concurrent `reload()` calls share one
+  follow-up reload instead of each fetching every live subset.
+- A query that mounts again sends a request. The react-query cache served it
+  before. An id-keyed query whose rows the store holds is still served without a
+  request.
+- Two live queries with equal requests send two requests. react-query deduplicated
+  them.
+- No refetch on window focus or on network reconnect; react-query did both by
+  default. Call `collection.reload()` for the same effect. A realtime reconnect the
+  server did not resume still reloads every live subset.
+- In on-demand mode with `realtime: 'collection'`, a row that arrives as a realtime
+  echo stays in memory until `reload()` runs or the collection goes idle. Live
+  queries apply their own `where`, so this costs memory, not correctness.
 
 ### Fixed
 

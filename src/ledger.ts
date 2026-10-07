@@ -1,4 +1,4 @@
-import { idOf, updatedAtOf } from './records'
+import { idOf, idsOf, updatedAtOf } from './records'
 
 /** Something that keeps a row in the store: a subset, a topic filter, a hold, or a sentinel. */
 export type Holder = object | string
@@ -157,7 +157,7 @@ export function createLedger<T extends object>(): Ledger<T> {
         retain,
         release,
         replace(holder, rows) {
-            const keep = new Set(rows.map(idOf).filter((id): id is string => id !== undefined))
+            const keep = new Set(idsOf(rows))
             const stale = [...(byHolder.get(holder) ?? [])].filter(id => !keep.has(id))
             const writes = retain(holder, rows)
             return { ...writes, removed: release(holder, stale) }

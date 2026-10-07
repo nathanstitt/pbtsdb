@@ -39,7 +39,7 @@ Each `sync()` call is a run with its own `AbortController`. Every fetch carries 
 
 A delete event, or a delete mutation, is recorded against every fetch in flight (`noteDeleted`). The fetch drops those ids from its result before the reconcile, because the server may have run the query before the delete.
 
-`reload` refetches every live demand from the server (the whole collection in eager mode). It then releases the topic and `ACCEPTED` holders it saw before the fetch, for the rows the results did not confirm. Rows the results confirmed have a subset holder and stay; the others leave. It is the recovery path after a lost event, after a reconnect the server did not resume, and after losing access to rows, which PocketBase reports with no event.
+`reload` refetches every live demand from the server (the whole collection in eager mode). It then releases the topic and `ACCEPTED` holders it saw before the fetch, for the rows the results did not confirm. Rows the results confirmed have a subset holder and stay; the others leave. It is the recovery path after a lost event, after a reconnect the server did not resume, and after losing access to rows, which PocketBase reports with no event. Calls made while a reload is in flight share one follow-up reload that starts when the current one settles, so a burst of mutations under `refetchOnMutation` costs two reloads, not one per mutation.
 
 `reload()` and `accept()` resolve when their rows are accepted, through `whenSyncAccepted(receipt)`, not when they are visible. Core holds every sync transaction while a mutation on the collection persists, so a handler that awaited visibility would wait for itself.
 

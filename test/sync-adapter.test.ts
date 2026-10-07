@@ -1,8 +1,11 @@
 import {
     eq,
+    gt,
     IR,
+    isNull,
     LoadSubsetOperationAbortedError,
     type LoadSubsetOptions,
+    like,
     type SyncConfig,
     withAcceptedReceipt,
 } from '@tanstack/db'
@@ -350,6 +353,53 @@ describe('sync adapter', () => {
             await load
             expect(t.ledger.idsOf(ACCEPTED)).toEqual(['a'])
         })
+
+        // The release is safe only while the client predicate matches no row
+        // PocketBase's would reject. These pin the known differences in the
+        // safe direction: `~` is case-insensitive, `= null` matches '', and a
+        // Date compares as a string on the server.
+        describe('the client predicate is not laxer than PocketBase', () => {
+            const kept = async (opts: LoadSubsetOptions, stored: Row) => {
+                const t = setup()
+                t.membership.land(ACCEPTED, [stored])
+                const load = t.loadSubset(opts)
+                t.calls[0].resolve([])
+                await load
+                expect(t.ledger.idsOf(ACCEPTED)).toEqual([stored.id])
+            }
+
+            it('like is case-sensitive', () =>
+                kept({ where: like(new IR.PropRef<string>(['name']), 'x%') }, row('a', 'Xy')))
+
+            it('isNull does not match an empty string', () =>
+                kept({ where: isNull(new IR.PropRef(['name'])) }, row('a', '')))
+
+            it('a Date compared to a timestamp string matches nothing', () =>
+                kept(
+                    { where: gt(new IR.PropRef(['updated']), new Date('2020-01-01T00:00:00Z')) },
+                    row('a', 'x')
+                ))
+        })
+    })
+
+    it('reloads called during a reload share one follow-up reload', async () => {
+        const t = setup()
+        const opts: LoadSubsetOptions = {}
+        const load = t.loadSubset(opts)
+        t.calls[0].resolve([row('a')])
+        await load
+        const first = t.adapter.reload()
+        const second = t.adapter.reload()
+        const third = t.adapter.reload()
+        expect(t.calls).toHaveLength(2)
+        t.calls[1].resolve([row('a')])
+        await first
+        await flush()
+        expect(t.calls).toHaveLength(3)
+        t.calls[2].resolve([row('a'), row('b')])
+        await Promise.all([second, third])
+        expect(t.calls).toHaveLength(3)
+        expect(t.ledger.idsOf(opts)).toEqual(['a', 'b'])
     })
 
     it('a superseded load resolves only after the newer load has landed its rows', async () => {
@@ -369,7 +419,7 @@ describe('sync adapter', () => {
         expect(t.ledger.idsOf(opts)).toEqual(['b'])
     })
 
-    it('two overlapping reloads keep every topic row the newer result confirms', async () => {
+    it('a reload queued behind another installs what its own result returns', async () => {
         const t = setup()
         const opts: LoadSubsetOptions = {}
         const load = t.loadSubset(opts)
@@ -379,9 +429,12 @@ describe('sync adapter', () => {
         const older = t.adapter.reload()
         const newer = t.adapter.reload()
         t.calls[1].resolve([])
+        await older
+        expect(t.ledger.has('a')).toBe(false)
+        await flush()
         t.calls[2].resolve([row('a')])
-        await Promise.all([older, newer])
-        expect(t.ledger.idsOf('topic')).toEqual(['a'])
+        await newer
+        expect(t.ledger.idsOf(opts)).toEqual(['a'])
     })
 
     it('an aborted load keeps the accepted holder of a row it returned', async () => {

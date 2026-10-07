@@ -13,7 +13,7 @@ import { logger } from './logger'
 import type { Applied, Membership } from './membership'
 import type { RealtimeSubscription } from './realtime-subscription'
 import { realtimeWhereFor } from './realtime-where'
-import { idOf } from './records'
+import { idOf, idsOf } from './records'
 import { type PbRequest, realtimeFiltersFor, toRequest } from './request'
 import type { SyncChannel, SyncedStore } from './synced-store'
 import type { RealtimeMode } from './types'
@@ -89,10 +89,6 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
         return { request, filters, counted: true, seq: 0, loading: undefined }
-    }
-
-    function idsOf(rows: readonly T[]): string[] {
-        return rows.map(idOf).filter((id): id is string => id !== undefined)
     }
 
     async function settle(applied: Applied, wait: Wait): Promise<void> {
@@ -339,7 +335,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         }
     }
 
-    async function reload(): Promise<void> {
+    async function reloadNow(): Promise<void> {
         const run = current
         if (!run || !store.isAttached()) return
         const before = releasable()
@@ -351,6 +347,27 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             throw error
         }
         await releaseUnconfirmed(run, before, confirmed)
+    }
+
+    // Callers during a reload share one follow-up reload, which starts when
+    // the current one settles: a change that landed after the current fetch
+    // went out still gets a fresh fetch, and no request is sent per caller.
+    let reloading: Promise<void> | undefined
+    let queued: Promise<void> | undefined
+    function reload(): Promise<void> {
+        if (!reloading) {
+            reloading = reloadNow().finally(() => {
+                reloading = undefined
+            })
+            return reloading
+        }
+        queued ??= reloading
+            .catch(() => undefined)
+            .then(() => {
+                queued = undefined
+                return reload()
+            })
+        return queued
     }
 
     return {

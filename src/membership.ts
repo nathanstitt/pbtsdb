@@ -1,5 +1,5 @@
 import type { Holder, Ledger, LedgerWrites } from './ledger'
-import { idOf } from './records'
+import { idOf, idsOf } from './records'
 import type { SyncedStore, SyncWrite } from './synced-store'
 
 /** A commit receipt, or false when no sync session is running. */
@@ -121,8 +121,7 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
             apply(() => {
                 const before = rowsBefore(ledger.idsOf(holder))
                 const { removed, ...changes } = ledger.replace(holder, rows)
-                const ids = rows.map(idOf).filter((id): id is string => id !== undefined)
-                releaseKept(holder, releaseAlso, ids)
+                releaseKept(holder, releaseAlso, idsOf(rows))
                 return { writes: writesFor(rows, changes, removed), gone: pick(before, removed) }
             }),
         confirm: (keeper, holders, ids) =>
