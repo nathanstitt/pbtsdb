@@ -1,25 +1,15 @@
 import { and, concat, eq, IR, inArray, not } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { createCollection } from '../src'
 import { convertToPocketBaseFilter } from '../src/pocketbase-query-converter'
-import {
-    authenticateTestUser,
-    clearAuth,
-    createBooksCollection,
-    createTestQueryClient,
-    getTestSlug,
-    pb,
-} from './helpers'
+import { authenticateTestUser, clearAuth, createBooksCollection, getTestSlug, pb } from './helpers'
 import type { Schema } from './schema'
 
 describe('Server-Side Filtering (on-demand mode)', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -28,12 +18,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -51,7 +36,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
             }
             const client = new PocketBase(pb.baseURL)
             client.authStore.save(pb.authStore.token, pb.authStore.record)
-            const tags = createCollection<Schema>(client, queryClient)('tags', {
+            const tags = createCollection<Schema>(client)('tags', {
                 syncMode: 'on-demand',
             })
             const getFullListSpy = vi.spyOn(client.collection('tags'), 'getFullList')
@@ -76,7 +61,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
 
     it('sends a PocketBase-valid filter for an empty inArray nested in and()', async () => {
         const [book] = await pb.collection('books').getFullList()
-        const books = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const books = createBooksCollection({ syncMode: 'on-demand' })
         const genre = eq(new IR.PropRef(['genre']), book.genre)
         const id = new IR.PropRef<string>(['id'])
 
@@ -102,7 +87,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     }, 15000)
 
     it('should pass filter to PocketBase getFullList when .where() is present', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const booksCollection = createBooksCollection({ syncMode: 'on-demand' })
 
         // Get a valid genre to filter by
         const allBooks = await pb.collection('books').getFullList()
@@ -152,7 +137,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     // Note: TanStack DB does NOT pass limit to loadSubsetOptions - limiting is applied client-side.
     // This test verifies that client-side limiting works correctly.
     it('should apply limit client-side when .limit() is present', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const booksCollection = createBooksCollection({ syncMode: 'on-demand' })
 
         const { result } = renderHook(() =>
             useLiveQuery(q =>
@@ -176,7 +161,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     }, 15000)
 
     it('should verify server-side filtered results match expected count', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const booksCollection = createBooksCollection({ syncMode: 'on-demand' })
 
         // First get total count and genre distribution
         const allBooks = await pb.collection('books').getFullList()
@@ -214,7 +199,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     }, 15000)
 
     it('should filter server-side with not(eq())', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const booksCollection = createBooksCollection({ syncMode: 'on-demand' })
 
         const allBooks = await pb.collection('books').getFullList()
         const excludedGenre = allBooks[0].genre
@@ -243,7 +228,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     // Note: TanStack DB does NOT pass orderBy to loadSubsetOptions - sorting is always client-side.
     // This test verifies that client-side sorting works correctly.
     it('should sort results client-side when .orderBy() is present', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'on-demand' })
+        const booksCollection = createBooksCollection({ syncMode: 'on-demand' })
 
         // Use a filter to trigger on-demand fetch
         const allBooks = await pb.collection('books').getFullList()
@@ -280,7 +265,7 @@ describe('Server-Side Filtering (on-demand mode)', () => {
     // TanStack DB 0.12 joins on a nested and() of equalities; each side still
     // loads through its own on-demand subset.
     it('serves a compound join with and() across two on-demand collections', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const books = c('books', { syncMode: 'on-demand' })
         const metadata = c('book_metadata', { syncMode: 'on-demand' })
         const allBooks = await pb.collection('books').getFullList()

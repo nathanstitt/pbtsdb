@@ -1,6 +1,5 @@
 import { and, eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
@@ -9,7 +8,6 @@ import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -46,7 +44,6 @@ import type { Books, Schema } from './schema'
  * applySuccessfulResult only reconciles rows a query already owns against its baseline.
  */
 describe('optimistic move snap-back via stale query result (on-demand)', () => {
-    let queryClient: QueryClient
     let testLogger: TestLogger
 
     const SOURCE_GENRE = 'Fiction' as const
@@ -63,12 +60,10 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
     beforeEach(() => {
         testLogger = createTestLogger()
         setLogger(testLogger)
-        queryClient = createTestQueryClient()
     })
 
     afterEach(() => {
         resetLogger()
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -115,7 +110,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
      */
     const moveWithIdResolverMounted = async (staleRow: Books) => {
         const seed = staleRow
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -175,15 +170,13 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         // pre-move row (genre = SOURCE), strictly older than the just-committed synced
         // value. applySuccessfulResult would write it into the synced store; the guard drops it.
         control.serveStale = true
-        await collection.utils.refetch()
+        await collection.reload()
         await new Promise(r => setTimeout(r, 400))
 
         expect(control.served).toBeGreaterThan(0)
         expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
         expect(folderResult.current.data.find(b => b.id === seed.id)).toBeUndefined()
-        expect(
-            testLogger.messages.debug.some(m => m.msg.includes('Dropping stale synced write'))
-        ).toBe(true)
+        // Ledger rule 4 drops a strictly older row without a log; the synced genre proves it.
 
         await pb
             .collection('books')
@@ -200,7 +193,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         const seed = await seedBook(SOURCE_GENRE)
         const staleRow: Books = { ...seed } // genre = SOURCE, identical `updated`
 
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -263,7 +256,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         // the PATCH commits (when synced flips to DEST but the overlay lingers). The
         // visible value must never flip back to the SOURCE folder at any point.
         control.serveStale = true
-        await collection.utils.refetch()
+        await collection.reload()
         await new Promise(r => setTimeout(r, 100))
 
         const reverted: string[] = []
@@ -278,7 +271,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         // the settle, covering the overlay-present-but-synced-fresh window.
         releasePatch()
         for (let i = 0; i < 4; i++) {
-            await collection.utils.refetch().catch(() => {})
+            await collection.reload().catch(() => {})
             await new Promise(r => setTimeout(r, 50))
         }
         await tx.when('settled')
@@ -299,7 +292,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
     it('still applies a genuinely newer query result for an owned row', async () => {
         const seed = await seedBook(SOURCE_GENRE)
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -339,7 +332,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         expect(syncedGet(collection, seed.id)?.title).toBe(seed.title)
 
         control.serveNewer = true
-        await collection.utils.refetch()
+        await collection.reload()
 
         await waitFor(() => expect(syncedGet(collection, seed.id)?.title).toBe(newTitle), {
             timeout: 5000,

@@ -1,21 +1,17 @@
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { realtimeClientFor, resetRealtime, transportFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
     createAuthorsCollection,
     createBooksCollection,
-    createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
 
 describe('reconnect refetch lifecycle', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -24,19 +20,11 @@ describe('reconnect refetch lifecycle', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('registers its reconnect listener while syncing and removes it on cleanup', async () => {
         const reconnectListenerCount = () => transportFor(pb).reconnectListenerCount()
         const baseline = reconnectListenerCount()
 
-        const books = createBooksCollection(queryClient)
+        const books = createBooksCollection()
         expect(reconnectListenerCount()).toBe(baseline)
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
@@ -54,8 +42,8 @@ describe('reconnect refetch lifecycle', () => {
         const reconnectListenerCount = () => transportFor(pb).reconnectListenerCount()
         const baseline = reconnectListenerCount()
 
-        const books = createBooksCollection(queryClient)
-        const authors = createAuthorsCollection(queryClient)
+        const books = createBooksCollection()
+        const authors = createAuthorsCollection()
 
         const booksHook = renderHook(() => useLiveQuery(q => q.from({ books })))
         await waitForLoadFinish(booksHook.result)
@@ -75,7 +63,7 @@ describe('reconnect refetch lifecycle', () => {
     }, 20000)
 
     it('refetches a ready, open collection after a non-resumed reconnect', async () => {
-        const books = createBooksCollection(queryClient)
+        const books = createBooksCollection()
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
         await waitForLoadFinish(result)
         await books.waitForSubscription()
@@ -105,12 +93,8 @@ describe('reconnect refetch lifecycle', () => {
             return original(...args)
         })
 
-        const books = createBooksCollection(queryClient)
+        const books = createBooksCollection()
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
-        const refetch = vi.spyOn(
-            (books as unknown as { utils: { refetch: () => Promise<void> } }).utils,
-            'refetch'
-        )
 
         await waitFor(() => {
             expect((books as unknown as { isSubscribed: () => boolean }).isSubscribed()).toBe(true)
@@ -122,7 +106,7 @@ describe('reconnect refetch lifecycle', () => {
         await waitFor(() => expect(realtimeClientFor(pb).clientId()).not.toBe(idBeforeDisconnect), {
             timeout: 10000,
         })
-        expect(refetch).not.toHaveBeenCalled()
+        expect(getFullList).toHaveBeenCalledTimes(1)
 
         releaseFirstLoad?.()
         await waitForLoadFinish(result)
@@ -131,7 +115,7 @@ describe('reconnect refetch lifecycle', () => {
     }, 20000)
 
     it('resetRealtime reconnects a ready, subscribed collection and triggers one refetch', async () => {
-        const books = createBooksCollection(queryClient)
+        const books = createBooksCollection()
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
         await waitForLoadFinish(result)
         await books.waitForSubscription()

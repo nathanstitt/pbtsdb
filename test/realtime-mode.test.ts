@@ -1,5 +1,4 @@
 import { and, eq, inArray, useLiveQuery } from '@tanstack/react-db'
-import { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
     afterAll,
@@ -26,7 +25,6 @@ import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
@@ -40,8 +38,6 @@ import {
 import type { Schema } from './schema'
 
 describe('realtime mode', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -50,17 +46,9 @@ describe('realtime mode', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     describe('option', () => {
         it("rejects realtime 'query' on an eager collection", () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             expect(() => c('books', { realtime: 'query' })).toThrow(
                 "Collection 'books': realtime 'query' requires syncMode 'on-demand'"
             )
@@ -70,7 +58,7 @@ describe('realtime mode', () => {
         })
 
         it("accepts realtime 'query' on an on-demand collection", async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
             const { result } = renderHook(() => useLiveQuery(q => q.from({ b: books })))
             await waitForLoadFinish(result)
@@ -80,7 +68,7 @@ describe('realtime mode', () => {
 
     describe('withRealtime views', () => {
         function make(realtime: 'collection' | 'query' = 'collection') {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -128,7 +116,7 @@ describe('realtime mode', () => {
             expect(() => books.withRealtime('everything' as 'query')).toThrow(
                 "Collection 'books': unknown realtime mode 'everything'"
             )
-            const eager = createCollection<Schema>(pb, queryClient)('books', {})
+            const eager = createCollection<Schema>(pb)('books', {})
             expect(() => eager.withRealtime('query')).toThrow(
                 "Collection 'books': realtime 'query' requires syncMode 'on-demand'"
             )
@@ -179,7 +167,7 @@ describe('realtime mode', () => {
         }
 
         function make() {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -399,7 +387,7 @@ describe('realtime mode', () => {
                 logger.messages.warn.filter(m => m.msg.startsWith('Realtime filter too long'))
 
             async function expectClientStillSubscribes() {
-                const other = createCollection<Schema>(pb, queryClient)('books', {
+                const other = createCollection<Schema>(pb)('books', {
                     syncMode: 'on-demand',
                     realtime: 'query',
                 })
@@ -438,7 +426,7 @@ describe('realtime mode', () => {
 
             it('conjoins a factory filter with the query filter when it fits', async () => {
                 const base = 'page_count >= 0'
-                const c = createCollection<Schema>(pb, queryClient, {
+                const c = createCollection<Schema>(pb, {
                     subscribeOptions: () => ({ filter: base }),
                 })
                 const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
@@ -454,7 +442,7 @@ describe('realtime mode', () => {
 
             it('widens to the whole collection when the conjoined filter is over the cap', async () => {
                 const base = `title != "${'x'.repeat(800)}"`
-                const c = createCollection<Schema>(pb, queryClient, {
+                const c = createCollection<Schema>(pb, {
                     subscribeOptions: () => ({ filter: base }),
                 })
                 const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
@@ -512,7 +500,7 @@ describe('realtime mode', () => {
         it('subscribes a forward relation target to the filed ids only', async () => {
             const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
                 const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -557,7 +545,7 @@ describe('realtime mode', () => {
         it('keeps the held filter entry open across the target sync cleanup', async () => {
             const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
                 const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -591,16 +579,13 @@ describe('realtime mode', () => {
             }
         }, 30000)
 
-        it('re-holds a query-mode target with its filed rows after a cached remount', async () => {
+        it('re-holds a query-mode target with its filed rows after a remount', async () => {
             const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
             const fetches = () => getListSpy.mock.calls.length + getFullListSpy.mock.calls.length
             try {
-                const cachingClient = new QueryClient({
-                    defaultOptions: { queries: { retry: false, gcTime: 30000, staleTime: 60000 } },
-                })
-                const c = createCollection<Schema>(pb, cachingClient)
+                const c = createCollection<Schema>(pb)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
                 const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
                 const mount = () =>
@@ -638,7 +623,8 @@ describe('realtime mode', () => {
                 )
                 expect(filtersOf(authorsSpy, 'authors').slice(callsBefore)).toEqual([filed])
                 expect(authors.isSubscribed()).toBe(true)
-                expect(fetches()).toBe(fetchesBefore)
+                // Design "Remount": an unkeyed subset reloads on remount; only marks serve from the store.
+                expect(fetches()).toBeGreaterThan(fetchesBefore)
                 second.unmount()
             } finally {
                 vi.restoreAllMocks()
@@ -677,7 +663,7 @@ describe('realtime mode', () => {
                 page_count: 1,
             })
             createdIds.push(book.id)
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
             let dropped = false
@@ -737,7 +723,7 @@ describe('realtime mode', () => {
         it('subscribes a back-relation target by parent id so new children arrive', async () => {
             const booksSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
                 const authors = c('authors', {
                     syncMode: 'on-demand',

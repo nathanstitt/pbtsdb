@@ -1,14 +1,12 @@
 import { eq, toArray, useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createCollection } from '../src/collection'
 import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     pb,
     resetLogger,
     setLogger,
@@ -17,7 +15,6 @@ import {
 import type { Schema } from './schema'
 
 describe('TanStack DB Includes (Subquery) Feature', () => {
-    let queryClient: QueryClient
     const testLogger = createTestLogger()
 
     beforeAll(async () => {
@@ -31,16 +28,11 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
     })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient()
         testLogger.clear()
     })
 
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should include author as nested subquery using findOne()', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', { syncMode: 'eager' })
 
@@ -77,7 +69,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
     }, 15000)
 
     it('should include tags as array using toArray()', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const booksCollection = c('books', { syncMode: 'eager' })
         const bookTagsCollection = c('book_tags', { syncMode: 'eager' })
         const tagsCollection = c('tags', { syncMode: 'eager' })
@@ -117,7 +109,7 @@ describe('TanStack DB Includes (Subquery) Feature', () => {
     }, 15000)
 
     it('should read a filed relation through an include', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'on-demand' })
         const booksCollection = c('books', {
             syncMode: 'on-demand',

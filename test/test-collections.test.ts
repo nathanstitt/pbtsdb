@@ -1,25 +1,14 @@
-import type { QueryClient } from '@tanstack/react-query'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { authenticateTestUser, clearAuth, createTestQueryClient, pb } from './helpers'
+import { authenticateTestUser, clearAuth, pb } from './helpers'
 
 describe('Test Collections - Relationship Testing', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
 
     afterAll(() => {
         clearAuth()
-    })
-
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
     })
 
     describe('Authors Collection (Base Collection)', () => {

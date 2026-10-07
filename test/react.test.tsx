@@ -1,15 +1,13 @@
 import { debounceStrategy, eq } from '@tanstack/db'
 import { useLiveQuery, usePacedMutations } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createCollection } from '../src/collection'
 import { createReactProvider } from '../src/react'
 import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
@@ -21,7 +19,6 @@ import {
 import type { Schema } from './schema'
 
 describe('createReactProvider', () => {
-    let queryClient: QueryClient
     const testLogger = createTestLogger()
 
     beforeAll(async () => {
@@ -35,17 +32,12 @@ describe('createReactProvider', () => {
     })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient()
         testLogger.clear()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
     })
 
     describe('useStore', () => {
         it('should throw error when used outside provider', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
             }
@@ -57,7 +49,7 @@ describe('createReactProvider', () => {
         })
 
         it('should throw error when collection key does not exist', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
             }
@@ -72,7 +64,7 @@ describe('createReactProvider', () => {
         })
 
         it('should return collection from provider with automatic type inference', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
             }
@@ -90,7 +82,7 @@ describe('createReactProvider', () => {
         })
 
         it('should allow using collection in useLiveQuery', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', { syncMode: 'eager' }),
             }
@@ -118,7 +110,7 @@ describe('createReactProvider', () => {
 
     describe('useStore with multiple keys', () => {
         it('should throw error when used outside provider', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
                 authors: c('authors', {}),
@@ -131,7 +123,7 @@ describe('createReactProvider', () => {
         })
 
         it('should throw error when any collection key does not exist', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
             }
@@ -146,7 +138,7 @@ describe('createReactProvider', () => {
         })
 
         it('should return array of collections in correct order with automatic type inference', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
                 authors: c('authors', {}),
@@ -168,7 +160,7 @@ describe('createReactProvider', () => {
         })
 
         it('should allow using collections in useLiveQuery with joins', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
                 authors: c('authors', {}),
@@ -190,7 +182,7 @@ describe('createReactProvider', () => {
 
     describe('Provider', () => {
         it('should provide collections to nested components', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
                 authors: c('authors', {}),
@@ -214,7 +206,7 @@ describe('createReactProvider', () => {
 
         it('should support custom collection keys', () => {
             const collections = {
-                myCustomBooksKey: createCollection<Schema>(pb, queryClient)('books', {}),
+                myCustomBooksKey: createCollection<Schema>(pb)('books', {}),
             }
             const { Provider, useStore } = createReactProvider(collections)
 
@@ -228,7 +220,7 @@ describe('createReactProvider', () => {
         })
 
         it('should infer collection name from key when using createCollection', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collections = {
                 books: c('books', {}),
             }
@@ -243,7 +235,7 @@ describe('createReactProvider', () => {
         })
 
         it('should support auto-expand collections within provider context', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {
                 syncMode: 'eager',
                 omitOnInsert: ['created'],
@@ -300,7 +292,6 @@ describe('createReactProvider', () => {
 })
 
 describe('usePacedMutations', () => {
-    let queryClient: QueryClient
     const testLogger = createTestLogger()
 
     beforeAll(async () => {
@@ -314,16 +305,11 @@ describe('usePacedMutations', () => {
     })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient()
         testLogger.clear()
     })
 
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should support debounced updates with usePacedMutations', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const booksCollection = c('books', {
             syncMode: 'eager',
             omitOnInsert: ['created', 'updated'] as const,
@@ -412,7 +398,7 @@ describe('usePacedMutations', () => {
     }, 20000)
 
     it('should apply optimistic updates immediately before persistence', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const booksCollection = c('books', {
             syncMode: 'eager',
             omitOnInsert: ['created', 'updated'] as const,

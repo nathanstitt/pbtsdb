@@ -1,15 +1,13 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     pb,
     resetLogger,
     setLogger,
@@ -18,7 +16,6 @@ import {
 import type { Schema } from './schema'
 
 describe('Collection - Relations', () => {
-    let queryClient: QueryClient
     const testLogger = createTestLogger()
 
     beforeAll(async () => {
@@ -32,16 +29,11 @@ describe('Collection - Relations', () => {
     })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient()
         testLogger.clear()
     })
 
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should join books with authors using manual join pattern', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
 
         // Create collections with relations config
         const authorsCollection = c('authors', { syncMode: 'eager' })
@@ -96,7 +88,7 @@ describe('Collection - Relations', () => {
     }, 15000)
 
     it('should auto-expand relations when configured with alwaysFetchRelations', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', {
             syncMode: 'eager',
@@ -117,7 +109,7 @@ describe('Collection - Relations', () => {
     })
 
     it('should filter on relation fields with auto-expand', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', {
             syncMode: 'eager',
@@ -159,7 +151,7 @@ describe('Collection - Relations', () => {
     })
 
     it('should warn when an eager expand target has not started', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', {
             syncMode: 'eager',
@@ -189,7 +181,7 @@ describe('Collection - Relations', () => {
         })
         if (!seeded) throw new Error('seed data has no book with tags')
 
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const bookTagsCollection = c('book_tags', { syncMode: 'eager' })
         // The parent holds the target live once its realtime entry opens, which
         // would start the eager load and race the filing; keep the target's sync
@@ -220,7 +212,7 @@ describe('Collection - Relations', () => {
     })
 
     it('should start an eager expand target through a live query and upsert into it', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', {
             syncMode: 'eager',
@@ -244,7 +236,7 @@ describe('Collection - Relations', () => {
     })
 
     it('should allow chaining where() and orderBy() with auto-expand', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'eager' })
         const booksCollection = c('books', {
             relations: { author: authorsCollection },
@@ -279,7 +271,7 @@ describe('Collection - Relations', () => {
         }
     })
     it("files a fetch's expanded relations in one write per target, not one per parent", async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authorsCollection = c('authors', { syncMode: 'on-demand' })
         const booksCollection = c('books', {
             syncMode: 'on-demand',

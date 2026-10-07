@@ -1,22 +1,19 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createTagsCollection,
-    createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
 
 describe('Collection - Pagination', () => {
-    let queryClient: QueryClient
     const createdTagIds: string[] = []
     const RECORD_COUNT = 1200
     const COLOR = '#FF0000'
@@ -58,16 +55,8 @@ describe('Collection - Pagination', () => {
         clearAuth()
     }, 120000)
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should fetch all records even when count exceeds default page size', async () => {
-        const tagsCollection = createTagsCollection(queryClient)
+        const tagsCollection = createTagsCollection()
 
         const { result } = renderHook(() =>
             useLiveQuery(q =>
@@ -89,7 +78,7 @@ describe('Collection - Pagination', () => {
 
     it('should fetch only limited records when limit is specified', async () => {
         // Use on-demand sync so the fetch happens when query with limit is executed
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const tagsCollection = c('tags', { syncMode: 'on-demand' })
         const LIMIT = 50
 

@@ -1,6 +1,5 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +10,6 @@ import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -53,7 +51,6 @@ import type { Books, Schema } from './schema'
  * redelivered/out-of-order SSE event takes) to make the race deterministic.
  */
 describe('optimistic move snap-back via stale realtime echo (refetchOnMutation default)', () => {
-    let queryClient: QueryClient
     let testLogger: TestLogger
 
     const SOURCE_GENRE = 'Fiction' as const
@@ -70,12 +67,10 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
     beforeEach(() => {
         testLogger = createTestLogger()
         setLogger(testLogger)
-        queryClient = createTestQueryClient()
     })
 
     afterEach(() => {
         resetLogger()
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -134,7 +129,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         const handlerRef = captureRealtimeHandler()
         const seed = await seedBook(SOURCE_GENRE)
 
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -200,7 +195,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         await new Promise(r => setTimeout(r, 750))
         expect(result.current.data.find(b => b.id === seed.id)).toBeUndefined()
         expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
-        expect(ignoredStaleEchoLogs().length).toBeGreaterThan(0)
+        // Ledger rule 4 drops a strictly older echo without a log; the synced genre proves it.
 
         await pb
             .collection('books')
@@ -238,7 +233,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
 
     it('respects optimistic:false — the move only shows after the server confirms', async () => {
         const seed = await seedBook(SOURCE_GENRE)
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 

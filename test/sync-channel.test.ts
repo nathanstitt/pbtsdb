@@ -1,15 +1,13 @@
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -26,8 +24,6 @@ import type { Books, Schema } from './schema'
  * it can reach the store.
  */
 describe('realtime rows written through the sync session', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -36,12 +32,7 @@ describe('realtime rows written through the sync session', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -76,7 +67,7 @@ describe('realtime rows written through the sync session', () => {
             published_date: '',
             page_count: 1,
         })
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))

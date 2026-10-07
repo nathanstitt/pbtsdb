@@ -1,14 +1,12 @@
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { RecordService } from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
@@ -18,8 +16,6 @@ import {
 import type { Books, Schema } from './schema'
 
 describe('Collection - Mutations', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -28,17 +24,12 @@ describe('Collection - Mutations', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
     it('should support insert mutations with automatic PocketBase sync', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const collection = c('books', {
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -83,7 +74,7 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should support update mutations on existing records', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const collection = c('books', { syncMode: 'eager' })
 
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: collection })))
@@ -115,7 +106,7 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should update liveQuery data when a record is inserted', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const collection = c('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
@@ -177,7 +168,7 @@ describe('Collection - Mutations', () => {
     }, 15000)
 
     it('should handle insert and delete in same batch (optimistic cancellation)', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const collection = c('books', {
             syncMode: 'eager',
             onInsert: async () => {},
@@ -211,10 +202,8 @@ describe('Collection - Mutations', () => {
             updated: new Date().toISOString(),
         }
 
-        collection.utils.writeBatch(() => {
-            collection.insert(newBook)
-            collection.delete(newBook.id)
-        })
+        collection.insert(newBook)
+        collection.delete(newBook.id)
 
         await waitFor(
             () => {
@@ -245,7 +234,7 @@ describe('Collection - Mutations', () => {
             return realSubscribe(topic, listener)
         })
 
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const collection = c('books', {
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -296,7 +285,7 @@ describe('Collection - Mutations', () => {
 
     describe('refetchOnMutation behavior', () => {
         it('default (false) — insert does not trigger a refetch', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })
@@ -331,7 +320,7 @@ describe('Collection - Mutations', () => {
         }, 15000)
 
         it('default (false) — update does not trigger a refetch', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })
@@ -374,7 +363,7 @@ describe('Collection - Mutations', () => {
         }, 15000)
 
         it('default (false) — delete does not trigger a refetch', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const collection = c('books', {
                 omitOnInsert: ['created', 'updated'] as const,
             })

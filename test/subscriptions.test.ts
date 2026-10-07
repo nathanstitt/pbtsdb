@@ -1,15 +1,13 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -18,8 +16,6 @@ import {
 import type { Schema } from './schema'
 
 describe('Collection - Real-time Subscriptions', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -28,16 +24,8 @@ describe('Collection - Real-time Subscriptions', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should receive real-time create events', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Set up the live query first
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -76,7 +64,7 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 15000)
 
     it('should receive real-time update events', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Create a test book
         const authorId = await getTestAuthorId()
@@ -129,7 +117,7 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 15000)
 
     it('should receive real-time delete events', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Create a test book
         const authorId = await getTestAuthorId()
@@ -161,7 +149,7 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 15000)
 
     it('should handle multiple simultaneous updates with writeBatch', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         // Set up live query
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books: booksCollection })))
@@ -233,7 +221,7 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 20000)
 
     it('should automatically manage subscriptions based on query lifecycle', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
 
         // Spy on console.warn to detect invariant violations (TanStack Query DB Collection uses console.warn)
         const consoleWarnSpy = vi.spyOn(console, 'warn')
@@ -301,7 +289,7 @@ describe('Collection - Real-time Subscriptions', () => {
     }, 20000)
 
     it('should not subscribe when liveQuery returns null (conditional queries)', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const booksCollection = c('books')
 
         // Use a hook that conditionally returns null

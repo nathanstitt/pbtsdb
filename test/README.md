@@ -116,8 +116,8 @@ Path helpers, plus `parseViaKey` and `markFiledSubset`.
 
 ---
 
-#### `tanstack-internals.test.ts`
-Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, the accepted synced rows (`_state.getAcceptedSyncedRow`, `acceptedSyncedEntries`) behind the write guard, and the cache write behind the ownership claim. If this fails after an upgrade, read the assertion message before touching anything else.
+#### `core-sync-adapter.test.ts`
+The core sync adapter end to end: a handler that calls `reload()` or `accept()` settles, a closed topic releases the rows only it held, and `reload()` evicts a topic-echoed row the server no longer returns.
 
 ---
 
@@ -133,7 +133,6 @@ Shared test utilities and helper functions.
 
 **Exports:**
 - `pb` - Configured PocketBase instance
-- `createTestQueryClient()` - Factory for QueryClient instances
 - `authenticateTestUser()` - Test user authentication
 - `clearAuth()` - Clear authentication state
 - `getTestSlug(prefix)` - Generate unique test slugs
