@@ -1,11 +1,11 @@
-import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { RefCounter } from './filter-refs'
 import { logger } from './logger'
 import { REALTIME_TOPIC_MAX_LENGTH, realtimeTopicLength } from './pocketbase-limits'
+import type { Transport } from './transport'
 
 export interface RealtimeSubscriptionDeps<T extends object> {
-    pb: PocketBase
+    transport: Transport
     collectionName: string
     handleEvent: (event: RecordSubscription<T>) => void
     /** The expand union the next subscribe carries; pure, compared to detect drift. */
@@ -45,7 +45,7 @@ export interface RealtimeSubscription {
 export function createRealtimeSubscription<T extends object>(
     deps: RealtimeSubscriptionDeps<T>
 ): RealtimeSubscription {
-    const { pb, collectionName } = deps
+    const { collectionName } = deps
 
     let starUnsubscribe: (() => Promise<void>) | null = null
     let starExpand: string | undefined
@@ -94,9 +94,11 @@ export function createRealtimeSubscription<T extends object>(
         if (isStarOpen()) return
         const expand = deps.pendingExpand()
         try {
-            starUnsubscribe = await pb
-                .collection(collectionName)
-                .subscribe('*', deps.handleEvent, deps.subscribeOptions())
+            starUnsubscribe = await deps.transport.subscribe<T>(
+                collectionName,
+                deps.subscribeOptions(),
+                deps.handleEvent
+            )
             starExpand = expand
             logger.debug('Subscription started', { collectionName })
             notifyOpened()
@@ -130,38 +132,26 @@ export function createRealtimeSubscription<T extends object>(
         return { ...base, filter: combined }
     }
 
-    // Returns false when the filter's topic is over the cap: the filter is
-    // then oversized and the collection widens to '*'.
-    async function openFilter(filter: string): Promise<boolean> {
-        if (filterEntries.has(filter)) return true
+    async function openFilter(filter: string): Promise<void> {
+        if (filterEntries.has(filter)) return
         const options = filteredOptions(filter)
-        const topicLength = realtimeTopicLength(collectionName, options)
-        if (topicLength > REALTIME_TOPIC_MAX_LENGTH) {
-            oversizedFilters.add(filter)
-            logger.warn('Realtime filter too long; subscribing to the whole collection', {
-                collectionName,
-                filterLength: filter.length,
-                topicLength,
-            })
-            return false
-        }
         const expand = deps.pendingExpand()
         try {
-            const unsubscribe = await pb
-                .collection(collectionName)
-                .subscribe('*', deps.handleEvent, options)
+            const unsubscribe = await deps.transport.subscribe<T>(
+                collectionName,
+                options,
+                deps.handleEvent
+            )
             filterEntries.set(filter, { unsubscribe, expand })
             logger.debug('Filtered subscription started', { collectionName, filter })
             notifyOpened()
         } catch (error) {
-            // Not retried on a timer: the next reconcile tries this filter again.
             logger.error('Failed to start filtered subscription', {
                 collectionName,
                 filter,
                 error,
             })
         }
-        return true
     }
 
     async function closeFilter(filter: string): Promise<void> {
@@ -181,16 +171,28 @@ export function createRealtimeSubscription<T extends object>(
     }
 
     async function closeFilters(keep: (filter: string) => boolean = () => false): Promise<void> {
-        for (const filter of [...filterEntries.keys()]) {
-            if (!keep(filter)) await closeFilter(filter)
-        }
+        await Promise.all([...filterEntries.keys()].filter(f => !keep(f)).map(closeFilter))
     }
 
+    // Oversized filters are found first, synchronously, so one pass can
+    // decide between '*' and filter entries before any request goes out.
     async function openWantedFilters(): Promise<void> {
         if (wantsStar()) return
-        for (const filter of wantedFilters()) {
-            if (!(await openFilter(filter))) return
+        const wanted = [...wantedFilters()]
+        for (const filter of wanted) {
+            if (filterEntries.has(filter) || oversizedFilters.has(filter)) continue
+            const topicLength = realtimeTopicLength(collectionName, filteredOptions(filter))
+            if (topicLength > REALTIME_TOPIC_MAX_LENGTH) {
+                oversizedFilters.add(filter)
+                logger.warn('Realtime filter too long; subscribing to the whole collection', {
+                    collectionName,
+                    filterLength: filter.length,
+                    topicLength,
+                })
+            }
         }
+        if (wantsStar()) return
+        await Promise.all(wanted.map(openFilter))
     }
 
     // The expand union can grow while a subscribe call is in flight.

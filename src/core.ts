@@ -31,6 +31,7 @@ export {
 } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
+export { realtimeClientFor } from './transport'
 export type {
     CreateCollectionOptions,
     ExcludeUndefined,
