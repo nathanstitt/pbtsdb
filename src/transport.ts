@@ -23,6 +23,19 @@ type Entry = { client: RealtimeClient; reconnectListeners: Set<(resumed: boolean
 
 const entries = new WeakMap<PocketBase, Entry>()
 
+// PocketBase rejects a subscriptions POST whose auth record differs from
+// the connection's with a 403, and an unchanged topic list sends no POST
+// at all, so a login, logout or user switch must forget the session. A
+// token refresh keeps the record and needs nothing.
+function watchAuth(pb: PocketBase, client: RealtimeClient): void {
+    let authId = pb.authStore.record?.id
+    pb.authStore.onChange((_token, record) => {
+        if (record?.id === authId) return
+        authId = record?.id
+        client.reset()
+    })
+}
+
 function entryFor(pb: PocketBase): Entry {
     let entry = entries.get(pb)
     if (!entry) {
@@ -34,6 +47,7 @@ function entryFor(pb: PocketBase): Entry {
                 for (const listener of reconnectListeners) listener(resumed)
             },
         })
+        watchAuth(pb, client)
         entry = { client, reconnectListeners }
         entries.set(pb, entry)
     }
@@ -48,14 +62,27 @@ export function realtimeClientFor(pb: PocketBase): RealtimeClient {
 /**
  * Forgets the shared realtime connection's server-side session and
  * reconnects under `pb`'s current auth, re-sending every subscribed topic.
- * Call this after an auth change (login, logout, switching users) that the
- * connection cannot otherwise detect — an unchanged topic list sends no
- * POST on its own, so without this the server would keep serving the
- * previous user's subscriptions. A no-op if `pb` has no realtime connection
- * yet (nothing has subscribed through it).
+ * pbtsdb does this itself when `pb.authStore` changes to another auth
+ * record; call it for a change the store cannot see, such as a server
+ * switch. It also lifts {@link disconnectRealtime}. A no-op if `pb` has no
+ * realtime connection yet.
  */
 export function resetRealtime(pb: PocketBase): void {
-    entries.get(pb)?.client.reset()
+    const client = entries.get(pb)?.client
+    if (!client) return
+    client.reset()
+    client.enable()
+}
+
+/**
+ * Closes pbtsdb's realtime connection for `pb` and keeps it closed: no
+ * connection opens until {@link resetRealtime}. Collections keep working
+ * over REST and keep their subscriptions registered, so a later
+ * `resetRealtime(pb)` resumes every topic and reloads every ready
+ * collection. Use it at logout, or at startup where realtime is not wanted.
+ */
+export function disconnectRealtime(pb: PocketBase): void {
+    entryFor(pb).client.disable()
 }
 
 export function transportFor(pb: PocketBase): Transport {

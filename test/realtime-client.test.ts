@@ -736,6 +736,34 @@ describe('realtime client', () => {
         expect(reconnects).toEqual([false])
     })
 
+    it('disable closes the connection and blocks connects until enable, which resumes every topic as a reconnect', async () => {
+        const { client, sent, reconnects, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const first = connect('client-1')
+        await sub
+        expect(sent).toHaveLength(1)
+
+        client.disable()
+        expect(first.closed).toBe(true)
+        expect(client.isConnected()).toBe(false)
+        expect(client.clientId()).toBeUndefined()
+        expect(client.topics()).toEqual(['t1'])
+
+        const pending = client.subscribe('t2', () => undefined)
+        client.reset()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(1)
+
+        client.enable()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(2)
+        connect('client-2')
+        await pending
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
+        expect(reconnects).toEqual([false])
+    })
+
     it('reset with no topics registered opens no connection', async () => {
         const client = createRealtimeClient({
             url: 'http://pb.test/api/realtime',

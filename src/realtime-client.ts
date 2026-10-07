@@ -58,6 +58,14 @@ export interface RealtimeClient {
     clientId: () => string | undefined
     disconnect: () => void
     /**
+     * Closes the connection, forgets the server-side session and keeps the
+     * client closed: no connect happens until `enable()`. Registrations and
+     * listeners are kept, so `enable()` resumes every topic.
+     */
+    disable: () => void
+    /** Lifts `disable()` and connects at once if any topic is registered. */
+    enable: () => void
+    /**
      * Forgets the server-side session (client id, confirmed topics) and
      * reconnects at once if any topic is registered, posting the full list
      * under whatever auth the caller's `send` carries now. Call this after
@@ -65,6 +73,8 @@ export interface RealtimeClient {
      * cannot otherwise see, so the server does not keep serving the old
      * user's subscriptions. Registrations and listeners are kept; pending
      * `subscribe` calls settle once the new connection's POST completes.
+     * While `disable()` is in effect the session is forgotten but no
+     * connection opens.
      */
     reset: () => void
     /** @internal Simulates the live connection dropping, the way `onerror` would; tests use it. */
@@ -96,6 +106,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let everConnected = false
     /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
     let session = 0
+    let disabled = false
 
     function topics(): string[] {
         return [...listeners.keys()]
@@ -250,6 +261,29 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         }
     }
 
+    // Forgets the server-side session and connects again under the current
+    // auth, unless disabled. `everConnected` is kept: the connection after a
+    // reset or a re-enable is a reconnect, so every ready collection reloads.
+    function forgetSession(): void {
+        if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+        source?.close()
+        source = undefined
+        connected = false
+        confirmed = []
+        clientId = undefined
+        lastSeq = undefined
+        attempts = 0
+        session += 1
+        if (listeners.size > 0) {
+            try {
+                connect()
+            } catch (error) {
+                logger.error('Failed to reconnect after reset', { error })
+            }
+        }
+    }
+
     function scheduleReconnect(): void {
         const delay = backoff[Math.min(attempts, backoff.length - 1)] ?? 0
         attempts += 1
@@ -267,7 +301,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     }
 
     function connect(): void {
-        if (source) return
+        if (source || disabled) return
         const previousId = clientId
         const target = openSource(connectUrl())
         source = target
@@ -376,24 +410,15 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         simulateDisconnect() {
             if (source) handleConnectionLost(source)
         },
-        reset() {
-            if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
-            reconnectTimer = undefined
-            source?.close()
-            source = undefined
-            connected = false
-            confirmed = []
-            clientId = undefined
-            lastSeq = undefined
-            attempts = 0
-            session += 1
-            if (listeners.size > 0) {
-                try {
-                    connect()
-                } catch (error) {
-                    logger.error('Failed to reconnect after reset', { error })
-                }
-            }
+        reset: forgetSession,
+        disable() {
+            disabled = true
+            forgetSession()
+        },
+        enable() {
+            if (!disabled) return
+            disabled = false
+            if (listeners.size > 0) connect()
         },
     }
 }

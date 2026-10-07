@@ -1,7 +1,12 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { realtimeClientFor, resetRealtime, transportFor } from '../src/transport'
+import {
+    disconnectRealtime,
+    realtimeClientFor,
+    resetRealtime,
+    transportFor,
+} from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -127,6 +132,59 @@ describe('reconnect refetch lifecycle', () => {
         getFullList.mockRestore()
         await books.cleanup()
     }, 20000)
+
+    it('resets the session and reloads when the auth record changes, not on a same-record change', async () => {
+        const books = createBooksCollection()
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        getFullList.mockClear()
+        try {
+            const idBeforeSave = realtimeClientFor(pb).clientId()
+            pb.authStore.save(pb.authStore.token, pb.authStore.record)
+            await new Promise(resolve => setTimeout(resolve, 200))
+            expect(realtimeClientFor(pb).clientId()).toBe(idBeforeSave)
+            expect(getFullList).not.toHaveBeenCalled()
+
+            clearAuth()
+            await waitFor(() => expect(realtimeClientFor(pb).clientId()).not.toBe(idBeforeSave), {
+                timeout: 10000,
+            })
+            await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
+        } finally {
+            await authenticateTestUser()
+            await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
+            await books.cleanup()
+            getFullList.mockRestore()
+        }
+    }, 30000)
+
+    it('disconnectRealtime keeps the connection closed until resetRealtime, which reloads', async () => {
+        const books = createBooksCollection()
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        getFullList.mockClear()
+        try {
+            disconnectRealtime(pb)
+            expect(realtimeClientFor(pb).isConnected()).toBe(false)
+            await new Promise(resolve => setTimeout(resolve, 500))
+            expect(realtimeClientFor(pb).isConnected()).toBe(false)
+            expect(getFullList).not.toHaveBeenCalled()
+
+            resetRealtime(pb)
+            await waitFor(() => expect(realtimeClientFor(pb).isConnected()).toBe(true), {
+                timeout: 10000,
+            })
+            await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
+        } finally {
+            resetRealtime(pb)
+            await books.cleanup()
+            getFullList.mockRestore()
+        }
+    }, 30000)
 
     it('resetRealtime reconnects a ready, subscribed collection and triggers one refetch', async () => {
         const books = createBooksCollection()
