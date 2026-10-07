@@ -30,7 +30,11 @@ export interface FetchResult<T> {
 }
 
 export interface FetchOptions {
-    signal?: AbortSignal
+    /**
+     * Abort sources. An abort cancels every request of this load and
+     * rejects with `FetchAbortedError`.
+     */
+    signals?: readonly AbortSignal[]
     /** Revalidate: send the request even when the store could answer it. */
     refetch?: boolean
 }
@@ -58,6 +62,9 @@ export class FetchAbortedError extends Error {
         this.name = 'AbortError'
     }
 }
+
+/** One load's cancellation: its own signal and the request keys it sent. */
+type Cancel = { controller: AbortController; keys: string[] }
 
 export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> {
     const { pb, collectionName, relationTargets, filer, subsets } = deps
@@ -134,7 +141,8 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         expand: string | undefined,
         chunkFilter: string | undefined,
         requestKey: string,
-        offset: number
+        offset: number,
+        signal: AbortSignal
     ): Promise<T[]> {
         const { sort, limit } = request
         const filter = withCursor(chunkFilter, request.cursor)
@@ -148,17 +156,23 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
                         skipTotal: true,
                         expand,
                         requestKey,
+                        signal,
                     })
                 return result.items as unknown as T[]
             }
-            const result = await pb
-                .collection(collectionName)
-                .getList(1, offset + limit, { filter, sort, skipTotal: true, expand, requestKey })
+            const result = await pb.collection(collectionName).getList(1, offset + limit, {
+                filter,
+                sort,
+                skipTotal: true,
+                expand,
+                requestKey,
+                signal,
+            })
             return (result.items as unknown as T[]).slice(offset)
         }
         const items = await pb
             .collection(collectionName)
-            .getFullList({ filter, sort, expand, requestKey })
+            .getFullList({ filter, sort, expand, requestKey, signal })
         return (items as unknown as T[]).slice(offset)
     }
 
@@ -175,7 +189,8 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
     async function fetchItems(
         request: PbRequest,
         heads: readonly BackRelationHead[],
-        refetch: boolean
+        refetch: boolean,
+        cancel: Cancel
     ): Promise<FetchResult<T>> {
         const served = refetch ? undefined : servedFromStore(request)
         if (served) return { rows: served, fromStore: true }
@@ -192,26 +207,39 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         const chunk = chunkRequest(request, filters.length)
         const load = ++requestSeq
         const pages = await Promise.all(
-            filters.map((chunkFilter, index) =>
-                fetchPage(
+            filters.map((chunkFilter, index) => {
+                const requestKey = `${collectionName}:${load}:${index}`
+                cancel.keys.push(requestKey)
+                return fetchPage(
                     chunk.request,
                     expand,
                     chunkFilter,
-                    `${collectionName}:${load}:${index}`,
-                    chunk.offset
+                    requestKey,
+                    chunk.offset,
+                    cancel.controller.signal
                 )
-            )
+            })
         )
         const items = pages.flat()
         filer.markEmptyBackRelations(items, heads)
         return { rows: items, fromStore: false }
     }
 
+    // The SDK replaces `signal` with its own per-`requestKey` controller
+    // while auto-cancellation is on, and sends `signal` as given while it is
+    // off. An abort does both, so the request is cancelled either way.
     async function fetchRecords(
         request: PbRequest,
         options: FetchOptions = {}
     ): Promise<FetchResult<T>> {
-        const { signal } = options
+        const { signals = [] } = options
+        const aborted = () => signals.some(signal => signal.aborted)
+        const cancel: Cancel = { controller: new AbortController(), keys: [] }
+        const onAbort = () => {
+            cancel.controller.abort()
+            for (const key of cancel.keys) pb.cancelRequest(key)
+        }
+        for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true })
         let settleFiling: () => void = () => undefined
         const filed = new Promise<void>(resolve => {
             settleFiling = resolve
@@ -219,15 +247,22 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         const heads = backRelationHeads(deps.activeExpand(request), relationTargets)
         const unregister = heads.map(({ target, field }) => target.expectFiling(field, filed))
         try {
-            const result = await fetchItems(request, heads, options.refetch === true)
-            if (signal?.aborted) throw new FetchAbortedError(collectionName)
+            if (aborted()) throw new FetchAbortedError(collectionName)
+            const result = await fetchItems(request, heads, options.refetch === true, cancel).catch(
+                error => {
+                    if (aborted()) throw new FetchAbortedError(collectionName)
+                    throw error
+                }
+            )
+            if (aborted()) throw new FetchAbortedError(collectionName)
             if (!result.fromStore) await filer.upsertExpanded(result.rows, relationTargets)
-            if (signal?.aborted) throw new FetchAbortedError(collectionName)
+            if (aborted()) throw new FetchAbortedError(collectionName)
             return {
                 rows: stripFetchedRelations(result.rows, deps.activeExpand(request)),
                 fromStore: result.fromStore,
             }
         } finally {
+            for (const signal of signals) signal.removeEventListener('abort', onAbort)
             settleFiling()
             for (const fn of unregister) fn()
         }

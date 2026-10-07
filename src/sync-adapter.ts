@@ -111,7 +111,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         tombstones.add(deleted)
         try {
             const { rows, fromStore } = await fetcher.fetchRecords(request, {
-                signal: signal ? AbortSignal.any([run.abort.signal, signal]) : run.abort.signal,
+                signals: signal ? [run.abort.signal, signal] : [run.abort.signal],
                 refetch,
             })
             return { rows: rows.filter(row => !deleted.has(idOf(row) ?? '')), fromStore }
