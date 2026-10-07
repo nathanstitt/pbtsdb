@@ -29,6 +29,7 @@ type Call = {
     options: FetchOptions | undefined
     resolve: (rows: Row[]) => void
     reject: (error: unknown) => void
+    filings: { commit: ReturnType<typeof vi.fn>; undo: ReturnType<typeof vi.fn> }
 }
 
 function deferred() {
@@ -45,12 +46,13 @@ function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) 
     const fetcher: Fetcher<Row> = {
         fetchRecords: (request, options) =>
             new Promise<FetchResult<Row>>((resolve, reject) => {
+                const filings = { commit: vi.fn(), undo: vi.fn() }
                 calls.push({
                     request,
                     options,
-                    resolve: rows =>
-                        resolve({ rows, fromStore: false, releaseFilings: () => undefined }),
+                    resolve: rows => resolve({ rows, fromStore: false, filings }),
                     reject,
+                    filings,
                 })
             }),
         serveFromStore: () => served,
@@ -540,6 +542,28 @@ describe('sync adapter', () => {
         t.calls[0].resolve([])
         await flush()
         expect(t.adapter.holdersFor(row('a'))).toEqual([EAGER])
+    })
+
+    it('an installed result commits its filings; a discarded one undoes them', async () => {
+        const t = setup()
+        const opts: LoadSubsetOptions = {}
+        const first = t.loadSubset(opts)
+        const reload = t.adapter.reload()
+        t.calls[1].resolve([row('b')])
+        await reload
+        expect(t.calls[1].filings.commit).toHaveBeenCalledTimes(1)
+        expect(t.calls[1].filings.undo).not.toHaveBeenCalled()
+        t.calls[0].resolve([row('a')])
+        await first
+        expect(t.calls[0].filings.undo).toHaveBeenCalledTimes(1)
+        expect(t.calls[0].filings.commit).not.toHaveBeenCalled()
+
+        const abort = new AbortController()
+        const aborted = t.loadSubset({ signal: abort.signal })
+        abort.abort()
+        t.calls[2].resolve([row('c')])
+        await expect(aborted).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        expect(t.calls[2].filings.undo).toHaveBeenCalledTimes(1)
     })
 
     it('isDeleted reports an id deleted while a fetch is in flight, and forgets it after', async () => {

@@ -133,14 +133,14 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         const deleted = new Set<string>()
         tombstones.add(deleted)
         try {
-            const { rows, fromStore, releaseFilings } = await fetcher.fetchRecords(request, {
+            const { rows, fromStore, filings } = await fetcher.fetchRecords(request, {
                 signals: signal ? [run.abort.signal, signal] : [run.abort.signal],
                 refetch,
             })
             return {
                 rows: rows.filter(row => !deleted.has(idOf(row) ?? '')),
                 fromStore,
-                releaseFilings,
+                filings,
             }
         } finally {
             tombstones.delete(deleted)
@@ -150,8 +150,12 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     // Core ignores an aborted load's outcome, but a direct caller
     // (`beginLoadSubsetOperation`) must see that it did not complete. A
     // reload skips the demand instead.
+    function isStopped(run: Run, opts: LoadSubsetOptions): boolean {
+        return run.abort.signal.aborted || opts.signal?.aborted === true
+    }
+
     function stopped(run: Run, opts: LoadSubsetOptions, wait: Wait): boolean {
-        if (!run.abort.signal.aborted && opts.signal?.aborted !== true) return false
+        if (!isStopped(run, opts)) return false
         if (wait === 'visible') throw new LoadSubsetOperationAbortedError()
         return true
     }
@@ -218,8 +222,11 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         result: FetchResult<T>
     ): Promise<string[]> {
         const applied = membership.reconcile(opts, result.rows)
-        result.releaseFilings()
-        if (applied === false) return []
+        if (applied === false) {
+            result.filings.undo()
+            return []
+        }
+        result.filings.commit()
         const demand = run.demands.get(opts)
         if (demand) demand.landed = true
         const ids = idsOf(result.rows)
@@ -249,12 +256,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 }
             )
             if (result === undefined) return []
-            if (stopped(run, opts, wait) || run.demands.get(opts) !== demand) {
-                result.releaseFilings()
+            // Undo before `stopped` can throw, so an aborted result leaves
+            // the filings as they were.
+            if (isStopped(run, opts) || run.demands.get(opts) !== demand) {
+                result.filings.undo()
+                stopped(run, opts, wait)
                 return []
             }
             if (demand.seq !== seq) {
-                result.releaseFilings()
+                result.filings.undo()
                 return demand.loading ?? []
             }
             return install(run, opts, wait, before, result)
@@ -374,14 +384,17 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function loadEagerRows(run: Run): Promise<string[]> {
         const seq = ++run.eagerSeq
         const loading = (async (): Promise<string[]> => {
-            const { rows, releaseFilings } = await fetchRows(run, {}, undefined, false)
+            const { rows, filings } = await fetchRows(run, {}, undefined, false)
             if (run.abort.signal.aborted || run.eagerSeq !== seq) {
-                releaseFilings()
+                filings.undo()
                 return run.eagerSeq !== seq ? (run.eagerLoad ?? []) : []
             }
             const applied = membership.reconcile(EAGER, rows, [ACCEPTED])
-            releaseFilings()
-            if (applied === false) return []
+            if (applied === false) {
+                filings.undo()
+                return []
+            }
+            filings.commit()
             await settle(applied, 'accepted')
             return idsOf(rows)
         })()

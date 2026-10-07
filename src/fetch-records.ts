@@ -3,6 +3,7 @@ import {
     type BackRelationHead,
     backRelationHeads,
     type ExpandFiler,
+    type FilingChange,
     stripFetchedRelations,
 } from './expand-filing'
 import type { RelationTargets } from './expand-paths'
@@ -29,10 +30,10 @@ export interface FetchResult<T> {
     /** True when the store answered and no request was sent. */
     fromStore: boolean
     /**
-     * Releases the relation rows these parents stopped filing. Run it after
-     * the rows land, or at once when the result is discarded.
+     * The filings this result made. Commit it after the rows land; undo it
+     * when the result is discarded, so a discarded result changes nothing.
      */
-    releaseFilings: () => void
+    filings: FilingChange
 }
 
 export interface FetchOptions {
@@ -60,6 +61,8 @@ export interface Fetcher<T extends object> {
      */
     expectFiling: (field: string, settles: Promise<void>) => () => void
 }
+
+const NO_FILINGS: FilingChange = { commit: () => undefined, undo: () => undefined }
 
 /** Thrown when `signal` aborted before the rows were installed. */
 export class FetchAbortedError extends Error {
@@ -197,7 +200,7 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         heads: readonly BackRelationHead[],
         refetch: boolean,
         cancel: Cancel
-    ): Promise<Omit<FetchResult<T>, 'releaseFilings'>> {
+    ): Promise<Omit<FetchResult<T>, 'filings'>> {
         const served = refetch ? undefined : servedFromStore(request)
         if (served) return { rows: served, fromStore: true }
         // Give a same-tick parent fetch the chance to file this subset first.
@@ -261,21 +264,21 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
                 }
             )
             if (aborted()) throw new FetchAbortedError(collectionName)
-            const releaseFilings = result.fromStore
-                ? () => undefined
+            const filings = result.fromStore
+                ? NO_FILINGS
                 : await filer.fileExpanded(
                       result.rows,
                       relationTargets,
                       splitPaths(deps.activeExpand(request))
                   )
             if (aborted()) {
-                releaseFilings()
+                filings.undo()
                 throw new FetchAbortedError(collectionName)
             }
             return {
                 rows: stripFetchedRelations(result.rows, deps.activeExpand(request)),
                 fromStore: result.fromStore,
-                releaseFilings,
+                filings,
             }
         } finally {
             for (const signal of signals) signal.removeEventListener('abort', onAbort)

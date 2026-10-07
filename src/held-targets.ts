@@ -4,6 +4,17 @@ import { REALTIME_MAX_FILTER_LENGTH, subsetFilters } from './pocketbase-limits'
 import type { HeldTarget, RelationTarget } from './types'
 
 /**
+ * A filing change that is recorded at once but settled later: `commit`
+ * releases the rows the change stopped filing (run after the root row
+ * lands); `undo` restores the previous filing and releases what the change
+ * filed (run when the root row is discarded). Run one of the two, once.
+ */
+export interface FilingChange {
+    commit: () => void
+    undo: () => void
+}
+
+/**
  * Relation targets a collection holds live while its own subscription is
  * open, and what each parent row filed into them. A filed row stays in its
  * target while at least one parent row in this collection's store files
@@ -15,9 +26,9 @@ export interface HeldTargets {
      * `target` under expand path `key` (`author`, `author.publisher`), with
      * realtime filters on `filterValues`: the row ids for a forward
      * relation (the default), the immediate parent ids for a back-relation.
-     * Returns the release of the rows it filed before and no longer does,
-     * when no other root files them; the caller runs it once the root row
-     * has landed, so a parent is never visible without its relation.
+     * Recorded at once; the returned change is committed once the root row
+     * has landed, so a parent is never visible without its relation, or
+     * undone when the root row is discarded.
      */
     setFiled: (
         rootId: string,
@@ -25,7 +36,7 @@ export interface HeldTargets {
         key: string,
         rowIds: Iterable<string>,
         filterValues?: Iterable<string>
-    ) => () => void
+    ) => FilingChange
     /** Root row `rootId` left the store: release everything it filed, at every depth. */
     forgetParentRow: (rootId: string) => void
     /** Hold exactly `desired`; release every other held target. */
@@ -150,29 +161,46 @@ export function createHeldTargets(collectionName: string, holder: object): HeldT
         return removed.filter(id => rowRef(target, id, -1))
     }
 
+    function dropEntry(rootId: string, target: RelationTarget, key: string): void {
+        const byTarget = filings.get(rootId)
+        const byKey = byTarget?.get(target)
+        byKey?.delete(key)
+        if (byKey?.size === 0) byTarget?.delete(target)
+        if (byTarget?.size === 0) filings.delete(rootId)
+    }
+
     function setFiled(
         rootId: string,
         target: RelationTarget,
         key: string,
         rowIds: Iterable<string>,
         filterValues?: Iterable<string>
-    ): () => void {
+    ): FilingChange {
         const rows = new Set(rowIds)
         const next: Filing = { rows, filters: new Set(filterValues ?? rows) }
         const byKey = filedUnder(rootId, target)
-        const previous = byKey.get(key) ?? { rows: new Set<string>(), filters: new Set<string>() }
+        const before = byKey.get(key)
+        const previous = before ?? { rows: new Set<string>(), filters: new Set<string>() }
         byKey.set(key, next)
         const released = swapRowRefs(target, previous.rows, next.rows)
         if (swapFilterRefs(target, fieldFor(key), previous.filters, next.filters)) {
             held.get(target)?.setFilters(filtersFor(target))
         }
-        if (released.length === 0) return () => undefined
-        // Another root may file one of these rows again before the step
-        // runs, so the step releases only the rows still at zero then.
-        return () => {
-            const counts = rowRefs.get(target)
-            const unreferenced = released.filter(id => !counts?.has(id))
-            if (unreferenced.length > 0) target.releaseFiled(unreferenced, holder)
+        return {
+            // Another root may file one of these rows again before the
+            // commit, so it releases only the rows still at zero then.
+            commit: () => {
+                const counts = rowRefs.get(target)
+                const unreferenced = released.filter(id => !counts?.has(id))
+                if (unreferenced.length > 0) target.releaseFiled(unreferenced, holder)
+            },
+            // Only while this change is still the current filing: a later
+            // change owns the state after it.
+            undo: () => {
+                if (byKey.get(key) !== next) return
+                setFiled(rootId, target, key, previous.rows, previous.filters).commit()
+                if (!before) dropEntry(rootId, target, key)
+            },
         }
     }
 
@@ -180,7 +208,7 @@ export function createHeldTargets(collectionName: string, holder: object): HeldT
         const byTarget = filings.get(rootId)
         if (!byTarget) return
         for (const [target, byKey] of byTarget) {
-            for (const key of [...byKey.keys()]) setFiled(rootId, target, key, [], [])()
+            for (const key of [...byKey.keys()]) setFiled(rootId, target, key, [], []).commit()
         }
         filings.delete(rootId)
     }

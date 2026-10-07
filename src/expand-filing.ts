@@ -1,7 +1,10 @@
 import { markFiledSubset, parseViaKey, type RelationTargets, splitPaths } from './expand-paths'
+import type { FilingChange } from './held-targets'
 import { logger } from './logger'
 import { expandOf, idOf, idsOf, isObject } from './records'
 import type { RelationTarget } from './types'
+
+export type { FilingChange } from './held-targets'
 
 /** A back-relation (`<collection>_via_<field>`) at the head of an active expand path. */
 export interface BackRelationHead {
@@ -96,8 +99,8 @@ function lastById(values: object[]): object[] {
 /**
  * Root row `rootId` now files exactly `rowIds` into `target` under expand
  * path `key`, with realtime filters on `filterValues` (the immediate
- * parent ids for a back-relation). Returns the release of the rows it
- * stopped filing, to run once the root row has landed.
+ * parent ids for a back-relation). The change is committed once the root
+ * row has landed, or undone when it is discarded.
  */
 export type SetFiled = (
     rootId: string,
@@ -105,24 +108,24 @@ export type SetFiled = (
     key: string,
     rowIds: Iterable<string>,
     filterValues?: Iterable<string>
-) => () => void
+) => FilingChange
 
 export interface ExpandFiler {
     /**
      * File every expanded record into its target, one write per relation
      * key, and record each parent's filings for the expand paths the
      * request asked for: a requested key a record does not carry means the
-     * relation is empty or unreadable. Resolves with the release of the
-     * rows the parents stopped filing. The caller runs it after the parent
-     * rows land, so a parent is never visible without its relation; a
-     * caller that discards the parent rows runs it at once.
+     * relation is empty or unreadable. Resolves with one change: `commit`
+     * it after the parent rows land, so a parent is never visible without
+     * its relation; `undo` it when the parent rows are discarded, so a
+     * result that is thrown away changes nothing.
      */
     fileExpanded: (
         records: readonly object[],
         targets: RelationTargets | undefined,
         requestedPaths: readonly string[]
-    ) => Promise<() => void>
-    /** `fileExpanded` and its release in one step, for a parent that has already landed. */
+    ) => Promise<FilingChange>
+    /** `fileExpanded` committed at once, for a parent that has already landed. */
     upsertExpanded: (
         records: readonly object[],
         targets: RelationTargets | undefined,
@@ -159,7 +162,7 @@ export interface ExpandFilerDeps {
 export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
     const { collectionName, setFiled, holder } = deps
 
-    type Releases = (() => void)[]
+    type Releases = FilingChange[]
     /** The root rows that reach a row at the current level. */
     type Roots = (id: string) => Iterable<string>
     type PerRoot = Map<string, { rows: Set<string>; parents: Set<string> }>
@@ -320,15 +323,20 @@ export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
         records: readonly object[],
         targets: RelationTargets | undefined,
         requestedPaths: readonly string[]
-    ): Promise<() => void> {
+    ): Promise<FilingChange> {
         const releases: Releases = []
         await fileLevel(
             records.filter(record => !deps.isStale(record)),
             targets,
             { requestedPaths, releases, rootsOf: id => [id], prefix: '' }
         )
-        return () => {
-            for (const release of releases) release()
+        return {
+            commit: () => {
+                for (const change of releases) change.commit()
+            },
+            undo: () => {
+                for (const change of [...releases].reverse()) change.undo()
+            },
         }
     }
 
@@ -337,7 +345,7 @@ export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
         targets: RelationTargets | undefined,
         requestedPaths: readonly string[]
     ): Promise<void> {
-        ;(await fileExpanded(records, targets, requestedPaths))()
+        ;(await fileExpanded(records, targets, requestedPaths)).commit()
     }
 
     function targetsReady(records: readonly object[], targets: RelationTargets): boolean {

@@ -619,14 +619,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (filer.canFileFirst([event.record], relationTargets)) {
             filer
                 .fileExpanded([event.record], relationTargets, paths)
-                .then(release => {
-                    if (!land()) {
-                        logger.debug('Ignoring realtime echo while sync is not running', {
-                            collectionName,
-                            id,
-                        })
+                .then(change => {
+                    if (land()) {
+                        change.commit()
+                        return
                     }
-                    release()
+                    change.undo()
+                    logger.debug('Ignoring realtime echo while sync is not running', {
+                        collectionName,
+                        id,
+                    })
                 })
                 .catch(error =>
                     logger.error('Failed to file expanded records from realtime echo', {

@@ -45,7 +45,7 @@ describe('expand filer', () => {
             order.push('authors')
             return true
         })
-        const setFiled = vi.fn(() => () => undefined)
+        const setFiled = vi.fn(() => ({ commit: () => undefined, undo: () => undefined }))
         const filer = createExpandFiler({
             collectionName: 'books',
             setFiled,
@@ -77,7 +77,7 @@ describe('expand filer', () => {
     it('a root whose relation went missing clears every deeper path it filed', async () => {
         const publishers = target()
         const authors: RelationTarget = { ...target(), relationTargets: { publisher: publishers } }
-        const setFiled = vi.fn(() => () => undefined)
+        const setFiled = vi.fn(() => ({ commit: () => undefined, undo: () => undefined }))
         const filer = createExpandFiler({
             collectionName: 'books',
             setFiled,
@@ -95,7 +95,7 @@ describe('expand filer', () => {
 
     it('reconciles filings for fresh parents only and files none of a stale parent', async () => {
         const authors = target()
-        const setFiled = vi.fn(() => () => undefined)
+        const setFiled = vi.fn(() => ({ commit: () => undefined, undo: () => undefined }))
         const filer = createExpandFiler({
             collectionName: 'books',
             setFiled,
@@ -118,7 +118,7 @@ describe('expand filer', () => {
     it('ends a filing for a requested key the record no longer carries, and leaves unrequested keys alone', async () => {
         const authors = target()
         const tags = target()
-        const setFiled = vi.fn(() => () => undefined)
+        const setFiled = vi.fn(() => ({ commit: () => undefined, undo: () => undefined }))
         const filer = createExpandFiler({
             collectionName: 'books',
             setFiled,
@@ -129,19 +129,25 @@ describe('expand filer', () => {
         expect(filings(setFiled)).toEqual([['b1', authors, 'author', [], []]])
     })
 
-    it('fileExpanded writes and records at once but defers the releases to the returned step', async () => {
+    it('fileExpanded writes and records at once; commit releases and undo reverts, later', async () => {
         const authors = target()
         const released: string[] = []
-        const setFiled = vi.fn((_parent: string, _target: RelationTarget, key: string) => () => {
-            released.push(key)
-        })
+        const undone: string[] = []
+        const setFiled = vi.fn((_parent: string, _target: RelationTarget, key: string) => ({
+            commit: () => {
+                released.push(key)
+            },
+            undo: () => {
+                undone.push(key)
+            },
+        }))
         const filer = createExpandFiler({
             collectionName: 'books',
             setFiled,
             holder,
             isStale: () => false,
         })
-        const release = await filer.fileExpanded(
+        const change = await filer.fileExpanded(
             [{ id: 'b1', expand: { author: { id: 'a2' } } }],
             { author: authors },
             ['author']
@@ -149,8 +155,17 @@ describe('expand filer', () => {
         expect(authors.writeFiled).toHaveBeenCalledTimes(1)
         expect(filings(setFiled)).toEqual([['b1', authors, 'author', ['a2'], ['a2']]])
         expect(released).toEqual([])
-        release()
+        change.commit()
         expect(released).toEqual(['author'])
+        expect(undone).toEqual([])
+
+        const discarded = await filer.fileExpanded(
+            [{ id: 'b1', expand: { author: { id: 'a3' } } }],
+            { author: authors },
+            ['author']
+        )
+        discarded.undo()
+        expect(undone).toEqual(['author'])
     })
 
     it('canFileFirst is true only with rows to file and every target to write ready', () => {
@@ -158,7 +173,7 @@ describe('expand filer', () => {
         const cold = target(false)
         const filer = createExpandFiler({
             collectionName: 'books',
-            setFiled: () => () => undefined,
+            setFiled: () => ({ commit: () => undefined, undo: () => undefined }),
             holder,
             isStale: () => false,
         })

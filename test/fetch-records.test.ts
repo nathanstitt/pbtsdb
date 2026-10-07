@@ -21,7 +21,7 @@ function fetcherFor(pb: PocketBase) {
         filer: {
             markEmptyBackRelations() {},
             upsertExpanded: async () => {},
-            fileExpanded: async () => () => {},
+            fileExpanded: async () => ({ commit: () => {}, undo: () => {} }),
             canFileFirst: () => false,
         },
     })
