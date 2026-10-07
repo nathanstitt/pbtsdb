@@ -167,7 +167,13 @@ export function createHeldTargets(collectionName: string, holder: object): HeldT
             held.get(target)?.setFilters(filtersFor(target))
         }
         if (released.length === 0) return () => undefined
-        return () => target.releaseFiled(released, holder)
+        // Another root may file one of these rows again before the step
+        // runs, so the step releases only the rows still at zero then.
+        return () => {
+            const counts = rowRefs.get(target)
+            const unreferenced = released.filter(id => !counts?.has(id))
+            if (unreferenced.length > 0) target.releaseFiled(unreferenced, holder)
+        }
     }
 
     function forgetParentRow(rootId: string): void {

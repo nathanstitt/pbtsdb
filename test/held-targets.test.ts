@@ -56,6 +56,20 @@ describe('held targets', () => {
         expect(filters).not.toContain('a1')
     })
 
+    it('a deferred release skips a row another root filed again before it runs', () => {
+        const { relationTarget, releaseFiled } = target()
+        const held = createHeldTargets('books', holder)
+        held.sync(new Set([relationTarget]))
+        held.setFiled('b1', relationTarget, 'author', ['a1'])()
+        const release = held.setFiled('b1', relationTarget, 'author', ['a2'])
+        held.setFiled('b2', relationTarget, 'author', ['a1'])()
+        release()
+        expect(releaseFiled).not.toHaveBeenCalled()
+
+        held.forgetParentRow('b2')
+        expect(releaseFiled).toHaveBeenCalledWith(['a1'], holder)
+    })
+
     it('keeps a back-relation filter while the parent is filed, even with no children', () => {
         const { relationTarget, setFilters, releaseFiled } = target()
         const held = createHeldTargets('authors', holder)
