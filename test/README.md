@@ -42,12 +42,12 @@ Subquery includes with `findOne()` and `toArray()`, and reading a filed relation
 ---
 
 #### `mutations.test.ts`
-Built-in insert, update, and delete handlers, `omitOnInsert`, batched insert and delete, the write-back after a realtime echo, and the `refetchOnMutation` default.
+Built-in insert, update, and delete handlers, `omitOnInsert`, an insert then a delete of one row, the write-back after a realtime echo, and the `refetchOnMutation` default.
 
 ---
 
 #### `subscriptions.test.ts`
-Realtime create, update, and delete events, `writeBatch` handling, and subscription lifecycle tied to live queries.
+Realtime create, update, and delete events, several creates in quick succession, and subscription lifecycle tied to live queries.
 
 ---
 

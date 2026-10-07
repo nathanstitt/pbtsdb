@@ -19,29 +19,17 @@ import {
 import type { Books, Schema } from './schema'
 
 /**
- * Regression coverage for the residual optimistic-move "snap back" reported in 0.6.1:
- * a concurrent on-demand QUERY result reverts a freshly-committed optimistic move.
+ * Regression coverage for an optimistic move that a concurrent on-demand query
+ * result reverts. `genre` stands in for a file's folder, as in
+ * refetch-on-mutation-revert.test.ts. A `where(id = X && isbn = Y)` live query is
+ * the "resolve selected item" resolver that serves the stale read. It mixes in
+ * `isbn` because an id-only `where` is served from the synced store (see
+ * src/keyed-where.ts) and would never reach the mocked fetch.
  *
- * PR #6 guarded the realtime-echo and mutation-response write paths. It did not cover
- * the query-result path: @tanstack/query-db-collection's applySuccessfulResult
- * reconciles every query result into the synced store via the sync `write` primitive
- * with no recency/optimistic check. Under contention a single-row/subset read can
- * resolve with a pre-move row and land here after the move already committed, reverting
- * it. pbtsdb now guards that path (drop synced insert/update for an optimistically
- * pending key, or one strictly older than the synced row).
- *
- * `genre` stands in for a file's parent folder, exactly as in
- * refetch-on-mutation-revert.test.ts: a `genre = SOURCE` live query is the "current
- * folder" and update(id, d => d.genre = DEST) is the move. A `where(id = X && isbn = Y)`
- * live query is the app's "resolve selected item" resolver — the query that, in the
- * report, served the stale read. It mixes in `isbn` so the predicate isn't id-only:
- * an id-only `where` is now served straight from the synced store (see
- * src/keyed-where.ts), which would never reach this test's mocked server fetch at all.
- *
- * The race is made deterministic by stubbing the id= resolver's server fetch to return
- * the pre-move row, then refetching it after the move has committed. The id= query must
- * already OWN the row (be mounted, hydrated) before the stale refetch, because
- * applySuccessfulResult only reconciles rows a query already owns against its baseline.
+ * Every result row goes through ledger rule 4: a strictly older `updated` is
+ * dropped, an equal or newer one lands. A pending optimistic mutation keeps its
+ * overlay until it settles. The race is made deterministic by stubbing the
+ * resolver's fetch and calling reload().
  */
 describe('optimistic move snap-back via stale query result (on-demand)', () => {
     let testLogger: TestLogger
@@ -168,7 +156,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
         // A stale read lands for the already-owning id= query: its refetch returns the
         // pre-move row (genre = SOURCE), strictly older than the just-committed synced
-        // value. applySuccessfulResult would write it into the synced store; the guard drops it.
+        // value. Ledger rule 4 drops it.
         control.serveStale = true
         await collection.reload()
         await new Promise(r => setTimeout(r, 400))
@@ -297,8 +285,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         })
 
         // The id= resolver returns a NEWER row (renamed, later `updated`) — a real
-        // concurrent update from another client. The staleness guard must NOT drop it,
-        // and with no pending optimistic mutation the optimistic arm does not apply.
+        // concurrent update from another client. Ledger rule 4 lands it.
         const newTitle = `Renamed ${Date.now().toString().slice(-8)}`
         const newerRow: Books = { ...seed, title: newTitle, updated: offsetUpdated(seed, 60000) }
         const realGetFullList = pb.collection('books').getFullList.bind(pb.collection('books'))
@@ -337,7 +324,6 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         await waitFor(() => expect(syncedGet(collection, seed.id)?.title).toBe(newTitle), {
             timeout: 5000,
         })
-        expect(testLogger.messages.debug.some(m => m.msg.includes('Dropping'))).toBe(false)
         expect(control.served).toBeGreaterThan(0)
 
         await pb

@@ -21,34 +21,15 @@ import {
 import type { Books, Schema } from './schema'
 
 /**
- * Regression coverage for the optimistic-move "snap back" race reported when a
- * file is dragged between folders with refetchOnMutation left at its default
- * (false).
+ * Regression coverage for the optimistic-move "snap back" race with
+ * refetchOnMutation at its default (false). `genre` stands in for a file's
+ * folder: a `genre = SOURCE` live query is the current folder and
+ * update(id, d => d.genre = DEST) is the move.
  *
- * `genre` stands in for a file's parent folder: a filterable field on the same
- * collection that the move mutates, so a `genre = SOURCE` live query is the
- * "current folder" view and update(id, d => d.genre = DEST) is the move.
- *
- * The bug (verified against @tanstack/db's recomputeOptimisticState):
- *   1. update() lays an optimistic overlay (genre = DEST); the row leaves the
- *      SOURCE query. TanStack DB retains that overlay after the transaction
- *      completes — until a synced write touching the key confirms it.
- *   2. The snap-back fired when the confirming synced write carried a STALE value.
- *      Under SSE contention PocketBase can redeliver or reorder events, so an echo
- *      carrying the pre-move folder (genre = SOURCE) landed, collapsed the overlay,
- *      and left the synced layer holding the old folder — the row reappeared in
- *      SOURCE and, with refetchOnMutation false, lingered there.
- *
- * The fix has two parts, both exercised here:
- *   - The default onUpdate/onInsert now write the authoritative server response
- *     back into the synced layer, so after a move the synced layer already holds
- *     the fresh value instead of the stale one.
- *   - handleRealtimeEvent drops create/update echoes whose `updated` timestamp is
- *     strictly older than the synced record, so a redelivered/out-of-order echo
- *     can no longer revert the row.
- *
- * Echoes are delivered through the real subscription handler (the same path a
- * redelivered/out-of-order SSE event takes) to make the race deterministic.
+ * A redelivered or reordered SSE echo can carry the pre-move row. The default
+ * handlers write the server's response back, and ledger rule 4 decides each
+ * echo: a strictly older `updated` is dropped, an equal or newer one lands.
+ * Echoes go through the real subscription handler so the race is deterministic.
  */
 describe('optimistic move snap-back via stale realtime echo (refetchOnMutation default)', () => {
     let testLogger: TestLogger
@@ -117,9 +98,6 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         const ms = Date.parse(record.updated.replace(' ', 'T'))
         return `${new Date(ms - 1000).toISOString().replace('T', ' ').replace('Z', '')}Z`
     }
-
-    const ignoredStaleEchoLogs = () =>
-        testLogger.messages.debug.filter(m => m.msg.includes('Ignoring stale realtime echo'))
 
     /**
      * Seed a row in the source folder and mount a live query filtered to that
@@ -207,7 +185,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         const { handlerRef, seed, collection, result } = await moveOutOfSourceFolder()
 
         // A later, correctly-ordered echo from another client (newer timestamp)
-        // changes a field and must be applied, not dropped by the staleness guard.
+        // changes a field and lands by ledger rule 4.
         const newerUpdated = `${new Date(Date.parse(seed.updated.replace(' ', 'T')) + 1000)
             .toISOString()
             .replace('T', ' ')
@@ -223,7 +201,6 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         })
         expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
         expect(result.current.data.find(b => b.id === seed.id)).toBeUndefined()
-        expect(ignoredStaleEchoLogs()).toHaveLength(0)
 
         await pb
             .collection('books')

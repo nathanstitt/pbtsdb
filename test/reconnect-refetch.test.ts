@@ -110,6 +110,8 @@ describe('reconnect refetch lifecycle', () => {
 
         releaseFirstLoad?.()
         await waitForLoadFinish(result)
+        await new Promise(resolve => setTimeout(resolve, 300))
+        expect(getFullList).toHaveBeenCalledTimes(1)
         getFullList.mockRestore()
         await books.cleanup()
     }, 20000)

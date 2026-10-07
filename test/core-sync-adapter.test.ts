@@ -101,6 +101,9 @@ describe('core sync adapter', () => {
     }, 15000)
 
     it('releases a row only a topic held when that topic closes', async () => {
+        const control = await pb
+            .collection('books')
+            .create<Books>(await newBook('Fiction', 'control'))
         const books = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             realtime: 'query',
@@ -109,18 +112,23 @@ describe('core sync adapter', () => {
         const { result, unmount } = renderHook(() =>
             useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
         )
-        await waitForLoadFinish(result)
-        await books.waitForSubscription()
-        const created = await pb
-            .collection('books')
-            .create<Books>(await newBook('Fiction', 'topic'))
+        let createdId: string | undefined
         try {
+            await waitForLoadFinish(result)
+            await books.waitForSubscription()
+            await books.accept([control])
+            const created = await pb
+                .collection('books')
+                .create<Books>(await newBook('Fiction', 'topic'))
+            createdId = created.id
             await waitFor(() => expect(books.get(created.id)).toBeDefined())
             unmount()
             await waitFor(() => expect(books.isSubscribed()).toBe(false))
             await waitFor(() => expect(books.get(created.id)).toBeUndefined())
+            expect(books.get(control.id)).toBeDefined()
         } finally {
-            await removeBook(created.id)
+            if (createdId) await removeBook(createdId)
+            await removeBook(control.id)
             await books.cleanup()
         }
     }, 15000)

@@ -167,7 +167,7 @@ describe('Collection - Mutations', () => {
         }
     }, 15000)
 
-    it('should handle insert and delete in same batch (optimistic cancellation)', async () => {
+    it('should handle an insert then a delete of the same row (optimistic cancellation)', async () => {
         const c = createCollection<Schema>(pb)
         const collection = c('books', {
             syncMode: 'eager',
@@ -202,17 +202,25 @@ describe('Collection - Mutations', () => {
             updated: new Date().toISOString(),
         }
 
-        collection.insert(newBook)
-        collection.delete(newBook.id)
+        try {
+            collection.insert(newBook)
+            collection.delete(newBook.id)
 
-        await waitFor(
-            () => {
-                expect(result.current.data.length).toBe(initialCount)
-            },
-            { timeout: 5000 }
-        )
+            await waitFor(
+                () => {
+                    expect(result.current.data.length).toBe(initialCount)
+                },
+                { timeout: 5000 }
+            )
 
-        expect(result.current.data.find(b => b.id === newBook.id)).toBeUndefined()
+            expect(result.current.data.find(b => b.id === newBook.id)).toBeUndefined()
+        } finally {
+            await pb
+                .collection('books')
+                .delete(newBook.id)
+                .catch(() => {})
+            await collection.cleanup()
+        }
     }, 15000)
 
     // The realtime echo for a freshly inserted record can arrive BEFORE the

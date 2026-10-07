@@ -148,7 +148,7 @@ describe('Collection - Real-time Subscriptions', () => {
         )
     }, 15000)
 
-    it('should handle multiple simultaneous updates with writeBatch', async () => {
+    it('should receive several creates in quick succession', async () => {
         const booksCollection = createBooksCollection()
 
         // Set up live query
@@ -196,9 +196,7 @@ describe('Collection - Real-time Subscriptions', () => {
 
         // Wait for all updates to propagate
         await waitFor(
-            () => {
-                return result.current.data.length >= initialCount + 3
-            },
+            () => expect(result.current.data.length).toBeGreaterThanOrEqual(initialCount + 3),
             { timeout: 10000 }
         )
 

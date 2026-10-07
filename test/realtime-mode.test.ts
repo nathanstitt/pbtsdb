@@ -579,7 +579,7 @@ describe('realtime mode', () => {
             }
         }, 30000)
 
-        it('re-holds a query-mode target with its filed rows after a remount', async () => {
+        it('re-holds a query-mode target with its filed rows after a remount served from the store', async () => {
             const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
@@ -588,18 +588,17 @@ describe('realtime mode', () => {
                 const c = createCollection<Schema>(pb)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
                 const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
-                const mount = () =>
-                    renderHook(() =>
-                        useLiveQuery(q =>
-                            q
-                                .from({ b: books.fetchRelations('author') })
-                                .where(({ b }) => eq(b.genre, 'Fantasy'))
-                        )
-                    )
 
-                const first = mount()
+                const first = renderHook(() =>
+                    useLiveQuery(q =>
+                        q
+                            .from({ b: books.fetchRelations('author') })
+                            .where(({ b }) => eq(b.genre, 'Fantasy'))
+                    )
+                )
                 await waitForLoadFinish(first.result, 10000)
                 await books.waitForSubscription()
+                const bookIds = first.result.current.data.map(b => b.id)
                 const authorIds = [...new Set(first.result.current.data.map(b => b.author))].sort()
                 await waitFor(
                     () => expect(idsIn(filtersOf(authorsSpy, 'authors').at(-1))).toEqual(authorIds),
@@ -608,13 +607,17 @@ describe('realtime mode', () => {
                     }
                 )
                 const filed = filtersOf(authorsSpy, 'authors').at(-1)
+                // An accepted ref keeps the rows in the store after the subset unloads.
+                await books.accept(first.result.current.data)
 
                 first.unmount()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
                 const callsBefore = callsFor(authorsSpy, 'authors').length
                 const fetchesBefore = fetches()
 
-                const second = mount()
+                const second = renderHook(() =>
+                    useLiveQuery(q => q.from({ b: books }).where(({ b }) => inArray(b.id, bookIds)))
+                )
                 await waitForLoadFinish(second.result, 10000)
                 await waitFor(
                     () =>
@@ -623,8 +626,7 @@ describe('realtime mode', () => {
                 )
                 expect(filtersOf(authorsSpy, 'authors').slice(callsBefore)).toEqual([filed])
                 expect(authors.isSubscribed()).toBe(true)
-                // Design "Remount": an unkeyed subset reloads on remount; only marks serve from the store.
-                expect(fetches()).toBeGreaterThan(fetchesBefore)
+                expect(fetches()).toBe(fetchesBefore)
                 second.unmount()
             } finally {
                 vi.restoreAllMocks()
