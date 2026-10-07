@@ -93,27 +93,48 @@ function lastById(values: object[]): object[] {
     return [...byId.values()]
 }
 
-/** `parentId` now files exactly `rowIds` into `target` under expand `key`. */
+/**
+ * Root row `rootId` now files exactly `rowIds` into `target` under expand
+ * path `key`, with realtime filters on `filterValues` (the immediate
+ * parent ids for a back-relation). Returns the release of the rows it
+ * stopped filing, to run once the root row has landed.
+ */
 export type SetFiled = (
-    parentId: string,
+    rootId: string,
     target: RelationTarget,
     key: string,
-    rowIds: Iterable<string>
-) => void
+    rowIds: Iterable<string>,
+    filterValues?: Iterable<string>
+) => () => void
 
 export interface ExpandFiler {
     /**
      * File every expanded record into its target, one write per relation
-     * key, and reconcile each parent's filings for the expand paths the
+     * key, and record each parent's filings for the expand paths the
      * request asked for: a requested key a record does not carry means the
-     * relation is empty or unreadable, so rows filed under it before are
-     * released.
+     * relation is empty or unreadable. Resolves with the release of the
+     * rows the parents stopped filing. The caller runs it after the parent
+     * rows land, so a parent is never visible without its relation; a
+     * caller that discards the parent rows runs it at once.
      */
+    fileExpanded: (
+        records: readonly object[],
+        targets: RelationTargets | undefined,
+        requestedPaths: readonly string[]
+    ) => Promise<() => void>
+    /** `fileExpanded` and its release in one step, for a parent that has already landed. */
     upsertExpanded: (
         records: readonly object[],
         targets: RelationTargets | undefined,
         requestedPaths: readonly string[]
     ) => Promise<void>
+    /**
+     * Whether `fileExpanded` has rows to write and every target it would
+     * write to is syncing, so the filing lands within the current task and
+     * the parent can wait for it. False when there is nothing to file, so
+     * the parent lands at once.
+     */
+    canFileFirst: (records: readonly object[], targets: RelationTargets | undefined) => boolean
     /** PocketBase omits an empty back-relation's key, so absence means zero children. */
     markEmptyBackRelations: (items: readonly object[], heads: readonly BackRelationHead[]) => void
 }
@@ -138,72 +159,211 @@ export interface ExpandFilerDeps {
 export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
     const { collectionName, setFiled, holder } = deps
 
-    async function fileGroup(
-        key: string,
+    type Releases = (() => void)[]
+    /** The root rows that reach a row at the current level. */
+    type Roots = (id: string) => Iterable<string>
+    type PerRoot = Map<string, { rows: Set<string>; parents: Set<string> }>
+
+    /**
+     * What each root files under `key` at this level: the expanded row ids,
+     * and the immediate parent ids a back-relation filters on. A root whose
+     * records lack a requested key files nothing under it, which ends what it
+     * filed there before.
+     */
+    function entryFor(perRoot: PerRoot, root: string): { rows: Set<string>; parents: Set<string> } {
+        let found = perRoot.get(root)
+        if (!found) {
+            found = { rows: new Set(), parents: new Set() }
+            perRoot.set(root, found)
+        }
+        return found
+    }
+
+    function addTo(index: Map<string, Set<string>>, key: string, value: string): void {
+        let values = index.get(key)
+        if (!values) {
+            values = new Set()
+            index.set(key, values)
+        }
+        values.add(value)
+    }
+
+    /** Every root that reaches this level files under a requested key, with nothing when its records lack it. */
+    function rootsReaching(
+        records: readonly object[],
+        via: boolean,
+        rootsOf: Roots,
+        perRoot: PerRoot
+    ): void {
+        for (const record of records) {
+            const parentId = idOf(record)
+            if (!parentId) continue
+            for (const root of rootsOf(parentId)) {
+                const found = entryFor(perRoot, root)
+                if (via) found.parents.add(parentId)
+            }
+        }
+    }
+
+    function collectRoots(
+        records: readonly object[],
         group: ExpandedGroup,
-        target: RelationTarget,
+        requested: boolean,
+        via: boolean,
+        rootsOf: Roots
+    ): { perRoot: PerRoot; childRoots: Map<string, Set<string>> } {
+        const perRoot: PerRoot = new Map()
+        const childRoots = new Map<string, Set<string>>()
+        if (requested) rootsReaching(records, via, rootsOf, perRoot)
+        for (const [parentId, values] of group.byParent) {
+            const ids = idsOf(values)
+            for (const root of rootsOf(parentId)) {
+                const found = entryFor(perRoot, root)
+                found.parents.add(parentId)
+                for (const id of ids) {
+                    found.rows.add(id)
+                    addTo(childRoots, id, root)
+                }
+            }
+        }
+        return { perRoot, childRoots }
+    }
+
+    /** A root with no rows under `prefix` files nothing deeper either. */
+    function clearDeeper(
+        root: string,
+        targets: RelationTargets | undefined,
+        paths: readonly string[],
+        prefix: string,
+        releases: Releases
+    ): void {
+        if (!targets) return
+        for (const head of new Set(paths.map(path => path.split('.')[0]))) {
+            const target = targets[head]
+            if (!target) continue
+            releases.push(setFiled(root, target, `${prefix}${head}`, [], []))
+            clearDeeper(
+                root,
+                target.relationTargets,
+                tailsOf(paths, head),
+                `${prefix}${head}.`,
+                releases
+            )
+        }
+    }
+
+    // Children before parents at every level, so a row never lands before
+    // the rows it points at. Nested levels are the target's rows, not this
+    // parent's, so staleness is checked at the top level only.
+    type Level = {
         requestedPaths: readonly string[]
-    ): Promise<boolean> {
+        releases: Releases
+        rootsOf: Roots
+        prefix: string
+    }
+
+    async function fileKey(
+        records: readonly object[],
+        level: Level,
+        key: string,
+        target: RelationTarget,
+        group: ExpandedGroup,
+        requested: boolean
+    ): Promise<void> {
+        const via = parseViaKey(key) !== undefined
+        const { perRoot, childRoots } = collectRoots(records, group, requested, via, level.rootsOf)
         const values = lastById(group.values)
-        const filed = await target.writeFiled(values, holder)
-        await upsertExpanded(values, target.relationTargets, tailsOf(requestedPaths, key), true)
-        if (!filed) return false
+        const tails = tailsOf(level.requestedPaths, key)
+        const path = `${level.prefix}${key}`
+        if (values.length > 0) {
+            await fileLevel(values, target.relationTargets, {
+                requestedPaths: tails,
+                releases: level.releases,
+                rootsOf: id => childRoots.get(id) ?? [],
+                prefix: `${path}.`,
+            })
+            if (!(await target.writeFiled(values, holder))) return
+        }
+        for (const [root, { rows, parents }] of perRoot) {
+            level.releases.push(setFiled(root, target, path, rows, via ? parents : rows))
+            if (rows.size === 0) {
+                clearDeeper(root, target.relationTargets, tails, `${path}.`, level.releases)
+            }
+        }
         for (const [parentId, parentValues] of group.byParent) {
-            setFiled(parentId, target, key, idsOf(parentValues))
             markFiledSubset(target, key, parentValues, parentId)
+        }
+    }
+
+    async function fileLevel(
+        records: readonly object[],
+        targets: RelationTargets | undefined,
+        level: Level
+    ): Promise<void> {
+        if (!targets) return
+        const grouped = groupExpandedByKey(records)
+        const heads = new Set(level.requestedPaths.map(path => path.split('.')[0]))
+        for (const key of new Set([...grouped.keys(), ...heads])) {
+            const target = targets[key]
+            if (!target) {
+                if (grouped.has(key)) {
+                    logger.debug('No relation target for expanded field', { collectionName, key })
+                }
+                continue
+            }
+            const group = grouped.get(key) ?? { values: [], byParent: [] }
+            await fileKey(records, level, key, target, group, heads.has(key))
+        }
+    }
+
+    async function fileExpanded(
+        records: readonly object[],
+        targets: RelationTargets | undefined,
+        requestedPaths: readonly string[]
+    ): Promise<() => void> {
+        const releases: Releases = []
+        await fileLevel(
+            records.filter(record => !deps.isStale(record)),
+            targets,
+            { requestedPaths, releases, rootsOf: id => [id], prefix: '' }
+        )
+        return () => {
+            for (const release of releases) release()
+        }
+    }
+
+    async function upsertExpanded(
+        records: readonly object[],
+        targets: RelationTargets | undefined,
+        requestedPaths: readonly string[]
+    ): Promise<void> {
+        ;(await fileExpanded(records, targets, requestedPaths))()
+    }
+
+    function targetsReady(records: readonly object[], targets: RelationTargets): boolean {
+        for (const [key, group] of groupExpandedByKey(records)) {
+            const target = targets[key]
+            if (!target) continue
+            if (!target.isReady()) return false
+            const nested = target.relationTargets
+            if (nested && !targetsReady(lastById(group.values), nested)) return false
         }
         return true
     }
 
-    // A requested key a record does not carry is an empty or unreadable
-    // relation: whatever the record filed under it before is released.
-    function releaseAbsent(
+    function canFileFirst(
         records: readonly object[],
-        targets: RelationTargets,
-        keys: Iterable<string>
-    ): void {
-        for (const key of keys) {
-            const target = targets[key]
-            if (!target) continue
-            for (const record of records) {
-                const parentId = idOf(record)
-                if (parentId && expandOf(record)?.[key] === undefined) {
-                    setFiled(parentId, target, key, [])
-                }
-            }
-        }
-    }
-
-    // Nested levels are the target's rows, not this parent's, so staleness
-    // is checked at the top level only.
-    async function upsertExpanded(
-        all: readonly object[],
-        targets: RelationTargets | undefined,
-        requestedPaths: readonly string[],
-        nested = false
-    ): Promise<void> {
-        if (!targets) return
-        const records = nested ? all : all.filter(record => !deps.isStale(record))
-        const grouped = groupExpandedByKey(records)
-        const unfiled = new Set<string>()
-        for (const [key, group] of grouped) {
-            const target = targets[key]
-            if (!target) {
-                logger.debug('No relation target for expanded field', { collectionName, key })
-                continue
-            }
-            if (!(await fileGroup(key, group, target, requestedPaths))) unfiled.add(key)
-        }
-        const heads = new Set(requestedPaths.map(path => path.split('.')[0]))
-        releaseAbsent(
-            records,
-            targets,
-            [...heads].filter(key => !unfiled.has(key))
-        )
+        targets: RelationTargets | undefined
+    ): boolean {
+        if (!targets) return false
+        const toFile = [...groupExpandedByKey(records).keys()].some(key => targets[key])
+        return toFile && targetsReady(records, targets)
     }
 
     return {
+        fileExpanded,
         upsertExpanded,
+        canFileFirst,
         markEmptyBackRelations(items, heads) {
             if (heads.length === 0) return
             for (const item of items) {

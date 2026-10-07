@@ -48,7 +48,8 @@ function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) 
                 calls.push({
                     request,
                     options,
-                    resolve: rows => resolve({ rows, fromStore: false }),
+                    resolve: rows =>
+                        resolve({ rows, fromStore: false, releaseFilings: () => undefined }),
                     reject,
                 })
             }),

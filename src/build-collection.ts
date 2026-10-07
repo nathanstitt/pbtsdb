@@ -604,13 +604,43 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             return
         }
         const [stored] = stripFetchedRelations([event.record], pendingSubscribeExpand())
-        const applied = membership.land(topic, [stored])
-        if (applied === false) {
+        const land = () => {
+            const applied = membership.land(topic, [stored])
+            if (applied !== false) membership.drop([ACCEPTED], [id])
+            return applied !== false
+        }
+        const paths = splitPaths(expand)
+        // The same order as a fetch: relations first, then the parent, then
+        // the release of relations the parent stopped referencing, so a
+        // reader never sees the parent without its relation. With nothing
+        // to file the parent lands at once; a target that is not syncing
+        // yet would hold the parent back for a load, so the parent lands
+        // first in that case too.
+        if (filer.canFileFirst([event.record], relationTargets)) {
+            filer
+                .fileExpanded([event.record], relationTargets, paths)
+                .then(release => {
+                    if (!land()) {
+                        logger.debug('Ignoring realtime echo while sync is not running', {
+                            collectionName,
+                            id,
+                        })
+                    }
+                    release()
+                })
+                .catch(error =>
+                    logger.error('Failed to file expanded records from realtime echo', {
+                        collectionName,
+                        error,
+                    })
+                )
+            return
+        }
+        if (!land()) {
             logger.debug('Ignoring realtime echo while sync is not running', { collectionName, id })
             return
         }
-        membership.drop([ACCEPTED], [id])
-        filer.upsertExpanded([event.record], relationTargets, splitPaths(expand)).catch(error =>
+        filer.upsertExpanded([event.record], relationTargets, paths).catch(error =>
             logger.error('Failed to upsert expanded records from realtime echo', {
                 collectionName,
                 error,

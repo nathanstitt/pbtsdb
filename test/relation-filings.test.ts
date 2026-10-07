@@ -12,7 +12,7 @@ import {
     topicFilter,
     waitForLoadFinish,
 } from './helpers'
-import type { Authors, Books, Schema } from './schema'
+import type { Authors, BookMetadata, Books, Schema } from './schema'
 
 /**
  * A row a parent filed into a relation target stays while a parent row in
@@ -165,6 +165,93 @@ describe('relation filings', () => {
             expect(authors.get(a1.id)).toBeDefined()
         } finally {
             q2?.unmount()
+            await books.cleanup()
+            await authors.cleanup()
+        }
+    }, 30000)
+
+    it('a parent is never visible without its relation across an echo that changes it', async () => {
+        const [a1, a2] = await Promise.all([author('a1'), author('a2')])
+        const b1 = await book('b1', a1.id)
+        const { authors, books } = collections()
+        const q1 = byId(books, b1.id)
+        // At the moment each books change publishes, the author it points at
+        // must already be in the authors store: relations land first, the
+        // parent second, and the old relation is released after.
+        const seen: { author: string; present: boolean }[] = []
+        try {
+            await waitForLoadFinish(q1.result)
+            await books.waitForSubscription()
+            expect(authors.get(a1.id)).toBeDefined()
+            const subscription = books.subscribeChanges(
+                changes => {
+                    for (const change of changes) {
+                        if (change.key !== b1.id || change.type === 'delete') continue
+                        const author = change.value.author
+                        seen.push({ author, present: authors.get(author) !== undefined })
+                    }
+                },
+                { includeInitialState: false }
+            )
+
+            await pb.collection('books').update(b1.id, { author: a2.id })
+            await waitFor(() => expect(books.get(b1.id)?.author).toBe(a2.id), { timeout: 10000 })
+            await waitFor(() => expect(authors.get(a1.id)).toBeUndefined(), { timeout: 10000 })
+            subscription.unsubscribe()
+            expect(seen.map(entry => entry.author)).toContain(a2.id)
+            expect(seen.every(entry => entry.present)).toBe(true)
+        } finally {
+            q1.unmount()
+            await books.cleanup()
+            await authors.cleanup()
+        }
+    }, 30000)
+
+    it('a two-level path files every level and releases the whole subtree when the root row leaves', async () => {
+        const a1 = await author('a1')
+        const b1 = await book('b1', a1.id)
+        const m1 = await pb.collection('book_metadata').create<BookMetadata>({
+            book: b1.id,
+            genre: 'Fiction',
+            summary: getTestSlug('m1'),
+            language: 'en',
+        })
+        created.push({ collection: 'book_metadata', id: m1.id })
+        const c = createCollection<Schema>(pb)
+        const authors = c('authors', {
+            syncMode: 'on-demand',
+            realtime: 'query',
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const books = c('books', {
+            syncMode: 'on-demand',
+            realtime: 'query',
+            relations: { author: authors },
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const metadata = c('book_metadata', {
+            syncMode: 'on-demand',
+            relations: { book: books },
+            alwaysFetchRelations: ['book.author'],
+            subsetGcTime: 0,
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const q1 = renderHook(() =>
+            useLiveQuery(q => q.from({ m: metadata }).where(({ m }) => eq(m.id, m1.id)))
+        )
+        try {
+            await waitForLoadFinish(q1.result)
+            await metadata.waitForSubscription()
+            expect(books.get(b1.id)).toBeDefined()
+            expect(authors.get(a1.id)).toBeDefined()
+
+            q1.unmount()
+            await waitFor(() => expect(metadata.get(m1.id)).toBeUndefined(), { timeout: 10000 })
+            expect(books.get(b1.id)).toBeUndefined()
+            expect(authors.get(a1.id)).toBeUndefined()
+        } finally {
+            q1.unmount()
+            await metadata.cleanup()
             await books.cleanup()
             await authors.cleanup()
         }

@@ -18,6 +18,7 @@ function target(relationTargets?: RelationTargets): RelationTarget & { marks: [s
         relationTargets,
         writeFiled: async (_records, _holder) => true,
         releaseFiled: () => {},
+        isReady: () => true,
         expectFiling: () => () => {},
         markSubsetLoaded: (field, value) => {
             marks.push([field, value])

@@ -58,6 +58,10 @@ All notable changes to this project will be documented in this file.
   parent fetch or echo no longer expands it (lost access, changed relation), or when a
   delete arrives on the hold's realtime topic. Hold filters follow the current filings,
   so they no longer grow for the life of the parent.
+- A realtime echo that changes a relation files the new related row before it lands
+  the parent, and releases the old one after, the same order a fetch uses. A join
+  never sees the parent without its relation, so a joined row is not unmounted and
+  remounted across the echo.
 - A mutation write-back or `accept()` adds the accepted holder only to a row nothing
   holds yet. A row a query or topic already holds is refreshed in place, so a saved
   row leaves with its query instead of staying for the session. When `subsetGcTime`

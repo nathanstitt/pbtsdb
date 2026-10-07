@@ -18,7 +18,12 @@ function fetcherFor(pb: PocketBase) {
         syncedRow: () => undefined,
         syncedRows: () => [],
         subsets: { isLoaded: () => false },
-        filer: { markEmptyBackRelations() {}, upsertExpanded: async () => {} },
+        filer: {
+            markEmptyBackRelations() {},
+            upsertExpanded: async () => {},
+            fileExpanded: async () => () => {},
+            canFileFirst: () => false,
+        },
     })
 }
 

@@ -11,6 +11,7 @@ function target() {
         releaseFiled,
         expectFiling: () => () => undefined,
         markSubsetLoaded: () => undefined,
+        isReady: () => true,
         holdLive: () => ({ setFilters, release: () => undefined }),
     }
     return { relationTarget, setFilters, releaseFiled }
@@ -26,8 +27,8 @@ describe('held targets', () => {
         const { relationTarget, setFilters, releaseFiled } = target()
         const held = createHeldTargets('books', holder)
         held.sync(new Set([relationTarget]))
-        held.setFiled('b1', relationTarget, 'author', ['a1'])
-        held.setFiled('b2', relationTarget, 'author', ['a1', 'a2'])
+        held.setFiled('b1', relationTarget, 'author', ['a1'])()
+        held.setFiled('b2', relationTarget, 'author', ['a1', 'a2'])()
         expect(lastFilters(setFilters).join(' ')).toContain('a2')
 
         held.forgetParentRow('b1')
@@ -45,8 +46,10 @@ describe('held targets', () => {
         const { relationTarget, setFilters, releaseFiled } = target()
         const held = createHeldTargets('books', holder)
         held.sync(new Set([relationTarget]))
-        held.setFiled('b1', relationTarget, 'author', ['a1'])
-        held.setFiled('b1', relationTarget, 'author', ['a2'])
+        held.setFiled('b1', relationTarget, 'author', ['a1'])()
+        const release = held.setFiled('b1', relationTarget, 'author', ['a2'])
+        expect(releaseFiled).not.toHaveBeenCalled()
+        release()
         expect(releaseFiled).toHaveBeenCalledWith(['a1'], holder)
         const filters = lastFilters(setFilters).join(' ')
         expect(filters).toContain('a2')
@@ -57,10 +60,11 @@ describe('held targets', () => {
         const { relationTarget, setFilters, releaseFiled } = target()
         const held = createHeldTargets('authors', holder)
         held.sync(new Set([relationTarget]))
-        held.setFiled('a1', relationTarget, 'books_via_author', ['b1', 'b2'])
+        held.setFiled('a1', relationTarget, 'books_via_author', ['b1', 'b2'], ['a1'])()
         expect(lastFilters(setFilters).join(' ')).toContain('a1')
+        expect(lastFilters(setFilters).join(' ')).not.toContain('b1')
 
-        held.setFiled('a1', relationTarget, 'books_via_author', [])
+        held.setFiled('a1', relationTarget, 'books_via_author', [], ['a1'])()
         expect([...releaseFiled.mock.calls[0][0]].sort()).toEqual(['b1', 'b2'])
         expect(lastFilters(setFilters).join(' ')).toContain('a1')
 
@@ -71,8 +75,8 @@ describe('held targets', () => {
     it('a re-hold subscribes to the current filings only', () => {
         const { relationTarget, setFilters } = target()
         const held = createHeldTargets('books', holder)
-        held.setFiled('b1', relationTarget, 'author', ['a1'])
-        held.setFiled('b2', relationTarget, 'author', ['a2'])
+        held.setFiled('b1', relationTarget, 'author', ['a1'])()
+        held.setFiled('b2', relationTarget, 'author', ['a2'])()
         held.forgetParentRow('b1')
         held.sync(new Set([relationTarget]))
         const filters = lastFilters(setFilters).join(' ')
@@ -80,10 +84,25 @@ describe('held targets', () => {
         expect(filters).not.toContain('a1')
     })
 
+    it('a nested path is filed under the root row and released with it', () => {
+        const authors = target()
+        const publishers = target()
+        const held = createHeldTargets('books', holder)
+        held.sync(new Set([authors.relationTarget, publishers.relationTarget]))
+        held.setFiled('b1', authors.relationTarget, 'author', ['a1'])()
+        held.setFiled('b1', publishers.relationTarget, 'author.publisher', ['p1'])()
+        expect(lastFilters(publishers.setFilters).join(' ')).toContain('p1')
+
+        held.forgetParentRow('b1')
+        expect(authors.releaseFiled).toHaveBeenCalledWith(['a1'], holder)
+        expect(publishers.releaseFiled).toHaveBeenCalledWith(['p1'], holder)
+        expect(lastFilters(publishers.setFilters)).toEqual([])
+    })
+
     it('clearFiled forgets every filing without releasing', () => {
         const { relationTarget, setFilters, releaseFiled } = target()
         const held = createHeldTargets('books', holder)
-        held.setFiled('b1', relationTarget, 'author', ['a1'])
+        held.setFiled('b1', relationTarget, 'author', ['a1'])()
         held.clearFiled()
         held.sync(new Set([relationTarget]))
         expect(lastFilters(setFilters)).toEqual([])

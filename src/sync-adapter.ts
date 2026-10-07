@@ -133,11 +133,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         const deleted = new Set<string>()
         tombstones.add(deleted)
         try {
-            const { rows, fromStore } = await fetcher.fetchRecords(request, {
+            const { rows, fromStore, releaseFilings } = await fetcher.fetchRecords(request, {
                 signals: signal ? [run.abort.signal, signal] : [run.abort.signal],
                 refetch,
             })
-            return { rows: rows.filter(row => !deleted.has(idOf(row) ?? '')), fromStore }
+            return {
+                rows: rows.filter(row => !deleted.has(idOf(row) ?? '')),
+                fromStore,
+                releaseFilings,
+            }
         } finally {
             tombstones.delete(deleted)
         }
@@ -214,6 +218,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         result: FetchResult<T>
     ): Promise<string[]> {
         const applied = membership.reconcile(opts, result.rows)
+        result.releaseFilings()
         if (applied === false) return []
         const demand = run.demands.get(opts)
         if (demand) demand.landed = true
@@ -243,9 +248,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                     throw error
                 }
             )
-            if (result === undefined || stopped(run, opts, wait)) return []
-            if (run.demands.get(opts) !== demand) return []
-            if (demand.seq !== seq) return demand.loading ?? []
+            if (result === undefined) return []
+            if (stopped(run, opts, wait) || run.demands.get(opts) !== demand) {
+                result.releaseFilings()
+                return []
+            }
+            if (demand.seq !== seq) {
+                result.releaseFilings()
+                return demand.loading ?? []
+            }
             return install(run, opts, wait, before, result)
         })()
         demand.loading = loading
@@ -363,10 +374,13 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function loadEagerRows(run: Run): Promise<string[]> {
         const seq = ++run.eagerSeq
         const loading = (async (): Promise<string[]> => {
-            const { rows } = await fetchRows(run, {}, undefined, false)
-            if (run.abort.signal.aborted) return []
-            if (run.eagerSeq !== seq) return run.eagerLoad ?? []
+            const { rows, releaseFilings } = await fetchRows(run, {}, undefined, false)
+            if (run.abort.signal.aborted || run.eagerSeq !== seq) {
+                releaseFilings()
+                return run.eagerSeq !== seq ? (run.eagerLoad ?? []) : []
+            }
             const applied = membership.reconcile(EAGER, rows, [ACCEPTED])
+            releaseFilings()
             if (applied === false) return []
             await settle(applied, 'accepted')
             return idsOf(rows)

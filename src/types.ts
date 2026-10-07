@@ -152,6 +152,8 @@ export interface RelationTarget {
     markSubsetLoaded: (field: string, value: string) => void
     /** Release rows `holder` filed that no parent row files any more. */
     releaseFiled: (ids: readonly string[], holder: object) => void
+    /** Whether a `writeFiled` would land within the current task: the store is syncing and ready. */
+    isReady: () => boolean
     /**
      * Hold this collection live for a parent identified by `holder`, with the
      * filters covering the rows the parent filed here (query mode only).
