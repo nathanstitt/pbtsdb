@@ -140,8 +140,8 @@ export type RelationAsCollection<T> =
 export interface RelationTarget {
     /** Relation targets of this collection, for nested expand paths. */
     readonly relationTargets: Record<string, RelationTarget> | undefined
-    /** Upsert filed rows into the store. False when the store cannot take them yet. */
-    writeFiled: (records: object[]) => Promise<boolean>
+    /** Upsert filed rows into the store for `holder`, a parent's token. False when the store cannot take them yet. */
+    writeFiled: (records: object[], holder: object) => Promise<boolean>
     /**
      * A parent's fetch may file and mark `field` once `settles` resolves; the
      * target's own fetch for that subset waits for it (see docs/internals.md,
@@ -151,10 +151,11 @@ export interface RelationTarget {
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded: (field: string, value: string) => void
     /**
-     * Hold this collection live for a parent, with the filters covering the
-     * rows the parent filed here (query mode only).
+     * Hold this collection live for a parent identified by `holder`, with the
+     * filters covering the rows the parent filed here (query mode only).
+     * Releasing the hold releases every row filed under `holder`.
      */
-    holdLive: () => HeldTarget
+    holdLive: (holder: object) => HeldTarget
 }
 
 /**
@@ -464,29 +465,6 @@ export interface CreateCollectionOptions<
      * ```
      */
     realtime?: RealtimeMode
-
-    /**
-     * Whether to ignore PocketBase auto-cancellation errors.
-     *
-     * PocketBase automatically cancels pending requests when a new request is made
-     * to the same endpoint. This can throw ClientResponseError with a message
-     * containing "autocancelled". When this option is true, such errors are
-     * silently ignored and the existing cached data is returned for the cancelled request.
-     *
-     * @default true
-     *
-     * @example
-     * ```ts
-     * // Default: auto-cancellation errors are ignored
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
-     *
-     * // Explicitly handle auto-cancellation errors
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
-     *     ignoreAutoCancellation: false
-     * });
-     * ```
-     */
-    ignoreAutoCancellation?: boolean
 
     /**
      * Additional options passed directly to the underlying TanStack DB collection.

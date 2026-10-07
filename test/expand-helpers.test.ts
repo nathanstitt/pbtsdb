@@ -20,12 +20,12 @@ function target(relationTargets?: RelationTargets): RelationTarget & { marks: [s
     return {
         marks,
         relationTargets,
-        writeFiled: async () => true,
+        writeFiled: async (_records, _holder) => true,
         expectFiling: () => () => {},
         markSubsetLoaded: (field, value) => {
             marks.push([field, value])
         },
-        holdLive: () => ({ setFilters: () => {}, release: () => {} }),
+        holdLive: _holder => ({ setFilters: () => {}, release: () => {} }),
     }
 }
 

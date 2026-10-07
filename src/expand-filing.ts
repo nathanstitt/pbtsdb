@@ -106,7 +106,11 @@ export interface ExpandFiler {
     markEmptyBackRelations: (items: readonly object[], heads: readonly BackRelationHead[]) => void
 }
 
-export function createExpandFiler(collectionName: string, recordFiled: RecordFiled): ExpandFiler {
+export function createExpandFiler(
+    collectionName: string,
+    recordFiled: RecordFiled,
+    holder: object
+): ExpandFiler {
     function recordFiledGroup(
         target: RelationTarget,
         key: string,
@@ -141,7 +145,7 @@ export function createExpandFiler(collectionName: string, recordFiled: RecordFil
                 continue
             }
             const values = lastById(group.values)
-            const filed = await target.writeFiled(values)
+            const filed = await target.writeFiled(values, holder)
             await upsertExpanded(values, target.relationTargets)
             if (!filed) continue
             recordFiledGroup(target, key, group, values)

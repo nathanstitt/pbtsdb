@@ -1,4 +1,3 @@
-import { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import { describe, expect, it, vi } from 'vitest'
 import { createFetcher } from '../src/fetch-records'
@@ -21,20 +20,14 @@ function setup(count = 100) {
     const fetcher = createFetcher<Row>({
         pb,
         collectionName: 'books',
-        queryClient: new QueryClient(),
         relationTargets: undefined,
-        ignoreAutoCancellation: false,
         activeExpand: () => undefined,
         syncedRow: () => undefined,
         syncedRows: () => [],
         subsets: { isLoaded: () => false },
-        guard: {
-            trackFetch: () => ({ confirmed: new Set<string>(), done() {} }),
-            withRowsConfirmedMidFlight: items => items,
-        },
         filer: { markEmptyBackRelations() {}, upsertExpanded: async () => {} },
     })
-    const fetch = (request: PbRequest) => fetcher.fetchRecords(request, ['books', request])
+    const fetch = async (request: PbRequest) => (await fetcher.fetchRecords(request)).rows
     return { getList, getFullList, fetch }
 }
 

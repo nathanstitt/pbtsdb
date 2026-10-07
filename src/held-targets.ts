@@ -16,7 +16,7 @@ export interface HeldTargets {
     count: () => number
 }
 
-export function createHeldTargets(collectionName: string): HeldTargets {
+export function createHeldTargets(collectionName: string, holder: object): HeldTargets {
     const held = new Map<RelationTarget, HeldTarget>()
     // Kept across releases: a cached refetch re-holds without filing again.
     const filedByTarget = new Map<RelationTarget, Map<string, Set<string>>>()
@@ -50,7 +50,7 @@ export function createHeldTargets(collectionName: string): HeldTargets {
     function hold(target: RelationTarget): void {
         if (held.has(target)) return
         try {
-            const hold = target.holdLive()
+            const hold = target.holdLive(holder)
             held.set(target, hold)
             hold.setFilters(filtersFor(target))
         } catch (error) {
