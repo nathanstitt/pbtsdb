@@ -40,22 +40,30 @@ const SDK_RESERVED_OPTIONS = new Set([
 ])
 
 /**
- * The length of the topic the PocketBase SDK builds for a `subscribe('*', ..., options)`
- * call on `collectionName`. PocketBase rejects a topic over
- * `REALTIME_TOPIC_MAX_LENGTH`, and the SDK keeps a rejected topic in its list.
+ * The topic the PocketBase server expects for a wildcard subscription on
+ * `collectionName` with `options`, built the way the JS SDK builds it:
+ * every key the SDK does not reserve moves into `query`.
  */
-export function realtimeTopicLength(
+export function realtimeTopic(
     collectionName: string,
     options: RecordSubscribeOptions | undefined
-): number {
+): string {
     const topic = `${collectionName}/*`
-    if (!options) return topic.length
+    if (!options) return topic
     const query: Record<string, unknown> = { ...options.query }
     for (const [key, value] of Object.entries(options)) {
         if (!SDK_RESERVED_OPTIONS.has(key)) query[key] = value
     }
     const encoded = encodeURIComponent(JSON.stringify({ query, headers: options.headers }))
-    return `${topic}?options=${encoded}`.length
+    return `${topic}?options=${encoded}`
+}
+
+/** Length of {@link realtimeTopic}; the server rejects one over `REALTIME_TOPIC_MAX_LENGTH`. */
+export function realtimeTopicLength(
+    collectionName: string,
+    options: RecordSubscribeOptions | undefined
+): number {
+    return realtimeTopic(collectionName, options).length
 }
 
 /**
