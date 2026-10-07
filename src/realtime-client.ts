@@ -10,12 +10,15 @@ export interface RealtimeEvent {
 
 export type RealtimeListener = (event: RealtimeEvent) => void
 
-/** What the client needs from an EventSource; the global one or a React Native polyfill. */
+/**
+ * What the client needs from an EventSource: the global one or a React
+ * Native polyfill. Errors are observed through `addEventListener('error')`,
+ * which every implementation has; `react-native-sse` has no `onerror`.
+ */
 export type EventSourceLike = {
     addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     close(): void
-    onerror: ((ev: Event) => void) | null
 }
 
 export interface RealtimeClientDeps {
@@ -307,7 +310,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         const previousId = clientId
         const target = openSource(connectUrl())
         source = target
-        target.onerror = () => handleConnectionLost(target)
+        target.addEventListener('error', () => handleConnectionLost(target))
         target.addEventListener('PB_CONNECT', (ev: Event) => {
             if (source !== target) return
             const message = ev as MessageEvent

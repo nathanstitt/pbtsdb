@@ -6,9 +6,9 @@ import {
     RealtimeTopicTooLongError,
 } from '../src/realtime-client'
 
+// Like react-native-sse: errors reach listeners only, there is no `onerror`.
 class FakeEventSource implements EventSourceLike {
     static instances: FakeEventSource[] = []
-    onerror: ((ev: Event) => void) | null = null
     closed = false
     private listeners = new Map<string, Set<(ev: MessageEvent) => void>>()
 
@@ -41,7 +41,9 @@ class FakeEventSource implements EventSourceLike {
     }
 
     fail(): void {
-        this.onerror?.(new Event('error'))
+        for (const listener of this.listeners.get('error') ?? []) {
+            listener(new Event('error') as MessageEvent)
+        }
     }
 }
 
