@@ -47,7 +47,7 @@ export interface ReactProviderResult<CollectionsMap> {
  * import { useLiveQuery } from '@tanstack/react-db';
  *
  * // Step 1: Create collections
- * const c = createCollection<Schema>(pb, queryClient);
+ * const c = createCollection<Schema>(pb);
  * const collections = {
  *     books: c('books', {}),
  *     authors: c('authors', {}),
@@ -59,11 +59,9 @@ export interface ReactProviderResult<CollectionsMap> {
  * // Step 3: Wrap your app
  * function App() {
  *     return (
- *         <QueryClientProvider client={queryClient}>
- *             <Provider>
- *                 <BooksList />
- *             </Provider>
- *         </QueryClientProvider>
+ *         <Provider>
+ *             <BooksList />
+ *         </Provider>
  *     );
  * }
  *
@@ -97,7 +95,7 @@ export interface ReactProviderResult<CollectionsMap> {
  * @example
  * With relations filed via alwaysFetchRelations:
  * ```tsx
- * const c = createCollection<Schema>(pb, queryClient);
+ * const c = createCollection<Schema>(pb);
  * const authors = c('authors', { syncMode: 'on-demand' });
  * const books = c('books', {
  *     relations: { author: authors },

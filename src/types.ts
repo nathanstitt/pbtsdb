@@ -271,7 +271,7 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Allow inserting without created, updated (server-generated timestamps)
-     * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
+     * const booksCollection = createCollection<Schema>(pb)('books', {
      *     omitOnInsert: ['created', 'updated'] as const
      * });
      *
@@ -301,10 +301,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onInsert: async ({ transaction }) => {
      *         const created = await Promise.all(
      *             transaction.mutations.map(mutation => customInsertLogic(mutation.modified))
@@ -316,7 +316,7 @@ export interface CreateCollectionOptions<
      * });
      *
      * // Disable inserts (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onInsert: false
      * });
      * ```
@@ -336,10 +336,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onUpdate: async ({ transaction }) => {
      *         const updated = await Promise.all(
      *             transaction.mutations.map(mutation =>
@@ -353,7 +353,7 @@ export interface CreateCollectionOptions<
      * });
      *
      * // Disable updates (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onUpdate: false
      * });
      * ```
@@ -372,10 +372,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: async ({ transaction }) => {
      *         const ids = transaction.mutations.map(mutation => mutation.original.id);
      *         await Promise.all(ids.map(id => customDeleteLogic(id)));
@@ -386,7 +386,7 @@ export interface CreateCollectionOptions<
      * });
      *
      * // Disable deletes (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: false
      * });
      * ```
@@ -410,7 +410,7 @@ export interface CreateCollectionOptions<
      *
      * @example
      * ```ts
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     refetchOnMutation: true,
      * });
      * ```
@@ -433,10 +433,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Default: eager mode - client-side filtering
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // On-demand mode - server-side filtering
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     syncMode: 'on-demand'
      * });
      * ```
@@ -458,7 +458,7 @@ export interface CreateCollectionOptions<
      *
      * @example
      * ```ts
-     * const books = createCollection<Schema>(pb, queryClient)('books', {
+     * const books = createCollection<Schema>(pb)('books', {
      *     syncMode: 'on-demand',
      *     realtime: 'query',
      * });
@@ -471,7 +471,7 @@ export interface CreateCollectionOptions<
      * Use this to configure indexing, garbage collection, comparison functions,
      * and any other TanStack DB collection options not explicitly exposed by pbtsdb.
      *
-     * Options set here are spread into the `queryCollectionOptions()` call.
+     * Options set here are spread into the TanStack DB `createCollection()` call.
      * Fields managed by pbtsdb (`getKey`, `syncMode`, `onInsert`, `onUpdate`,
      * `onDelete`, `schema`, `utils`) are excluded from the type.
      *
@@ -481,7 +481,7 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * import { BasicIndex } from 'pbtsdb'
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     collectionOptions: {
      *         autoIndex: 'off',
      *         gcTime: 60000,

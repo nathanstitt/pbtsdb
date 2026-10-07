@@ -1,11 +1,10 @@
 import type { Collection } from '@tanstack/db'
-import type { QueryCollectionUtils } from '@tanstack/query-db-collection'
-import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import {
     buildCollection,
     type CollectionSubscriptionHelpers,
     type CreateCollectionFactoryOptions,
+    type PbCollectionUtils,
 } from './build-collection'
 import type {
     CreateCollectionOptions,
@@ -34,15 +33,11 @@ export type PbCollectionView<
 > = Collection<
     ExtractRecordType<Schema, C>,
     string | number,
-    QueryCollectionUtils<
-        ExtractRecordType<Schema, C>,
-        string | number,
-        ExtractRecordType<Schema, C>
-    >,
+    PbCollectionUtils<ExtractRecordType<Schema, C>>,
     never,
     InsertInputOf<Schema, C, Opts>
 > &
-    CollectionSubscriptionHelpers & {
+    CollectionSubscriptionHelpers<ExtractRecordType<Schema, C>> & {
         /** The PocketBase collection name */
         readonly collectionName: C
         /** @internal phantom; never present at runtime */
@@ -83,13 +78,13 @@ type AlwaysFetchRelationsCheck<Opts> = {
  * Use this when you need fine-grained control or need to create collections with dependencies.
  *
  * @param pb - PocketBase client instance
- * @param queryClient - TanStack Query client
+ * @param factoryOptions - Options applied to every collection this factory creates
  * @returns A curried function that takes collection name and options
  *
  * @example
  * Basic usage:
  * ```ts
- * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {});
+ * const booksCollection = createCollection<Schema>(pb)('books', {});
  *
  * // Use directly
  * const books = await booksCollection.getFullList();
@@ -98,8 +93,8 @@ type AlwaysFetchRelationsCheck<Opts> = {
  * @example
  * With relations fetched on every request:
  * ```ts
- * const authorsCollection = createCollection<Schema>(pb, queryClient)('authors', {});
- * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
+ * const authorsCollection = createCollection<Schema>(pb)('authors', {});
+ * const booksCollection = createCollection<Schema>(pb)('books', {
  *     relations: { author: authorsCollection },
  *     alwaysFetchRelations: ['author'],
  * });
@@ -112,7 +107,7 @@ type AlwaysFetchRelationsCheck<Opts> = {
  * @example
  * With a per-query fetchRelations view:
  * ```ts
- * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
+ * const booksCollection = createCollection<Schema>(pb)('books', {
  *     relations: { author: authorsCollection },
  * });
  *
@@ -124,7 +119,6 @@ type AlwaysFetchRelationsCheck<Opts> = {
  */
 export function createCollection<Schema extends SchemaDeclaration>(
     pb: PocketBase,
-    queryClient: QueryClient,
     factoryOptions?: CreateCollectionFactoryOptions
 ) {
     return <C extends keyof Schema & string, const Opts extends CreateCollectionOptions<Schema, C>>(
@@ -133,7 +127,6 @@ export function createCollection<Schema extends SchemaDeclaration>(
     ): PbCollection<Schema, C, Opts> => {
         return buildCollection<Schema, C>({
             pb,
-            queryClient,
             factoryOptions,
             collectionName,
             options,

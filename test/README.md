@@ -112,7 +112,7 @@ Recognizing any single top-level field in `where` (`eq`, `in`, or an `or` of tho
 ---
 
 #### `expand-helpers.test.ts`
-Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidationEvents`.
+Path helpers, plus `parseViaKey` and `markFiledSubset`.
 
 ---
 

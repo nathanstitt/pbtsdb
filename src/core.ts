@@ -23,6 +23,7 @@ export {
     toArray,
 } from '@tanstack/db'
 export type { RecordSubscribeOptions } from 'pocketbase'
+export type { PbCollectionUtils } from './build-collection'
 export {
     type CreateCollectionFactoryOptions,
     createCollection,
