@@ -342,7 +342,7 @@ describe('usePacedMutations', () => {
             page_count: 100,
         }
         const insertTx = booksCollection.insert(testBook)
-        await insertTx.isPersisted.promise
+        await insertTx.when('settled')
 
         const { result } = renderHook(
             () => {
@@ -389,7 +389,7 @@ describe('usePacedMutations', () => {
         const tx3 = result.current.mutate(250)
 
         // Wait for the debounced mutation to complete
-        await tx3.isPersisted.promise
+        await tx3.when('settled')
 
         // Verify the optimistic update was applied
         await waitFor(
@@ -431,7 +431,7 @@ describe('usePacedMutations', () => {
             page_count: 50,
         }
         const insertTx = booksCollection.insert(testBook)
-        await insertTx.isPersisted.promise
+        await insertTx.when('settled')
 
         const { result } = renderHook(
             () => {
@@ -484,7 +484,7 @@ describe('usePacedMutations', () => {
         expect(['pending', 'persisting']).toContain(tx.state)
 
         // Wait for persistence to complete
-        await tx.isPersisted.promise
+        await tx.when('settled')
         expect(tx.state).toBe('completed')
 
         // Cleanup

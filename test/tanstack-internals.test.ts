@@ -1,12 +1,29 @@
-import { createCollection, createLiveQueryCollection, type LoadSubsetOptions } from '@tanstack/db'
+import {
+    createCollection,
+    createLiveQueryCollection,
+    type LoadSubsetOptions,
+    type SyncConfig,
+} from '@tanstack/db'
 import { queryCollectionOptions } from '@tanstack/query-db-collection'
 import { QueryClient } from '@tanstack/react-query'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+type Row = { id: string; name: string }
+type SyncChannel = Pick<
+    Parameters<SyncConfig<Row, string | number>['sync']>[0],
+    'begin' | 'write' | 'commit'
+>
+type AcceptedState = {
+    getAcceptedSyncedRow?: (key: string) => Row | undefined
+    acceptedSyncedEntries?: () => Iterable<[string, Row]>
+}
 
 /**
  * pbtsdb rests on behaviours TanStack DB does not document: two behind
- * per-query expand, and the synced-row store behind the write guard. This test reproduces the mechanism with plain TanStack pieces so an
- * upgrade that changes either fails here, with a message naming the assumption.
+ * per-query expand, the accepted synced rows behind the write guard, and the
+ * cache write behind the ownership claim. This test reproduces each mechanism
+ * with plain TanStack pieces so an upgrade that changes one fails here, with
+ * a message naming the assumption.
  */
 describe('TanStack DB assumptions behind per-query expand', () => {
     it('calls subscribeChanges on the object passed to from(), and forwards extra load options to queryKey', async () => {
@@ -75,41 +92,95 @@ describe('TanStack DB assumptions behind per-query expand', () => {
         expect(live.toArray.map(row => row.id)).toEqual(['1'])
     })
 
-    it('keeps the server row on _state.syncedData while an optimistic mutation is pending', async () => {
+    it('keeps accepted sync rows apart from the optimistic overlay while a mutation persists', async () => {
         const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
         let settle: () => void = () => undefined
-        const collection = createCollection(
-            queryCollectionOptions<{ id: string; name: string }>({
-                queryClient,
-                queryKey: ['pin-synced'],
-                queryFn: async () => [{ id: '1', name: 'server' }],
-                getKey: item => item.id,
-                onUpdate: () =>
-                    new Promise<void>(resolve => {
-                        settle = resolve
-                    }),
-            })
-        )
+        let channel: SyncChannel | undefined
+        const options = queryCollectionOptions<Row>({
+            queryClient,
+            queryKey: ['pin-synced'],
+            queryFn: async () => [{ id: '1', name: 'server' }],
+            getKey: item => item.id,
+            onUpdate: () =>
+                new Promise<{ refetch: false }>(resolve => {
+                    settle = () => resolve({ refetch: false })
+                }),
+        })
+        const innerSync = options.sync.sync
+        options.sync = {
+            ...options.sync,
+            sync: params => {
+                channel = params
+                return innerSync(params)
+            },
+        }
+        const collection = createCollection(options)
         await collection.preload()
-        collection.update('1', draft => {
+        const tx = collection.update('1', draft => {
             draft.name = 'draft'
         })
 
         expect(collection.get('1')?.name).toBe('draft')
         expect(
-            collection.get('1')?.$synced,
-            'Assumption 3 broke: $synced no longer reports a pending optimistic mutation'
-        ).toBe(false)
-        const state = (
-            collection as unknown as {
-                _state?: { syncedData?: Map<string, { name: string }> }
-            }
-        )._state
+            collection.get('1')?.$hasPendingWrites,
+            'Assumption 3 broke: $hasPendingWrites no longer reports a pending optimistic mutation'
+        ).toBe(true)
+
+        // A sync transaction committed while the mutation persists is accepted
+        // but held: base still shows the old row, the accepted row the new one.
+        channel?.begin()
+        channel?.write({ type: 'update', value: { id: '1', name: 'echo' } })
+        channel?.commit()
+        const state = (collection as unknown as { _state: AcceptedState })._state
+        expect(collection.base.get('1')?.name).toBe('server')
         expect(
-            state?.syncedData?.get('1')?.name,
-            'Assumption 4 broke: collection._state.syncedData no longer holds the server row apart from the optimistic overlay. pbtsdb reads it through syncedRow/syncedRows in build-collection.ts; find the new accessor before touching anything else.'
-        ).toBe('server')
-        expect([...(state?.syncedData?.values() ?? [])]).toHaveLength(1)
+            state.getAcceptedSyncedRow?.('1')?.name,
+            'Assumption 4 broke: collection._state.getAcceptedSyncedRow no longer returns a held sync row. pbtsdb reads it through acceptedRow in build-collection.ts; find the new accessor before touching anything else.'
+        ).toBe('echo')
+        expect(
+            [...(state.acceptedSyncedEntries?.() ?? [])].map(([, row]) => row.name),
+            'Assumption 4 broke: collection._state.acceptedSyncedEntries no longer lists held sync rows'
+        ).toEqual(['echo'])
+
         settle()
+        await tx.when('settled')
+        expect(collection.get('1')?.name).toBe('echo')
+        expect(collection.get('1')?.$hasPendingWrites).toBe(false)
+    })
+
+    it('applies a cache write to an observed on-demand query as a result, owning its rows', async () => {
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        const collection = createCollection(
+            queryCollectionOptions<Row>({
+                queryClient,
+                queryKey: () => ['pin-claim'],
+                queryFn: async () => [{ id: '1', name: 'server' }],
+                getKey: item => item.id,
+                syncMode: 'on-demand',
+            })
+        )
+        const live = createLiveQueryCollection({ query: q => q.from({ r: collection }) })
+        await live.preload()
+        await vi.waitFor(() => expect(collection.has('1')).toBe(true))
+
+        queryClient.setQueryData<Row[]>(['pin-claim'], data => [
+            ...(data ?? []),
+            { id: '2', name: 'claimed' },
+        ])
+        await vi.waitFor(() =>
+            expect(
+                collection.get('2')?.name,
+                'Assumption 5 broke: query-db-collection no longer applies a cache write to an observed query. pbtsdb claims its own writes this way in synced-store.ts.'
+            ).toBe('claimed')
+        )
+
+        // Owned: a result without the row prunes it.
+        queryClient.setQueryData<Row[]>(['pin-claim'], [{ id: '1', name: 'server' }])
+        await vi.waitFor(() =>
+            expect(
+                collection.has('2'),
+                'Assumption 5 broke: a cache write no longer gives the query ownership of its rows'
+            ).toBe(false)
+        )
     })
 })

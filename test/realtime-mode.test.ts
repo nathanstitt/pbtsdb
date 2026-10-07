@@ -189,10 +189,8 @@ describe('realtime mode', () => {
             return { authors, books }
         }
 
-        const syncedHas = (collection: object, id: string) =>
-            (
-                collection as { _state: { syncedData: { has: (k: string) => boolean } } }
-            )._state.syncedData.has(id)
+        const syncedHas = (collection: { base: { has: (k: string) => boolean } }, id: string) =>
+            collection.base.has(id)
 
         it('subscribes with the query filter and delivers a matching create', async () => {
             const { books } = make()

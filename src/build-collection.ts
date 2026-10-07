@@ -7,11 +7,7 @@ import {
     type LoadSubsetOptions,
     type UpdateMutationFn,
 } from '@tanstack/db'
-import {
-    DeleteOperationItemNotFoundError,
-    type QueryCollectionUtils,
-    queryCollectionOptions,
-} from '@tanstack/query-db-collection'
+import { type QueryCollectionUtils, queryCollectionOptions } from '@tanstack/query-db-collection'
 import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
@@ -42,6 +38,7 @@ import {
     requestFromQueryKey,
     toRequest,
 } from './request'
+import { createSyncedStore, type SyncChannel } from './synced-store'
 import { createSyncedWriteGuard, type SyncedWrite } from './synced-write-guard'
 import { transportFor } from './transport'
 import type {
@@ -229,24 +226,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     // Store accessors close over `collection`, created below; every caller
-    // runs after construction. The synced (pre-optimistic) row has no public
-    // accessor; `_state.syncedData` is the field @tanstack/query-db-collection
-    // itself reads, and test/tanstack-internals.test.ts pins it.
-    const syncedRow = (id: string) => collection._state.syncedData.get(id)
-    const syncedRows = () => collection._state.syncedData.values()
+    // runs after construction. Accepted rows include sync transactions held
+    // behind a persisting mutation, which `collection.base` omits. They have
+    // no public accessor; `_state.getAcceptedSyncedRow` and
+    // `acceptedSyncedEntries` are what @tanstack/query-db-collection itself
+    // reads, and test/tanstack-internals.test.ts pins them.
+    const acceptedRow = (id: string) => collection._state.getAcceptedSyncedRow(id)
+    function* acceptedRows() {
+        for (const [, row] of collection._state.acceptedSyncedEntries()) yield row
+    }
+    const store = createSyncedStore<RecordType>({ collectionName, queryClient, acceptedRow })
     const subsets = createLoadedSubsets(collectionName, queryClient)
     const held = createHeldTargets(collectionName)
     const filer = createExpandFiler(collectionName, held.recordFiled)
     const guard = createSyncedWriteGuard<RecordType>(collectionName, {
-        isReady: () => collection.isReady(),
-        syncedRow,
+        acceptedRow,
         // A visible row reports its own overlay; an invisible row with a
         // synced copy is under an optimistic delete.
         hasPendingMutation: id => {
             const visible = collection.get(id)
-            return visible ? !visible.$synced : syncedRow(id) !== undefined
+            return visible ? visible.$hasPendingWrites : acceptedRow(id) !== undefined
         },
-        writeUpsert: records => collection.utils.writeUpsert(records),
+        applyRows: records => store.apply(records),
     })
     const fetcher = createFetcher<RecordType>({
         pb,
@@ -255,8 +256,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         relationTargets,
         ignoreAutoCancellation,
         activeExpand,
-        syncedRow,
-        syncedRows,
+        syncedRow: acceptedRow,
+        syncedRows: acceptedRows,
         subsets,
         guard,
         filer,
@@ -278,6 +279,16 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return option === false ? undefined : (option ?? fallback)
     }
 
+    // A handler lands the server's rows before it returns: TanStack DB drops
+    // the optimistic state when the handler settles, and rows written while
+    // it runs publish together with that drop. `{ refetch: false }` opts out
+    // of query-db-collection's deprecated automatic refetch; pbtsdb refetches
+    // explicitly when asked to.
+    async function settleHandler(): Promise<{ refetch: false }> {
+        if (refetchOnMutation) await collection.utils.refetch()
+        return { refetch: false }
+    }
+
     const defaultInsert: InsertMutationFn<RecordType> = async ({ transaction }) => {
         const created = await Promise.all(
             transaction.mutations.map(async mutation => {
@@ -291,8 +302,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return pb.collection(collectionName).create(data)
             })
         )
-        guard.writeBackAfterPersisted(transaction, created)
-        return { refetch: refetchOnMutation }
+        guard.landServerRows(created)
+        return settleHandler()
     }
 
     const defaultUpdate: UpdateMutationFn<RecordType> = async ({ transaction }) => {
@@ -301,17 +312,19 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return pb.collection(collectionName).update(mutation.original.id, mutation.changes)
             })
         )
-        guard.writeBackAfterPersisted(transaction, updated)
-        return { refetch: refetchOnMutation }
+        guard.landServerRows(updated)
+        return settleHandler()
     }
 
     const defaultDelete: DeleteMutationFn<RecordType> = async ({ transaction }) => {
-        await Promise.all(
+        const ids = await Promise.all(
             transaction.mutations.map(async mutation => {
                 await pb.collection(collectionName).delete(mutation.original.id)
+                return mutation.original.id
             })
         )
-        return { refetch: refetchOnMutation }
+        store.apply([], ids)
+        return settleHandler()
     }
 
     // TanStack DB 0.6 turned auto-indexing off by default; without an index an
@@ -377,21 +390,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     collectionOptions.sync = {
         ...collectionOptions.sync,
         sync: (params: Parameters<typeof innerSync>[0]) => {
+            // Only query-db-collection's writes pass through here; pbtsdb's
+            // own go straight to `params` through `store`. A prune deletes by
+            // key alone, so the row it removes is read before the write.
             const guardedWrite: typeof params.write = message => {
                 const op = message as SyncedWrite
-                if (op.type === 'delete' && !guard.isOwnWrite()) subsets.forgetRow(op.value)
+                if (op.type === 'delete') {
+                    subsets.forgetRow(op.value ?? acceptedRow(String(op.key)))
+                }
                 if (guard.shouldDrop(op)) return
                 return params.write(message)
             }
+            const channel: SyncChannel<RecordType> = params
+            store.attach(channel)
             const res = innerSync({ ...params, write: guardedWrite })
-            if (!res) return res
-            const parts = typeof res === 'function' ? { cleanup: res } : res
+            const parts = typeof res === 'function' ? { cleanup: res } : (res ?? {})
             const { cleanup, loadSubset, unloadSubset } = parts
             return {
                 ...parts,
                 // TanStack drops a discarded sync session's demands without
                 // unloadSubset and reloads them on the next session.
                 cleanup: () => {
+                    store.detach(channel)
                     retainedFilters = new WeakMap()
                     realtime.resetQueryFilters()
                     return cleanup?.()
@@ -507,50 +527,40 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return true
     }
 
+    // A delete for a key already gone writes nothing: a prune or an earlier
+    // echo removed it, and the row is in its end state either way.
+    function applyRealtimeDelete(id: string): void {
+        if (!acceptedRow(id)) {
+            logger.debug('Ignoring delete echo for already-removed record', { collectionName, id })
+        }
+        store.apply([], [id])
+    }
+
     function handleRealtimeEvent(event: RecordSubscription<RecordType>): void {
-        if (!collection.utils) return
         // Before the stale filter: even a stale create/update echo proves the
         // server holds the row. Delete echoes need no marking.
         if (event.action !== 'delete') guard.markConfirmedPresent([event.record])
         if (isStaleEcho(event)) return
 
+        if (event.action === 'delete') {
+            const id = idOf(event.record)
+            if (id) applyRealtimeDelete(id)
+            return
+        }
         const [stored] = stripFetchedRelations([event.record], pendingSubscribeExpand())
-        try {
-            guard.writeOwn(() =>
-                collection.utils.writeBatch(() => {
-                    switch (event.action) {
-                        case 'create':
-                            collection.utils.writeInsert(stored)
-                            break
-                        case 'update':
-                            collection.utils.writeUpsert(stored)
-                            break
-                        case 'delete': {
-                            const id = idOf(event.record)
-                            if (id) collection.utils.writeDelete(id)
-                            break
-                        }
-                    }
-                })
-            )
-        } catch (error) {
-            // writeDelete throws when a prune or an earlier echo already removed
-            // the key; the row is gone either way, so the echo is a no-op.
-            if (!(error instanceof DeleteOperationItemNotFoundError)) throw error
-            logger.debug('Ignoring delete echo for already-removed record', {
+        if (!store.apply([stored])) {
+            logger.debug('Ignoring realtime echo while sync is not running', {
                 collectionName,
                 id: idOf(event.record),
             })
+            return
         }
-
-        if (event.action !== 'delete') {
-            filer.upsertExpanded([event.record], relationTargets).catch(error =>
-                logger.error('Failed to upsert expanded records from realtime echo', {
-                    collectionName,
-                    error,
-                })
-            )
-        }
+        filer.upsertExpanded([event.record], relationTargets).catch(error =>
+            logger.error('Failed to upsert expanded records from realtime echo', {
+                collectionName,
+                error,
+            })
+        )
     }
 
     // Receives rows a parent expanded through a relation to this collection.
@@ -569,8 +579,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             }
             await collection.preload()
         }
-        collection.utils.writeUpsert(withoutExpand(records) as RecordType[])
-        return true
+        return store.apply(withoutExpand(records) as RecordType[])
     }
 
     // A parent's hold on this collection as a relation target. Keeps sync

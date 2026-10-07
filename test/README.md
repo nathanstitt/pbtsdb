@@ -66,6 +66,21 @@ A delete echo for a row already gone from the synced store is ignored.
 
 ---
 
+#### `synced-store.test.ts`
+Unit coverage for pbtsdb's sync-session writer against a fake session: insert versus update, copies, deletes of absent rows, the cache claim, and cancelling a failed transaction.
+
+---
+
+#### `sync-channel.test.ts`
+Realtime rows are written through the sync session as copies, so a reused event record cannot change the stored row.
+
+---
+
+#### `settle-write-back.test.ts`
+The built-in handlers land the server row before they settle, so the row never shows its previous value when TanStack DB drops the optimistic state.
+
+---
+
 #### `query-result-revert.test.ts`, `refetch-on-mutation-revert.test.ts`, `stale-absence-delete.test.ts`
 Races between optimistic mutations, stale query results, and stale realtime echoes under on-demand sync. Each file names the race it pins.
 
@@ -102,7 +117,7 @@ Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidati
 ---
 
 #### `tanstack-internals.test.ts`
-Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, and `_state.syncedData` behind the write guard. If this fails after an upgrade, read the assertion message before touching anything else.
+Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, the accepted synced rows (`_state.getAcceptedSyncedRow`, `acceptedSyncedEntries`) behind the write guard, and the cache write behind the ownership claim. If this fails after an upgrade, read the assertion message before touching anything else.
 
 ---
 

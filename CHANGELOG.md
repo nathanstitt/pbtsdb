@@ -7,6 +7,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `@tanstack/db` >=0.12.1, `@tanstack/query-db-collection` >=1.4.0,
+  and `@tanstack/react-db` >=0.5.5.
+- pbtsdb writes realtime echoes, mutation write-backs, and filed relation rows
+  through the collection's sync session instead of query-db-collection's
+  direct writes. Since query-db-collection 1.3 a direct write to an
+  on-demand collection refetches every active query; pbtsdb's own writes
+  cause no request. Each written row is added to every cached query of the
+  collection, so those queries own it as before.
+- The built-in insert and update handlers write the server response, and the
+  built-in delete handler removes the row, before they return. TanStack DB
+  0.12 drops the optimistic state when the handler settles; the settled row is
+  now the server's row with no gap in which the previous row shows.
+- `refetchOnMutation: true` refetches with `collection.utils.refetch()` before
+  the handler settles. The built-in handlers always return
+  `{ refetch: false }`, so query-db-collection logs no deprecation warning.
+- `collectionOptions` no longer accepts `utils`, which pbtsdb manages.
+
+### Fixed
+
+- A row pruned by a query refetch (a delete by key alone) now forgets the
+  loaded-subset marks it belonged to. Only a prune that carried the row did
+  before, so a subset could stay marked complete without the row.
+- pbtsdb stores a copy of each row it writes. A caller that changes an event
+  record in place can no longer change the stored row, and TanStack DB's
+  development check `SyncRowReusedWithoutPreviousValueError` cannot fire on
+  pbtsdb's writes.
+
 ## [0.12.0] - 2026-10-07
 
 ### Changed
@@ -21,7 +50,6 @@ All notable changes to this project will be documented in this file.
 
 - Resume protocol for servers that support it: `?resume=<clientId>&after=<seq>`, `resumed` in `PB_CONNECT`, `seq` on events.
 - `resetRealtime(pb)`: call after an auth change (login, logout, switching users) so the shared connection re-subscribes every topic under the new auth instead of silently keeping the previous session.
-- Internal: `realtimeClientFor(pb)` is exported for tests that intercept realtime events.
 
 ## [0.11.0] - 2026-10-05
 

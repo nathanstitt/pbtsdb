@@ -63,7 +63,7 @@ describe('Collection - Mutations', () => {
 
         expect(['pending', 'persisting']).toContain(tx.state)
 
-        await tx.isPersisted.promise
+        await tx.when('settled')
 
         expect(tx.state).toBe('completed')
 
@@ -102,7 +102,7 @@ describe('Collection - Mutations', () => {
 
         expect(['pending', 'persisting']).toContain(tx.state)
 
-        await tx.isPersisted.promise
+        await tx.when('settled')
 
         expect(tx.state).toBe('completed')
 
@@ -146,7 +146,7 @@ describe('Collection - Mutations', () => {
         }
 
         const tx = collection.insert(newBook)
-        await tx.isPersisted.promise
+        await tx.when('settled')
 
         // Verify liveQuery data updated to include the new record
         await waitFor(
@@ -277,7 +277,7 @@ describe('Collection - Mutations', () => {
             page_count: 0,
         }
         const tx = collection.insert(newBook)
-        await tx.isPersisted.promise
+        await tx.when('settled')
 
         // `updated` is server-assigned and omitted from the draft: the visible
         // row must carry it once the transaction has persisted.
@@ -319,7 +319,7 @@ describe('Collection - Mutations', () => {
             }
 
             const tx = collection.insert(newBook)
-            await tx.isPersisted.promise
+            await tx.when('settled')
 
             expect(getFullListSpy).not.toHaveBeenCalled()
 
@@ -361,7 +361,7 @@ describe('Collection - Mutations', () => {
                 const tx = collection.update(seed.id, draft => {
                     ;(draft as Books).title = `Updated ${Date.now().toString().slice(-8)}`
                 })
-                await tx.isPersisted.promise
+                await tx.when('settled')
 
                 expect(getFullListSpy).not.toHaveBeenCalled()
             } finally {
@@ -400,7 +400,7 @@ describe('Collection - Mutations', () => {
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
 
             const tx = collection.delete(seed.id)
-            await tx.isPersisted.promise
+            await tx.when('settled')
 
             expect(getFullListSpy).not.toHaveBeenCalled()
         }, 15000)

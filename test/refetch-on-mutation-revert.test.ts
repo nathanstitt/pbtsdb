@@ -112,12 +112,10 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         return record as unknown as Books
     }
 
-    const syncedGet = (collection: unknown, id: string) =>
-        (
-            collection as {
-                _state: { syncedData: { get: (k: string) => Books | undefined } }
-            }
-        )._state.syncedData.get(id)
+    const syncedGet = (
+        collection: { base: { get: (k: string) => Books | undefined } },
+        id: string
+    ) => collection.base.get(id)
 
     /** An ISO 8601 `updated` value one second older than the given record. */
     const olderThan = (record: Books): string => {
@@ -163,7 +161,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
             { timeout: 2000 }
         )
 
-        await tx.isPersisted.promise
+        await tx.when('settled')
         expect(tx.state).toBe('completed')
 
         return { handlerRef, seed, collection, result }
@@ -270,7 +268,7 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
         expect(state.optimisticUpserts.has(seed.id)).toBe(false)
         expect(state.optimisticDeletes.has(seed.id)).toBe(false)
 
-        await tx.isPersisted.promise
+        await tx.when('settled')
 
         // Only now — after server confirmation — does the row reflect the move,
         // via the write-back applying the confirmed server value.

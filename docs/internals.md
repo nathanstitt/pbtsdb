@@ -2,48 +2,61 @@
 
 Design notes for the parts of the collection runtime whose reason is not visible in the code. Each section names the module and functions that hold the behavior.
 
+## Authoritative writes
+
+`src/synced-store.ts`: `createSyncedStore`, `apply`, `claim`; `src/build-collection.ts`: the `sync` wrapper
+
+pbtsdb writes three kinds of rows itself: realtime echoes, the server rows a built-in mutation handler lands, and expanded rows a parent files into a relation target. They go through the collection's running sync session (`begin`, `write`, `commit`), not through query-db-collection's direct-write utilities. Since query-db-collection 1.3, a direct write to an on-demand collection invalidates and refetches every active query of the collection. A realtime echo would then cost one request per active query, and filing into a target whose queries expand relations of their own could refetch in a loop.
+
+The `sync` wrapper binds the session's `begin`, `write`, and `commit` to the store when TanStack starts sync, and unbinds them on cleanup. With no session bound, `apply` writes nothing and returns false: the next query fetches the current rows anyway.
+
+A row is owned by the queries whose cached results hold it. query-db-collection prunes an owned row when a refetch of its last owner omits it, and drops it when its last owner unloads. A row written through the session has no owner, so `claim` adds each written row to every cached query of the collection with `setQueryData` and removes each deleted row. query-db-collection applies the cache write as a result of each observed query, which records the ownership. This is the ownership query-db-collection's own writes gave before 1.3, when they pushed the synced store into every cached query.
+
+`apply` copies each row before it writes it. TanStack DB keeps the written object as the stored row; a copy keeps a caller's later in-place change out of the store and keeps pbtsdb clear of the development-only `SyncRowReusedWithoutPreviousValueError`.
+
 ## Write-back timing
 
-`src/synced-write-guard.ts`: `writeBackAfterPersisted`
+`src/synced-write-guard.ts`: `landServerRows`; `src/build-collection.ts`: `defaultInsert`, `defaultUpdate`, `defaultDelete`
 
-TanStack DB keeps a completed transaction's optimistic draft visible until a synced write for the key arrives. A record the server fills in (a number, a timestamp) reaches the screen only through that later synced write.
+TanStack DB 0.12 drops a transaction's optimistic state when its mutation handler settles. From then until a synced row arrives, the row shows its previous synced value: an updated row reverts, an inserted row disappears, and a deleted row comes back. A sync transaction committed while the handler runs is accepted and held, and publishes together with the drop.
 
-A write-back issued from inside the mutation handler lands while the transaction is still `persisting`. TanStack applies it, then on completion re-adds the draft as a "confirmed but unsynced" overlay and waits for a synced write that already happened. If the realtime echo was also already consumed (it can arrive before the create resolves, and an echo with the same `updated` as the write-back is dropped as stale), nothing clears the overlay. The row shows the draft, minus every server-assigned field, until a reload.
+The built-in handlers therefore land the server response before they return: `landServerRows` for an insert or update, `apply` with the deleted ids for a delete. `markConfirmedPresent` runs first, because the in-flight fetch bookkeeping must know the rows are confirmed the moment the server said so. A row the store already supersedes is dropped, because a realtime echo may have landed a newer copy while the request was in flight. The realtime echo that follows is equal to the landed row, or finds a deleted key gone.
 
-Deferring the write-back to after persistence makes it the synced write TanStack waits for. `markConfirmedPresent` still runs immediately, because the in-flight fetch bookkeeping must know the rows are confirmed the moment the server said so.
+The handlers return `{ refetch: false }`. query-db-collection still refetches after a handler that returns anything else, and logs a deprecation warning; `refetchOnMutation: true` calls `collection.utils.refetch()` explicitly instead.
 
-The deferred write is a no-op when the collection is not ready. Writing into the synced store before sync has initialized throws, and with no live query the next query fetches the persisted state anyway. It also drops any row the store already supersedes, because a realtime echo may have landed a newer copy while the transaction settled.
+Before 0.12 the write-back had to wait for persistence: TanStack kept a completed transaction's draft visible until a later synced write for the key, so a write-back inside the handler was consumed too early and the draft lingered.
 
 ## Confirmed rows and in-flight fetches
 
 `src/synced-write-guard.ts`: `trackFetch`, `markConfirmedPresent`, `withRowsConfirmedMidFlight`
 
-`@tanstack/query-db-collection`'s `applySuccessfulResult` deletes every row a query owns that its result omits, and the synced-write guard exempts deletes. A subset read issued before a row existed can resolve late and delete the just-confirmed row. Rows a query owns include rows pushed into its cache by the manual-write path that runs on every write-back.
+`@tanstack/query-db-collection`'s `applySuccessfulResult` deletes every row a query owns that its result omits, and the synced-write guard exempts deletes. A subset read issued before a row existed can resolve late and delete the just-confirmed row. Rows a query owns include rows `claim` added to its cache on every pbtsdb write (see "Authoritative writes").
 
 Each in-flight fetch registers a set before its request goes out. Confirmed local writes (write-backs and realtime echoes) add their ids to every registered set. An id added after a fetch was issued is newer than that fetch's view of the server, so the result cannot speak to its absence.
 
-The fix is applied to the result, not the delete. `fetchRecords` merges such rows back in, which prevents the delete and keeps the row owned by the query. Dropping the delete alone would strip ownership and leave the row to a later GC pass. The merge ignores the fetch's filter on purpose: the manual-write cache push grants every active query ownership of every synced row, so a row outside the subset's filter must also be shielded from its reconcile.
+The fix is applied to the result, not the delete. `fetchRecords` merges such rows back in, which prevents the delete and keeps the row owned by the query. Dropping the delete alone would strip ownership and leave the row to a later GC pass. The merge ignores the fetch's filter on purpose: `claim` grants every cached query ownership of every row pbtsdb writes, so a row outside the subset's filter must also be shielded from its reconcile.
 
 ## Staleness
 
 `src/synced-write-guard.ts`: `isStaleServerRecord`, `shouldDrop`; `src/build-collection.ts`: `isStaleEcho`
 
-A server record is stale when the synced store holds a newer `updated` for the same key. PocketBase can redeliver or reorder realtime echoes, and a slow mutation response can resolve after a newer echo. Strictly older, never equal: PocketBase bumps `updated` on every write, so an equal timestamp is the same version of the row, and re-landing it is what clears a lingering optimistic overlay.
+A server record is stale when the synced store holds a newer `updated` for the same key. The comparison reads the accepted row: a sync transaction held behind a persisting mutation is accepted before it is visible, and it applies before any later write, so `collection.base` (visible rows only) would let an older write through to revert it. PocketBase can redeliver or reorder realtime echoes, and a slow mutation response can resolve after a newer echo. Strictly older, never equal: PocketBase bumps `updated` on every write, so an equal timestamp is the same version of the row, and re-landing it is what clears a lingering optimistic overlay.
 
-An earlier `<=` variant on the query-result path guarded against a read carrying old content under a new timestamp, which a real server cannot produce. The revert it chased was the write-back racing its own transaction, fixed by the write-back timing above.
+An earlier `<=` variant on the query-result path guarded against a read carrying old content under a new timestamp, which a real server cannot produce. The revert it chased was the write-back racing its own transaction (see "Write-back timing").
 
-`shouldDrop` guards the synced write path pbtsdb does not control. `applySuccessfulResult` reconciles every query result into the synced store with no recency or optimistic check, so under on-demand contention a subset read can resolve with a pre-mutation row after the row moved on. A synced insert or update is dropped when it targets a key with a pending optimistic mutation, or when it is strictly older than the synced row. Only a key already in the synced store is guarded by the optimistic arm: a write to a key the store lacks is populating it, and dropping it would leave the row absent once the overlay clears. pbtsdb's own writes skip the optimistic arm; they are filtered for staleness upstream.
+`shouldDrop` guards the synced write path pbtsdb does not control. `applySuccessfulResult` reconciles every query result into the synced store with no recency or optimistic check, so under on-demand contention a subset read can resolve with a pre-mutation row after the row moved on. A synced insert or update is dropped when it targets a key with a pending optimistic mutation (`$hasPendingWrites`), or when it is strictly older than the synced row. Only a key already in the synced store is guarded by the optimistic arm: a write to a key the store lacks is populating it, and dropping it would leave the row absent once the overlay clears. pbtsdb's own writes go to the session directly and never pass `shouldDrop`; they are filtered for staleness upstream.
 
 ## Delete echoes
 
-`src/build-collection.ts`: `handleRealtimeEvent`
+`src/build-collection.ts`: `handleRealtimeEvent`, `applyRealtimeDelete`
 
-`writeInsert` and `writeUpsert` never throw on an absent key. `writeDelete` throws `DeleteOperationItemNotFoundError` when the key is already gone from the synced store. That happens in two cases:
+A delete echo can name a key already gone from the synced store:
 
-1. On-demand sync. Each live query refetches with a server filter, and `query-db-collection` prunes rows no longer owned by any active query. If that prune runs before this client's own delete echo lands, the key is gone. Eager collections have no second writer to the synced store, so they cannot hit this.
-2. A redelivered SSE delete after a reconnect, for a key already deleted.
+1. On-demand sync. query-db-collection prunes rows no longer owned by any active query. If that prune runs before this client's own delete echo lands, the key is gone.
+2. A built-in delete handler removed the row before it settled (see "Write-back timing").
+3. A redelivered SSE delete after a reconnect, for a key already deleted.
 
-In both cases the row is already in its intended end state, so the echo is a no-op. Any other error is rethrown.
+In each case the row is already in its intended end state. `apply` writes nothing for an absent key, and the handler logs a debug breadcrumb. The deleted id still leaves every cached result, so no query restores the row when it next mounts.
 
 ## Pending filings
 
@@ -60,6 +73,8 @@ Invariant: a fetch that registers pending filings never waits on them. A fetch's
 `src/loaded-subsets.ts`: `forgetRow`, `invalidateAll`
 
 A mark records that every row with `field === value` is in the store, so a subset query on that field is served without a request. A subset query that resolved once is served from `query-db-collection`'s observer cache on the next mount regardless of marks, so forgetting a mark must also invalidate that cached query. Releasing every mark on a real subscription stop invalidates them all for the same reason.
+
+`forgetRow` runs for every delete query-db-collection writes, which is a prune; pbtsdb's own deletes leave a subset complete and skip it. A prune deletes by key alone, so the guarded write reads the row from the accepted store to know which marks it belonged to.
 
 `forgetRow` defers its invalidation with `queueMicrotask`. It runs inside the guarded sync write, which is inside TanStack's write batch, and `invalidateQueries` can start a `queryFn` synchronously up to its first await. That must not re-enter `fetchRecords` mid-batch.
 

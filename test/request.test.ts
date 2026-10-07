@@ -1,17 +1,16 @@
-import type { IR } from '@tanstack/db'
-import { and, eq, gt, lt } from '@tanstack/db'
+import { and, eq, gt, IR, lt } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
 import { realtimeFiltersFor, toRequest } from '../src/request'
 
-const field = <T = unknown>(path: string[]) =>
-    ({ type: 'ref', path }) as unknown as IR.BasicExpression<T>
-const orderBy = (name: string, direction: 'asc' | 'desc') =>
-    [
-        {
-            expression: { type: 'ref', path: [name] },
-            compareOptions: { direction, nulls: 'first', stringSort: 'lexical' },
-        },
-    ] as unknown as IR.OrderBy
+// The builders treat a plain `{ type: 'ref' }` object as a value; only a
+// constructed IR node is an expression.
+const field = <T = unknown>(path: string[]) => new IR.PropRef<T>(path)
+const orderBy = (name: string, direction: 'asc' | 'desc'): IR.OrderBy => [
+    {
+        expression: new IR.PropRef([name]),
+        compareOptions: { direction, nulls: 'first', stringSort: 'lexical' },
+    },
+]
 
 describe('toRequest paging', () => {
     it('conjoins nothing when no cursor is given', () => {

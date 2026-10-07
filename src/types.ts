@@ -305,10 +305,12 @@ export interface CreateCollectionOptions<
      * // Custom handler
      * const collection = createCollection<Schema>(pb, queryClient)('books', {
      *     onInsert: async ({ transaction }) => {
-     *         for (const mutation of transaction.mutations) {
-     *             await customInsertLogic(mutation.modified);
-     *         }
-     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *         const created = await Promise.all(
+     *             transaction.mutations.map(mutation => customInsertLogic(mutation.modified))
+     *         );
+     *         // Land the server rows before the optimistic state drops
+     *         await collection.utils.writeUpsert(created);
+     *         return { refetch: false };
      *     }
      * });
      *
@@ -338,10 +340,14 @@ export interface CreateCollectionOptions<
      * // Custom handler
      * const collection = createCollection<Schema>(pb, queryClient)('books', {
      *     onUpdate: async ({ transaction }) => {
-     *         for (const mutation of transaction.mutations) {
-     *             await customUpdateLogic(mutation.original.id, mutation.changes);
-     *         }
-     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *         const updated = await Promise.all(
+     *             transaction.mutations.map(mutation =>
+     *                 customUpdateLogic(mutation.original.id, mutation.changes)
+     *             )
+     *         );
+     *         // Land the server rows before the optimistic state drops
+     *         await collection.utils.writeUpsert(updated);
+     *         return { refetch: false };
      *     }
      * });
      *
@@ -370,10 +376,11 @@ export interface CreateCollectionOptions<
      * // Custom handler
      * const collection = createCollection<Schema>(pb, queryClient)('books', {
      *     onDelete: async ({ transaction }) => {
-     *         for (const mutation of transaction.mutations) {
-     *             await customDeleteLogic(mutation.original.id);
-     *         }
-     *         await queryClient.invalidateQueries({ queryKey: ['books'] });
+     *         const ids = transaction.mutations.map(mutation => mutation.original.id);
+     *         await Promise.all(ids.map(id => customDeleteLogic(id)));
+     *         // Remove the rows before the optimistic state drops
+     *         await collection.utils.writeDelete(ids);
+     *         return { refetch: false };
      *     }
      * });
      *
@@ -386,15 +393,17 @@ export interface CreateCollectionOptions<
     onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
-     * If true, refetch the entire collection after a successful insert,
-     * update, or delete. Defaults to false: the built-in insert/update handlers
-     * write the server response straight back into the synced layer, and the
-     * realtime subscription reconciles everything else. Set true if you do not
-     * trust realtime to reconcile in time (e.g. flaky socket, server-side hooks
-     * producing fields you must read synchronously).
+     * If true, the built-in handlers refetch the collection's active queries
+     * after a successful insert, update, or delete, before the mutation
+     * settles. Defaults to false: the built-in handlers write the server
+     * response into the synced layer before they settle, and the realtime
+     * subscription reconciles everything else. Set true when a server-side
+     * hook changes rows you must read right after the mutation.
      *
-     * Only affects the built-in default handlers. If you supply your own
-     * onInsert/onUpdate/onDelete, you control the return value yourself.
+     * Only affects the built-in default handlers. A custom
+     * onInsert/onUpdate/onDelete should write the server response with
+     * `collection.utils.writeUpsert` before it returns and return
+     * `{ refetch: false }`; see the README, "Mutations and Refetch".
      *
      * @default false
      *
@@ -486,7 +495,7 @@ export interface CreateCollectionOptions<
      *
      * Options set here are spread into the `queryCollectionOptions()` call.
      * Fields managed by pbtsdb (`getKey`, `syncMode`, `onInsert`, `onUpdate`,
-     * `onDelete`, `schema`) are excluded from the type.
+     * `onDelete`, `schema`, `utils`) are excluded from the type.
      *
      * pbtsdb defaults `autoIndex` to `'eager'` with `defaultIndexType: BTreeIndex`
      * so `orderBy` + `limit` queries page lazily; both can be overridden here.
@@ -504,6 +513,6 @@ export interface CreateCollectionOptions<
      */
     collectionOptions?: Omit<
         Partial<BaseCollectionConfig<ExtractRecordType<Schema, CollectionName>, string | number>>,
-        'getKey' | 'syncMode' | 'onInsert' | 'onUpdate' | 'onDelete' | 'schema'
+        'getKey' | 'syncMode' | 'onInsert' | 'onUpdate' | 'onDelete' | 'schema' | 'utils'
     >
 }
