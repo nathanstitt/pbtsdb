@@ -1,0 +1,123 @@
+import type { Holder, Ledger, LedgerWrites } from './ledger'
+import { idOf } from './records'
+import type { SyncedStore, SyncWrite } from './synced-store'
+
+/** A commit receipt, or false when no sync session is running. */
+export type Applied = true | Promise<void> | false
+
+export interface MembershipDeps<T extends object> {
+    collectionName: string
+    ledger: Ledger<T>
+    store: SyncedStore<T>
+    /** Rows that left the store, for mark bookkeeping. */
+    onRemoved: (rows: readonly T[]) => void
+}
+
+/**
+ * Ledger changes as sync transactions. Every row the store gains or loses
+ * goes through here (see docs/internals.md, "Ledger").
+ */
+export interface Membership<T extends object> {
+    /** Reference `rows` for `holder`; new and newer rows are written. */
+    land: (holder: Holder, rows: readonly T[]) => Applied
+    /** Make `rows` exactly what `holder` references; rows it no longer holds may leave. */
+    reconcile: (holder: Holder, rows: readonly T[]) => Applied
+    /** Release `ids` (all of theirs when omitted) from `holders`; rows at zero leave. */
+    drop: (holders: readonly Holder[], ids?: Iterable<string>) => Applied
+    /** Remove `ids` from every holder. */
+    dropAll: (ids: Iterable<string>) => Applied
+}
+
+type Change<T> = { writes: SyncWrite<T>[]; gone: T[] }
+
+const NO_WRITES = { inserted: [], updated: [] }
+
+export function createMembership<T extends object>(deps: MembershipDeps<T>): Membership<T> {
+    const { ledger, store } = deps
+
+    // Ordered by `rows`, the input order, rather than by insert/update bucket:
+    // a channel that journals writes should see them in the order they
+    // arrived, not grouped by kind.
+    function writesFor(
+        rows: readonly T[],
+        changes: LedgerWrites<T>,
+        removed: readonly string[]
+    ): SyncWrite<T>[] {
+        const inserted = new Set(changes.inserted.map(idOf))
+        const updated = new Map(changes.updated.map(value => [idOf(value), value] as const))
+        const writes: SyncWrite<T>[] = []
+        for (const row of rows) {
+            const id = idOf(row)
+            if (id === undefined) continue
+            if (inserted.has(id)) writes.push({ type: 'insert', value: row })
+            else if (updated.has(id)) writes.push({ type: 'update', value: updated.get(id) as T })
+        }
+        for (const key of removed) writes.push({ type: 'delete', key })
+        return writes
+    }
+
+    function rowsBefore(ids: readonly string[]): Map<string, T> {
+        const rows = new Map<string, T>()
+        for (const id of ids) {
+            const row = ledger.row(id)
+            if (row) rows.set(id, row)
+        }
+        return rows
+    }
+
+    function pick(rows: Map<string, T>, ids: readonly string[]): T[] {
+        return ids.map(id => rows.get(id)).filter((row): row is T => row !== undefined)
+    }
+
+    // The ledger change and its sync transaction succeed or fail together:
+    // a throwing write rolls the ledger back, so the two never disagree.
+    function apply(change: () => Change<T>): Applied {
+        if (!store.isAttached()) return false
+        const tracked = ledger.track()
+        let receipt: Applied
+        let gone: T[]
+        try {
+            const result = change()
+            gone = result.gone
+            receipt = store.transact(result.writes)
+        } catch (error) {
+            tracked.rollback()
+            throw error
+        }
+        tracked.commit()
+        if (gone.length > 0) deps.onRemoved(gone)
+        return receipt
+    }
+
+    return {
+        land: (holder, rows) =>
+            apply(() => ({ writes: writesFor(rows, ledger.retain(holder, rows), []), gone: [] })),
+        reconcile: (holder, rows) =>
+            apply(() => {
+                const before = rowsBefore(ledger.idsOf(holder))
+                const { removed, ...changes } = ledger.replace(holder, rows)
+                return { writes: writesFor(rows, changes, removed), gone: pick(before, removed) }
+            }),
+        drop: (holders, ids) =>
+            apply(() => {
+                const listed = ids ? [...ids] : undefined
+                const removed: string[] = []
+                const gone: T[] = []
+                for (const holder of holders) {
+                    const held = listed ?? ledger.idsOf(holder)
+                    const before = rowsBefore(held)
+                    const released = ledger.release(holder, held)
+                    removed.push(...released)
+                    gone.push(...pick(before, released))
+                }
+                return { writes: writesFor([], NO_WRITES, removed), gone }
+            }),
+        dropAll: ids =>
+            apply(() => {
+                const present = [...ids].filter(id => ledger.has(id))
+                const gone = pick(rowsBefore(present), present)
+                for (const id of present) ledger.releaseAll(id)
+                return { writes: writesFor([], NO_WRITES, present), gone }
+            }),
+    }
+}
