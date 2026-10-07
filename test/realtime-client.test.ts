@@ -697,6 +697,45 @@ describe('realtime client', () => {
         expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
     })
 
+    it('reset while the first POST is in flight still reports a reload from the new connection', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const reconnects: boolean[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const firstSource = FakeEventSource.instances.at(-1)
+        if (!firstSource) throw new Error('no EventSource opened')
+        firstSource.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        expect(sent).toHaveLength(1)
+
+        client.reset()
+        gate.shift()?.()
+        await flush()
+        expect(reconnects).toEqual([])
+
+        const second = FakeEventSource.instances.at(-1)
+        if (!second || second === firstSource) throw new Error('no second EventSource opened')
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+        gate.shift()?.()
+        await sub
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+        expect(reconnects).toEqual([false])
+    })
+
     it('reset with no topics registered opens no connection', async () => {
         const client = createRealtimeClient({
             url: 'http://pb.test/api/realtime',

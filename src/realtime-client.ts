@@ -291,18 +291,19 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                 confirmed = []
             }
             attachAll(target)
+            // Set on connect, not after the POST: a reset() while the first
+            // POST is in flight replaces `source`, and the connection it opens
+            // must still count as a reconnect so the gap is reloaded.
             const isReconnect = everConnected
+            everConnected = true
             submit().then(
                 () => {
                     if (source !== target) return
                     attempts = 0
                     if (isReconnect) deps.onReconnect?.(resumed)
-                    everConnected = true
                 },
                 () => {
-                    if (source !== target) return
-                    everConnected = true
-                    if (!isReconnect) return
+                    if (source !== target || !isReconnect) return
                     close(false)
                     scheduleReconnect()
                 }

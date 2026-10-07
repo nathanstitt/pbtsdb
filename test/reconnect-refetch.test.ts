@@ -150,7 +150,7 @@ describe('reconnect refetch lifecycle', () => {
                 ),
             { timeout: 10000 }
         )
-        expect(getFullList).toHaveBeenCalledTimes(1)
+        await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
 
         await books.cleanup()
         getFullList.mockRestore()
