@@ -15,6 +15,8 @@ export interface Transport {
     ) => Promise<Unsubscribe>
     /** Called after every reconnect of the shared connection. */
     onReconnect: (listener: (resumed: boolean) => void) => () => void
+    /** @internal Number of listeners registered through `onReconnect`; tests assert on it. */
+    reconnectListenerCount: () => number
 }
 
 type Entry = { client: RealtimeClient; reconnectListeners: Set<(resumed: boolean) => void> }
@@ -60,5 +62,6 @@ export function transportFor(pb: PocketBase): Transport {
                 entry.reconnectListeners.delete(listener)
             }
         },
+        reconnectListenerCount: () => entry.reconnectListeners.size,
     }
 }
