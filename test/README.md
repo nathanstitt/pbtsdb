@@ -31,6 +31,12 @@ Full-list fetches past the default page size, and `limit` against on-demand coll
 
 ---
 
+#### `relation-filings.test.ts`
+Filed relation rows follow their parent rows: a filed row leaves the target when the last parent row filing it leaves the store, when a parent echo no longer expands it, or when a delete arrives on the hold's realtime topic.
+
+#### `held-targets.test.ts`
+Per-parent-row filing bookkeeping: hold filters follow the current filings, a row is released when its last parent stops filing it, and a back-relation filter stays while the parent is filed.
+
 #### `relations.test.ts`
 Joins through the TanStack DB join API, `relations` and `alwaysFetchRelations`, and filtering on relation fields.
 

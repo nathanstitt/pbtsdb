@@ -1,6 +1,6 @@
 import { markFiledSubset, parseViaKey, type RelationTargets, splitPaths } from './expand-paths'
 import { logger } from './logger'
-import { expandOf, idOf, isObject } from './records'
+import { expandOf, idOf, idsOf, isObject } from './records'
 import type { RelationTarget } from './types'
 
 /** A back-relation (`<collection>_via_<field>`) at the head of an active expand path. */
@@ -93,66 +93,99 @@ function lastById(values: object[]): object[] {
     return [...byId.values()]
 }
 
-/** Records what a parent filed into a target: ids for a forward relation, parent ids for a back-relation. */
-export type RecordFiled = (target: RelationTarget, field: string, values: Iterable<string>) => void
+/** `parentId` now files exactly `rowIds` into `target` under expand `key`. */
+export type SetFiled = (
+    parentId: string,
+    target: RelationTarget,
+    key: string,
+    rowIds: Iterable<string>
+) => void
 
 export interface ExpandFiler {
-    /** File every expanded record into its target, one write per relation key. */
+    /**
+     * File every expanded record into its target, one write per relation
+     * key, and reconcile each parent's filings for the expand paths the
+     * request asked for: a requested key a record does not carry means the
+     * relation is empty or unreadable, so rows filed under it before are
+     * released.
+     */
     upsertExpanded: (
         records: readonly object[],
-        targets: RelationTargets | undefined
+        targets: RelationTargets | undefined,
+        requestedPaths: readonly string[]
     ) => Promise<void>
     /** PocketBase omits an empty back-relation's key, so absence means zero children. */
     markEmptyBackRelations: (items: readonly object[], heads: readonly BackRelationHead[]) => void
 }
 
+/** The paths under `key`: `a.b.c` requested as `key.a.b.c`. */
+function tailsOf(paths: readonly string[], key: string): string[] {
+    return paths.filter(path => path.startsWith(`${key}.`)).map(path => path.slice(key.length + 1))
+}
+
 export function createExpandFiler(
     collectionName: string,
-    recordFiled: RecordFiled,
+    setFiled: SetFiled,
     holder: object
 ): ExpandFiler {
-    function recordFiledGroup(
-        target: RelationTarget,
+    async function fileGroup(
         key: string,
         group: ExpandedGroup,
-        values: object[]
+        target: RelationTarget,
+        requestedPaths: readonly string[]
+    ): Promise<boolean> {
+        const values = lastById(group.values)
+        const filed = await target.writeFiled(values, holder)
+        await upsertExpanded(values, target.relationTargets, tailsOf(requestedPaths, key))
+        if (!filed) return false
+        for (const [parentId, parentValues] of group.byParent) {
+            setFiled(parentId, target, key, idsOf(parentValues))
+            markFiledSubset(target, key, parentValues, parentId)
+        }
+        return true
+    }
+
+    // A requested key a record does not carry is an empty or unreadable
+    // relation: whatever the record filed under it before is released.
+    function releaseAbsent(
+        records: readonly object[],
+        targets: RelationTargets,
+        keys: Iterable<string>
     ): void {
-        const via = parseViaKey(key)
-        if (via) {
-            recordFiled(
-                target,
-                via.field,
-                group.byParent.map(([parentId]) => parentId)
-            )
-        } else {
-            recordFiled(
-                target,
-                'id',
-                values.flatMap(value => idOf(value) ?? [])
-            )
+        for (const key of keys) {
+            const target = targets[key]
+            if (!target) continue
+            for (const record of records) {
+                const parentId = idOf(record)
+                if (parentId && expandOf(record)?.[key] === undefined) {
+                    setFiled(parentId, target, key, [])
+                }
+            }
         }
     }
 
     async function upsertExpanded(
         records: readonly object[],
-        targets: RelationTargets | undefined
+        targets: RelationTargets | undefined,
+        requestedPaths: readonly string[]
     ): Promise<void> {
         if (!targets) return
-        for (const [key, group] of groupExpandedByKey(records)) {
+        const grouped = groupExpandedByKey(records)
+        const unfiled = new Set<string>()
+        for (const [key, group] of grouped) {
             const target = targets[key]
             if (!target) {
                 logger.debug('No relation target for expanded field', { collectionName, key })
                 continue
             }
-            const values = lastById(group.values)
-            const filed = await target.writeFiled(values, holder)
-            await upsertExpanded(values, target.relationTargets)
-            if (!filed) continue
-            recordFiledGroup(target, key, group, values)
-            for (const [parentId, parentValues] of group.byParent) {
-                markFiledSubset(target, key, parentValues, parentId)
-            }
+            if (!(await fileGroup(key, group, target, requestedPaths))) unfiled.add(key)
         }
+        const heads = new Set(requestedPaths.map(path => path.split('.')[0]))
+        releaseAbsent(
+            records,
+            targets,
+            [...heads].filter(key => !unfiled.has(key))
+        )
     }
 
     return {
@@ -164,9 +197,7 @@ export function createExpandFiler(
                 if (!id) continue
                 const expand = expandOf(item)
                 for (const { target, key, field } of heads) {
-                    if (expand?.[key] !== undefined) continue
-                    target.markSubsetLoaded(field, id)
-                    recordFiled(target, field, [id])
+                    if (expand?.[key] === undefined) target.markSubsetLoaded(field, id)
                 }
             }
         },

@@ -7,8 +7,11 @@ import type { Transport } from './transport'
 export interface RealtimeSubscriptionDeps<T extends object> {
     transport: Transport
     collectionName: string
-    /** An event and the topic that delivered it: `'*'` or the filter string. */
-    handleEvent: (event: RecordSubscription<T>, topic: string) => void
+    /**
+     * An event, the topic that delivered it (`'*'` or the filter string)
+     * and the expand the delivering entry was opened with.
+     */
+    handleEvent: (event: RecordSubscription<T>, topic: string, expand: string | undefined) => void
     /** The expand union the next subscribe carries; pure, compared to detect drift. */
     pendingExpand: () => string | undefined
     /** Options for the next subscribe attempt; calls the factory callback. */
@@ -106,7 +109,7 @@ export function createRealtimeSubscription<T extends object>(
             starUnsubscribe = await deps.transport.subscribe<T>(
                 collectionName,
                 deps.subscribeOptions(),
-                event => deps.handleEvent(event, '*')
+                event => deps.handleEvent(event, '*', expand)
             )
             delivered.add('*')
             starExpand = expand
@@ -148,7 +151,7 @@ export function createRealtimeSubscription<T extends object>(
         const expand = deps.pendingExpand()
         try {
             const unsubscribe = await deps.transport.subscribe<T>(collectionName, options, event =>
-                deps.handleEvent(event, filter)
+                deps.handleEvent(event, filter, expand)
             )
             delivered.add(filter)
             filterEntries.set(filter, { unsubscribe, expand })

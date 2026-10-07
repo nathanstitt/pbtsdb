@@ -31,6 +31,8 @@ export interface Ledger<T extends object> {
      * as a new object: the stored row merged with the incoming one.
      */
     retain: (holder: Holder, rows: readonly T[]) => LedgerWrites<T>
+    /** Replace stored rows with `rows` under the same rule as `retain`, adding no holder; a row not stored is skipped. */
+    refresh: (rows: readonly T[]) => LedgerWrites<T>
     /** Drop `holder`'s reference to `ids` (all of them when omitted). Returns ids with no holder left, now removed. */
     release: (holder: Holder, ids?: Iterable<string>) => string[]
     /** Set `holder`'s references to exactly `rows`. */
@@ -108,6 +110,12 @@ export function createLedger<T extends object>(): Ledger<T> {
     // written object as is. Merging here keeps a partial realtime payload
     // (a factory `fields` option) from dropping fields, and keeps this row
     // equal to core's.
+    function update(entry: Entry<T>, incoming: T, writes: LedgerWrites<T>): void {
+        if (entry.row === incoming || isOlder(incoming, entry.row)) return
+        setRow(entry, { ...entry.row, ...incoming })
+        writes.updated.push(entry.row)
+    }
+
     function retain(holder: Holder, rows: readonly T[]): LedgerWrites<T> {
         const writes: LedgerWrites<T> = { inserted: [], updated: [] }
         for (const incoming of rows) {
@@ -122,9 +130,17 @@ export function createLedger<T extends object>(): Ledger<T> {
                 continue
             }
             link(id, entry, holder)
-            if (entry.row === incoming || isOlder(incoming, entry.row)) continue
-            setRow(entry, { ...entry.row, ...incoming })
-            writes.updated.push(entry.row)
+            update(entry, incoming, writes)
+        }
+        return writes
+    }
+
+    function refresh(rows: readonly T[]): LedgerWrites<T> {
+        const writes: LedgerWrites<T> = { inserted: [], updated: [] }
+        for (const incoming of rows) {
+            const id = idOf(incoming)
+            const entry = id === undefined ? undefined : entries.get(id)
+            if (entry) update(entry, incoming, writes)
         }
         return writes
     }
@@ -155,6 +171,7 @@ export function createLedger<T extends object>(): Ledger<T> {
         idsOf: holder => [...(byHolder.get(holder) ?? [])],
         holderCount: id => entries.get(id)?.holders.size ?? 0,
         retain,
+        refresh,
         release,
         replace(holder, rows) {
             const keep = new Set(idsOf(rows))

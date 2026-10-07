@@ -6,6 +6,7 @@ import {
     stripFetchedRelations,
 } from './expand-filing'
 import type { RelationTargets } from './expand-paths'
+import { splitPaths } from './expand-paths'
 import { matchesSubset, type WhereSubset } from './keyed-where'
 import type { LoadedSubsets } from './loaded-subsets'
 import { subsetFilters } from './pocketbase-limits'
@@ -255,7 +256,13 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
                 }
             )
             if (aborted()) throw new FetchAbortedError(collectionName)
-            if (!result.fromStore) await filer.upsertExpanded(result.rows, relationTargets)
+            if (!result.fromStore) {
+                await filer.upsertExpanded(
+                    result.rows,
+                    relationTargets,
+                    splitPaths(deps.activeExpand(request))
+                )
+            }
             if (aborted()) throw new FetchAbortedError(collectionName)
             return {
                 rows: stripFetchedRelations(result.rows, deps.activeExpand(request)),

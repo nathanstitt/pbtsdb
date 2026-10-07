@@ -137,6 +137,11 @@ export interface CollectionSubscriptionHelpers<T extends object> {
      */
     writeFiled: (records: object[], holder: object) => Promise<boolean>
     /**
+     * Release rows a parent stopped filing here; see RelationTarget.releaseFiled. Relation plumbing, not public API.
+     * @internal
+     */
+    releaseFiled: (ids: readonly string[], holder: object) => void
+    /**
      * A parent's fetch may file a subset here; see RelationTarget.expectFiling. Relation plumbing, not public API.
      * @internal
      */
@@ -274,11 +279,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         ledger,
         store,
         onRemoved: rows => {
-            for (const row of rows) subsets.forgetRow(row)
+            for (const row of rows) {
+                subsets.forgetRow(row)
+                const id = idOf(row)
+                if (id !== undefined) held.forgetParentRow(id)
+            }
         },
     })
     const held = createHeldTargets(collectionName, parentHolder)
-    const filer = createExpandFiler(collectionName, held.recordFiled, parentHolder)
+    const filer = createExpandFiler(collectionName, held.setFiled, parentHolder)
     const fetcher = createFetcher<RecordType>({
         pb,
         collectionName,
@@ -293,7 +302,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const realtime = createRealtimeSubscription<RecordType>({
         transport,
         collectionName,
-        handleEvent: (event, topic) => handleRealtimeEvent(event, topic),
+        handleEvent: (event, topic, expand) => handleRealtimeEvent(event, topic, expand),
         pendingExpand: pendingSubscribeExpand,
         subscribeOptions: realtimeSubscribeOptions,
         onEntryOpened: () =>
@@ -326,7 +335,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // core holds this transaction until the handler's own transaction
     // settles, which is after the handler returns.
     function landServerRows(rows: RecordType[]): void {
-        const result = membership.land(ACCEPTED, rows)
+        const result = membership.accept(rows)
         if (result === false) {
             logger.debug('Dropping write-back while sync is not running', { collectionName })
         }
@@ -502,10 +511,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // PocketBase can redeliver or reorder echoes; the ledger drops a strictly
     // older create/update. A delete on a filter topic releases that topic,
-    // its subsets and the accepted holder; a delete on '*' removes the row.
-    // A delete is also recorded against every fetch in flight, whose result
-    // may predate it.
-    function handleRealtimeEvent(event: RecordSubscription<RecordType>, topic: string): void {
+    // its subsets, the parents whose hold covers it and the accepted
+    // holder; a delete on '*' removes the row. A delete is also recorded
+    // against every fetch in flight, whose result may predate it.
+    function handleRealtimeEvent(
+        event: RecordSubscription<RecordType>,
+        topic: string,
+        expand: string | undefined
+    ): void {
         const id = idOf(event.record)
         if (!id) return
         if (event.action === 'delete') {
@@ -513,7 +526,15 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             const applied =
                 topic === '*'
                     ? membership.dropAll([id])
-                    : membership.drop([topic, ...adapter.subsetsFor(topic), ACCEPTED], [id])
+                    : membership.drop(
+                          [
+                              topic,
+                              ...adapter.subsetsFor(topic),
+                              ...(holdersByFilter.get(topic) ?? []),
+                              ACCEPTED,
+                          ],
+                          [id]
+                      )
             if (applied === false) {
                 logger.debug('Ignoring delete echo while sync is not running', {
                     collectionName,
@@ -529,7 +550,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             return
         }
         membership.drop([ACCEPTED], [id])
-        filer.upsertExpanded([event.record], relationTargets).catch(error =>
+        filer.upsertExpanded([event.record], relationTargets, splitPaths(expand)).catch(error =>
             logger.error('Failed to upsert expanded records from realtime echo', {
                 collectionName,
                 error,
@@ -584,7 +605,28 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!(await ensureSyncing())) {
             throw new Error(`Collection '${collectionName}' is not syncing; accept() has no store`)
         }
-        await whenAccepted(membership.land(ACCEPTED, rows))
+        await whenAccepted(membership.accept(rows))
+    }
+
+    // Parents whose hold covers each realtime filter, so a delete on that
+    // topic releases their filings of the row.
+    const holdersByFilter = new Map<string, Set<object>>()
+
+    function swapHolderFilters(holder: object, previous: string[], next: string[]): void {
+        for (const filter of previous) {
+            const holders = holdersByFilter.get(filter)
+            holders?.delete(holder)
+            if (holders?.size === 0) holdersByFilter.delete(filter)
+        }
+        for (const filter of next) {
+            let holders = holdersByFilter.get(filter)
+            if (!holders) {
+                holders = new Set()
+                holdersByFilter.set(filter, holders)
+            }
+            holders.add(holder)
+        }
+        realtime.swapHoldFilters(previous, next)
     }
 
     // A parent's hold on this collection as a relation target. Keeps sync
@@ -603,17 +645,27 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             setFilters: filters => {
                 if (released) return
                 const next = [...new Set(filters)]
-                realtime.swapHoldFilters(current, next)
+                swapHolderFilters(holder, current, next)
                 current = next
             },
             release: () => {
                 if (released) return
                 released = true
-                realtime.swapHoldFilters(current, [])
+                swapHolderFilters(holder, current, [])
                 current = []
                 membership.drop([holder])
                 subscription.unsubscribe()
             },
+        }
+    }
+
+    // A parent row stopped filing these rows here (its expand no longer
+    // returns them, or it left the parent's store).
+    function releaseFiled(ids: readonly string[], holder: object): void {
+        if (membership.drop([holder], ids) === false) {
+            logger.debug('Ignoring filed-row release while sync is not running', {
+                collectionName,
+            })
         }
     }
 
@@ -653,6 +705,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         loadedSubsetCount: subsets.count,
         holdLive,
         writeFiled,
+        releaseFiled,
         expectFiling: fetcher.expectFiling,
         accept,
         reload: adapter.reload,

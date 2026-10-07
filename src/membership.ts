@@ -1,4 +1,4 @@
-import type { Holder, Ledger, LedgerWrites } from './ledger'
+import { ACCEPTED, type Holder, type Ledger, type LedgerWrites } from './ledger'
 import { idOf, idsOf } from './records'
 import type { SyncedStore, SyncWrite } from './synced-store'
 
@@ -20,6 +20,13 @@ export interface MembershipDeps<T extends object> {
 export interface Membership<T extends object> {
     /** Reference `rows` for `holder`; new and newer rows are written. */
     land: (holder: Holder, rows: readonly T[]) => Applied
+    /**
+     * Land server-confirmed rows. A row nothing holds yet takes the
+     * `ACCEPTED` holder; a row already held is refreshed in place and gains
+     * no holder, so a write-back never outlives the holders a query or
+     * topic gave the row.
+     */
+    accept: (rows: readonly T[]) => Applied
     /**
      * Make `rows` exactly what `holder` references; rows it no longer holds
      * may leave. `releaseAlso` holders release `rows` in the same
@@ -117,6 +124,19 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
     return {
         land: (holder, rows) =>
             apply(() => ({ writes: writesFor(rows, ledger.retain(holder, rows), []), gone: [] })),
+        accept: rows =>
+            apply(() => {
+                const held = new Set(idsOf(rows).filter(id => ledger.has(id)))
+                const fresh = rows.filter(row => !held.has(idOf(row) ?? ''))
+                const stale = rows.filter(row => held.has(idOf(row) ?? ''))
+                const retained = ledger.retain(ACCEPTED, fresh)
+                const refreshed = ledger.refresh(stale)
+                const changes = {
+                    inserted: [...retained.inserted, ...refreshed.inserted],
+                    updated: [...retained.updated, ...refreshed.updated],
+                }
+                return { writes: writesFor(rows, changes, []), gone: [] }
+            }),
         reconcile: (holder, rows, releaseAlso = []) =>
             apply(() => {
                 const before = rowsBefore(ledger.idsOf(holder))

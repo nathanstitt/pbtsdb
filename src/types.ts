@@ -150,6 +150,8 @@ export interface RelationTarget {
     expectFiling: (field: string, settles: Promise<void>) => () => void
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded: (field: string, value: string) => void
+    /** Release rows `holder` filed that no parent row files any more. */
+    releaseFiled: (ids: readonly string[], holder: object) => void
     /**
      * Hold this collection live for a parent identified by `holder`, with the
      * filters covering the rows the parent filed here (query mode only).

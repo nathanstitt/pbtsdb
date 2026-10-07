@@ -89,7 +89,7 @@ holder is one of:
 |---|---|---|
 | Subset | `loadSubset(options)` | `unloadSubset(options)`, or a reload of the same subset whose result omits the row |
 | Realtime topic | a create or update event delivered on that topic's filter | the topic's realtime entry closing while the topic is no longer wanted (on-demand mode), or `reload()` for rows its results do not confirm |
-| Hold | a parent's `holdLive()` on a relation target, per filed row | `release()` on the hold |
+| Hold | a parent's `holdLive()` on a relation target, per filed row | `release()` on the hold; the last parent row filing the row leaving the parent's store; a parent fetch or echo whose requested expand no longer returns the row; a delete event on the hold's filter topic |
 | Accepted | a write-back after persist, an insert echo for this client's own pending row, or `accept(rows)` from the application | the next subset reload or realtime event that covers the row, a fresh load whose `where` matches the row and whose result omits it (rule 6 exception), realtime going idle (on-demand mode), or `reload()` |
 
 Rules:

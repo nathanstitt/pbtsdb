@@ -149,6 +149,38 @@ describe('core sync adapter', () => {
         expect(books.status).toBe('idle')
     })
 
+    it('a saved row leaves with its query while another query keeps the collection live', async () => {
+        const seed = await pb.collection('books').create<Books>(await newBook('Fiction', 'saved'))
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            realtime: 'query',
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const fiction = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+        )
+        const mystery = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Mystery')))
+        )
+        try {
+            await waitForLoadFinish(fiction.result)
+            await waitForLoadFinish(mystery.result)
+            await books.waitForSubscription()
+            const tx = books.update(seed.id, draft => {
+                draft.title = 'saved from a handler'
+            })
+            await tx.when('settled')
+            await waitFor(() => expect(books.get(seed.id)?.title).toBe('saved from a handler'))
+            fiction.unmount()
+            await waitFor(() => expect(books.get(seed.id)).toBeUndefined(), { timeout: 10000 })
+            expect(books.isSubscribed()).toBe(true)
+        } finally {
+            mystery.unmount()
+            await removeBook(seed.id)
+            await books.cleanup()
+        }
+    }, 20000)
+
     it('releases a row only a topic held when that topic closes', async () => {
         const control = await pb
             .collection('books')

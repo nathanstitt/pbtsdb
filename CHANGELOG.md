@@ -49,6 +49,17 @@ All notable changes to this project will be documented in this file.
 - No refetch on window focus or on network reconnect; react-query did both by
   default. Call `collection.reload()` for the same effect. A realtime reconnect the
   server did not resume still reloads every live subset.
+- Rows a parent files into a relation target are tracked per parent row. A filed row
+  leaves the target when the last parent row filing it leaves the parent's store, when a
+  parent fetch or echo no longer expands it (lost access, changed relation), or when a
+  delete arrives on the hold's realtime topic. Hold filters follow the current filings,
+  so they no longer grow for the life of the parent.
+- A mutation write-back or `accept()` adds the accepted holder only to a row nothing
+  holds yet. A row a query or topic already holds is refreshed in place, so a saved
+  row leaves with its query instead of staying for the session.
+- pbtsdb resets its realtime session itself when `pb.authStore` changes to another
+  auth record. `disconnectRealtime(pb)` closes the connection and keeps it closed
+  until `resetRealtime(pb)`.
 - In on-demand mode with `realtime: 'collection'`, a row that arrives as a realtime
   echo stays in memory until `reload()` runs or the collection goes idle. Live
   queries apply their own `where`, so this costs memory, not correctness.

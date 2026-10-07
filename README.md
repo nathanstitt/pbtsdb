@@ -278,16 +278,20 @@ const { data } = useLiveQuery((q) =>
 
 pbtsdb runs its own realtime connection. When the connection drops, it reconnects with backoff and refetches every live query, because PocketBase does not replay events missed during the gap. A server that supports pbtsdb's resume extension (`?resume=<clientId>&after=<seq>` on the SSE URL, `resumed: true` in `PB_CONNECT`, `seq` on each event) replays the gap instead, and no refetch runs.
 
-Call `resetRealtime(pb)` after an auth change the connection cannot see on its own — login, logout, or switching users. pbtsdb's connection is independent of `pb.realtime`, so changing `pb`'s auth token does not by itself tell the server anything, and if the subscribed topics haven't changed, pbtsdb would otherwise send no POST at all and keep serving the previous user's data:
+pbtsdb's connection is independent of `pb.realtime`. When `pb.authStore` changes to another auth record (login, logout, switching users), pbtsdb forgets the connection's server-side session and reconnects at once, re-sending every subscribed topic under the new auth; every ready collection reloads once that POST succeeds, the same as a non-resumed reconnect. A token refresh for the same record changes nothing. PocketBase would otherwise answer the next subscriptions POST with a 403, or keep serving the previous user's data.
+
+Call `resetRealtime(pb)` yourself for a change the auth store cannot see, such as pointing `pb` at another server:
 
 ```typescript
-import { resetRealtime } from 'pbtsdb';
+import { disconnectRealtime, resetRealtime } from 'pbtsdb';
 
-await pb.collection('users').authWithPassword(email, password);
-resetRealtime(pb); // re-subscribes every open topic under the new auth
+resetRealtime(pb); // forget the session and re-subscribe every open topic now
+
+disconnectRealtime(pb); // close the connection and keep it closed
+resetRealtime(pb); // open it again; every ready collection reloads
 ```
 
-This forgets the connection's server-side session and reconnects at once, re-sending every currently subscribed topic under whatever auth `pb` carries now; every ready collection refetches once that POST succeeds, the same as a non-resumed reconnect.
+`disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
 
 ### Sync Modes
 
