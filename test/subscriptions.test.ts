@@ -97,13 +97,9 @@ describe('Collection - Real-time Subscriptions', () => {
         })
 
         // Wait for the real-time update to propagate
-        await waitFor(
-            () => {
-                const book = result.current.data[0]
-                return book?.title === updatedTitle
-            },
-            { timeout: 5000 }
-        )
+        await waitFor(() => expect(result.current.data[0]?.title).toBe(updatedTitle), {
+            timeout: 5000,
+        })
 
         expect(result.current.data[0].title).toBe(updatedTitle)
         expect(result.current.data[0].title).not.toBe(originalTitle)
@@ -247,13 +243,9 @@ describe('Collection - Real-time Subscriptions', () => {
         })
 
         // Wait for real-time update to propagate
-        await waitFor(
-            () => {
-                const hasNewBook = result.current.data.some(b => b.id === newBook.id)
-                return hasNewBook
-            },
-            { timeout: 5000 }
-        )
+        await waitFor(() => expect(result.current.data.some(b => b.id === newBook.id)).toBe(true), {
+            timeout: 5000,
+        })
 
         expect(result.current.data.some(b => b.id === newBook.id)).toBe(true)
 
