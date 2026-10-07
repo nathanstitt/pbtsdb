@@ -13,13 +13,14 @@ import {
     vi,
 } from 'vitest'
 
-import { createCollection } from '../src'
+import { createCollection, realtimeClientFor } from '../src'
 import {
     REALTIME_MAX_FILTER_LENGTH,
     REALTIME_TOPIC_MAX_LENGTH,
     realtimeTopicLength,
     subsetFilters,
 } from '../src/pocketbase-limits'
+import type { RealtimeClient } from '../src/realtime-client'
 import {
     authenticateTestUser,
     clearAuth,
@@ -31,6 +32,8 @@ import {
     pb,
     resetLogger,
     setLogger,
+    topicFilter,
+    topicQuery,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
@@ -133,14 +136,14 @@ describe('realtime mode', () => {
 
     describe('query mode subscriptions', () => {
         const createdIds: string[] = []
-        let subscribeSpy: MockInstance<ReturnType<typeof pb.collection>['subscribe']>
+        let subscribeSpy: MockInstance<RealtimeClient['subscribe']>
 
         beforeEach(() => {
-            subscribeSpy = vi.spyOn(pb.collection('books'), 'subscribe')
+            subscribeSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         })
 
         afterEach(() => {
-            subscribeSpy.mockRestore()
+            vi.restoreAllMocks()
         })
 
         afterAll(async () => {
@@ -155,7 +158,10 @@ describe('realtime mode', () => {
 
         const FANTASY = 'genre = "Fantasy"'
 
-        const filtersSubscribed = () => subscribeSpy.mock.calls.map(call => call[2]?.filter)
+        const booksCalls = () =>
+            subscribeSpy.mock.calls.filter(call => call[0].startsWith('books/'))
+
+        const filtersSubscribed = () => booksCalls().map(call => topicFilter(call[0]))
 
         async function seedBook(genre: 'Fantasy' | 'Mystery') {
             const authorId = await getTestAuthorId()
@@ -336,7 +342,7 @@ describe('realtime mode', () => {
             )
             await waitForLoadFinish(plain.result)
             await books.waitForSubscription()
-            expect(subscribeSpy.mock.calls.map(call => call[2])).toEqual([{ filter: FANTASY }])
+            expect(booksCalls().map(call => topicQuery(call[0]))).toEqual([{ filter: FANTASY }])
 
             const expanded = renderHook(() =>
                 useLiveQuery(q =>
@@ -348,7 +354,7 @@ describe('realtime mode', () => {
             await waitForLoadFinish(expanded.result)
             await waitFor(
                 () =>
-                    expect(subscribeSpy.mock.calls.at(-1)?.[2]).toEqual({
+                    expect(topicQuery(booksCalls().at(-1)?.[0] ?? '')).toEqual({
                         filter: FANTASY,
                         expand: 'author',
                     }),
@@ -493,14 +499,19 @@ describe('realtime mode', () => {
             }
         })
 
-        const filtersOf = (spy: MockInstance<ReturnType<typeof pb.collection>['subscribe']>) =>
-            spy.mock.calls.map(call => call[2]?.filter)
+        const callsFor = (spy: MockInstance<RealtimeClient['subscribe']>, collectionName: string) =>
+            spy.mock.calls.filter(call => call[0].startsWith(`${collectionName}/`))
+
+        const filtersOf = (
+            spy: MockInstance<RealtimeClient['subscribe']>,
+            collectionName: string
+        ) => callsFor(spy, collectionName).map(call => topicFilter(call[0]))
 
         const idsIn = (filter: string | undefined) =>
             [...(filter ?? '').matchAll(/id = "([^"]+)"/g)].map(match => match[1]).sort()
 
         it('subscribes a forward relation target to the filed ids only', async () => {
-            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
                 const c = createCollection<Schema>(pb, queryClient)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
@@ -520,13 +531,13 @@ describe('realtime mode', () => {
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
                 expect(authorIds.length).toBeGreaterThan(0)
                 await waitFor(
-                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    () => expect(idsIn(filtersOf(authorsSpy, 'authors').at(-1))).toEqual(authorIds),
                     {
                         timeout: 8000,
                     }
                 )
-                expect(filtersOf(authorsSpy)).not.toContain(undefined)
-                expect(filtersOf(authorsSpy).at(-1)?.startsWith('id = "')).toBe(true)
+                expect(filtersOf(authorsSpy, 'authors')).not.toContain(undefined)
+                expect(filtersOf(authorsSpy, 'authors').at(-1)?.startsWith('id = "')).toBe(true)
 
                 const authorId = authorIds[0]
                 const before = await pb.collection('authors').getOne(authorId)
@@ -540,12 +551,12 @@ describe('realtime mode', () => {
                     await pb.collection('authors').update(authorId, { name: before.name })
                 }
             } finally {
-                authorsSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
 
         it('keeps the held filter entry open across the target sync cleanup', async () => {
-            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
                 const c = createCollection<Schema>(pb, queryClient)
                 const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
@@ -562,7 +573,7 @@ describe('realtime mode', () => {
                 await books.waitForSubscription()
                 const authorIds = [...new Set(result.current.data.map(b => b.author))].sort()
                 await waitFor(
-                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    () => expect(idsIn(filtersOf(authorsSpy, 'authors').at(-1))).toEqual(authorIds),
                     {
                         timeout: 8000,
                     }
@@ -577,12 +588,12 @@ describe('realtime mode', () => {
                 unmount()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
             } finally {
-                authorsSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
 
         it('re-holds a query-mode target with its filed rows after a cached remount', async () => {
-            const authorsSpy = vi.spyOn(pb.collection('authors'), 'subscribe')
+            const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
             const fetches = () => getListSpy.mock.calls.length + getFullListSpy.mock.calls.length
@@ -607,30 +618,31 @@ describe('realtime mode', () => {
                 await books.waitForSubscription()
                 const authorIds = [...new Set(first.result.current.data.map(b => b.author))].sort()
                 await waitFor(
-                    () => expect(idsIn(filtersOf(authorsSpy).at(-1))).toEqual(authorIds),
+                    () => expect(idsIn(filtersOf(authorsSpy, 'authors').at(-1))).toEqual(authorIds),
                     {
                         timeout: 8000,
                     }
                 )
-                const filed = filtersOf(authorsSpy).at(-1)
+                const filed = filtersOf(authorsSpy, 'authors').at(-1)
 
                 first.unmount()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })
-                const callsBefore = authorsSpy.mock.calls.length
+                const callsBefore = callsFor(authorsSpy, 'authors').length
                 const fetchesBefore = fetches()
 
                 const second = mount()
                 await waitForLoadFinish(second.result, 10000)
                 await waitFor(
-                    () => expect(authorsSpy.mock.calls.length).toBeGreaterThan(callsBefore),
+                    () =>
+                        expect(callsFor(authorsSpy, 'authors').length).toBeGreaterThan(callsBefore),
                     { timeout: 8000 }
                 )
-                expect(filtersOf(authorsSpy).slice(callsBefore)).toEqual([filed])
+                expect(filtersOf(authorsSpy, 'authors').slice(callsBefore)).toEqual([filed])
                 expect(authors.isSubscribed()).toBe(true)
                 expect(fetches()).toBe(fetchesBefore)
                 second.unmount()
             } finally {
-                authorsSpy.mockRestore()
+                vi.restoreAllMocks()
                 getListSpy.mockRestore()
                 getFullListSpy.mockRestore()
             }
@@ -638,14 +650,17 @@ describe('realtime mode', () => {
 
         it('opens the grown filter before closing the old one', async () => {
             const events: string[] = []
-            const realSubscribe = pb.collection('authors').subscribe.bind(pb.collection('authors'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             const authorsSpy = vi
-                .spyOn(pb.collection('authors'), 'subscribe')
-                .mockImplementation(async (topic, callback, options) => {
-                    const unsubscribe = await realSubscribe(topic, callback, options)
-                    events.push(`open ${options?.filter}`)
+                .spyOn(client, 'subscribe')
+                .mockImplementation(async (topic, listener) => {
+                    const unsubscribe = await realSubscribe(topic, listener)
+                    if (!topic.startsWith('authors/')) return unsubscribe
+                    const filter = topicFilter(topic)
+                    events.push(`open ${filter}`)
                     return async () => {
-                        events.push(`close ${options?.filter}`)
+                        events.push(`close ${filter}`)
                         await unsubscribe()
                     }
                 })
@@ -680,7 +695,7 @@ describe('realtime mode', () => {
                 )
                 await waitForLoadFinish(fantasy.result, 10000)
                 await waitFor(() => expect(authors.isSubscribed()).toBe(true), { timeout: 8000 })
-                const before = filtersOf(authorsSpy).at(-1)
+                const before = filtersOf(authorsSpy, 'authors').at(-1)
                 expect(idsIn(before)).not.toContain(author.id)
                 dropped = false
 
@@ -695,7 +710,7 @@ describe('realtime mode', () => {
                 await waitFor(() => expect(events).toContain(`close ${before}`), {
                     timeout: 8000,
                 })
-                const after = filtersOf(authorsSpy).at(-1)
+                const after = filtersOf(authorsSpy, 'authors').at(-1)
                 expect(idsIn(after)).toContain(author.id)
                 expect(events.indexOf(`open ${after}`)).toBeLessThan(
                     events.indexOf(`close ${before}`)
@@ -707,7 +722,7 @@ describe('realtime mode', () => {
                 grown.unmount()
             } finally {
                 clearInterval(poll)
-                authorsSpy.mockRestore()
+                vi.restoreAllMocks()
                 await pb
                     .collection('books')
                     .delete(book.id)
@@ -721,7 +736,7 @@ describe('realtime mode', () => {
         }, 30000)
 
         it('subscribes a back-relation target by parent id so new children arrive', async () => {
-            const booksSpy = vi.spyOn(pb.collection('books'), 'subscribe')
+            const booksSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             try {
                 const c = createCollection<Schema>(pb, queryClient)
                 const books = c('books', { syncMode: 'on-demand', realtime: 'query' })
@@ -740,10 +755,10 @@ describe('realtime mode', () => {
                 )
                 await waitForLoadFinish(result, 10000)
                 await authors.waitForSubscription()
-                await waitFor(() => expect(booksSpy.mock.calls.length).toBeGreaterThan(0), {
+                await waitFor(() => expect(callsFor(booksSpy, 'books').length).toBeGreaterThan(0), {
                     timeout: 8000,
                 })
-                expect(filtersOf(booksSpy)).toEqual([`author = "${authorId}"`])
+                expect(filtersOf(booksSpy, 'books')).toEqual([`author = "${authorId}"`])
 
                 const book = await pb.collection('books').create({
                     title: `Held ${getTestSlug('held')}`,
@@ -756,7 +771,7 @@ describe('realtime mode', () => {
                 createdIds.push(book.id)
                 await waitFor(() => expect(books.has(book.id)).toBe(true), { timeout: 8000 })
             } finally {
-                booksSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
     })

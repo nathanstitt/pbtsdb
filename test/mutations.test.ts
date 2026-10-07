@@ -3,7 +3,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { RecordService } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createCollection } from '../src'
+import { createCollection, realtimeClientFor } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
@@ -235,19 +235,13 @@ describe('Collection - Mutations', () => {
     // writeBackAfterPersisted). This delivers the echo from inside `create`,
     // which is the worst-case ordering, and asserts the server's fields win.
     it('shows the server-assigned fields when the realtime echo lands before the insert resolves', async () => {
-        // The SDK builds a fresh RecordService per `pb.collection()` call, so
-        // the spies land on the PROTOTYPE, which every instance shares.
-        const realSubscribe = RecordService.prototype.subscribe
         let echo: ((event: { action: string; record: Record<string, unknown> }) => void) | null =
             null
-        vi.spyOn(RecordService.prototype, 'subscribe').mockImplementation(async function (
-            this: RecordService,
-            topic,
-            callback,
-            options
-        ) {
-            if (this.collectionIdOrName === 'books') echo = callback as typeof echo
-            return realSubscribe.call(this, topic, callback, options)
+        const client = realtimeClientFor(pb)
+        const realSubscribe = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+            if (topic.startsWith('books/')) echo = listener as typeof echo
+            return realSubscribe(topic, listener)
         })
 
         const c = createCollection<Schema>(pb, queryClient)
