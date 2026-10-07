@@ -349,6 +349,7 @@ The option only affects the built-in default handlers. A custom `onInsert`, `onU
 - TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back.
 - For an insert or an update, `await collection.accept(serverRows)` before you return. This closes the gap.
 - For a delete, `accept` cannot help, because it cannot remove a row. No public method removes the row before the optimistic state drops, except `await collection.reload()`. Without it, the deleted row shows again until the delete echo arrives.
+- In on-demand mode, when realtime goes idle (no live query on the collection), rows held only by an accepted write-back are released. A row written back while nothing is mounted is fetched again on the next mount.
 - The handler returns `void`. Core no longer reads a `{ refetch }` result; call `collection.reload()` yourself if the handler needs a refetch.
 
 ### Writing server rows yourself

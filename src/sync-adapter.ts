@@ -148,11 +148,12 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         }
     }
 
-    // Rows ACCEPTED or this demand's topics hold, as they stand before the
-    // fetch. A row an event or a write-back replaces meanwhile
+    // Rows ACCEPTED or this demand's filter topics hold, as they stand
+    // before the fetch. Never '*': it holds rows for every query on the
+    // collection, and a client-side `where` can disagree with PocketBase's. A row an event or a write-back replaces meanwhile
     // is a new object, so it is not mistaken for one the result omits.
     function uncoveredRows(demand: Demand): { holders: Holder[]; rows: Map<string, T> } {
-        const holders = [ACCEPTED, ...(demand.filters ?? ['*'])]
+        const holders = [ACCEPTED, ...(demand.filters ?? [])]
         const rows = new Map<string, T>()
         for (const holder of holders) {
             for (const id of ledger.idsOf(holder)) {
@@ -164,7 +165,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     }
 
     // A complete fresh result is the server's answer for `where`: a row
-    // ACCEPTED or a topic holds, that matches `where` and that the result
+    // ACCEPTED or a filter topic holds, that matches `where` and that the result
     // omits, is gone or changed on the server (rule 6 exception). A page
     // (limit, cursor, offset) omits matching rows by design.
     function releaseOmitted(

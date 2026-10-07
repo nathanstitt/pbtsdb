@@ -121,9 +121,10 @@ Rules:
    Exception: `load` evaluates a demand's full `where` on the client
    (`compileSingleRowExpression`) after a fresh, complete server result
    (no `limit`, `cursor` or `offset`, not served from the store). A row
-   that `ACCEPTED` or one of the demand's topics held before the fetch,
-   that did not change during the fetch, that matches `where` and that the
-   result omits, loses its `ACCEPTED` and topic holders. Subset, parent
+   that `ACCEPTED` or one of the demand's filter topics held before the
+   fetch, that did not change during the fetch, that matches `where` and
+   that the result omits, loses its `ACCEPTED` and filter-topic holders.
+   The `'*'` topic is never released this way. Subset, parent
    and `EAGER` holders stay. Without this, a row accepted after a move
    and then deleted by another client stays on screen until `reload()`.
    In on-demand mode, `ACCEPTED` is also released in full when realtime

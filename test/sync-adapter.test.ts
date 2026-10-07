@@ -316,6 +316,17 @@ describe('sync adapter', () => {
             expect(t.ledger.idsOf(topic)).toEqual(['c'])
         })
 
+        it("a row the '*' topic holds is untouched", async () => {
+            const t = setup()
+            t.membership.land('*', [row('a', 'x')])
+            const opts: LoadSubsetOptions = {}
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([])
+            await load
+            expect(t.ledger.idsOf('*')).toEqual(['a'])
+            expect(t.log).not.toContain('delete:a')
+        })
+
         it('a row a subset holds is untouched', async () => {
             const t = setup()
             const other: LoadSubsetOptions = {}
