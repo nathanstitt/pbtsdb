@@ -310,8 +310,7 @@ export interface CreateCollectionOptions<
      *             transaction.mutations.map(mutation => customInsertLogic(mutation.modified))
      *         );
      *         // Land the server rows before the optimistic state drops
-     *         await collection.utils.writeUpsert(created);
-     *         return { refetch: false };
+     *         await collection.accept(created);
      *     }
      * });
      *
@@ -347,8 +346,7 @@ export interface CreateCollectionOptions<
      *             )
      *         );
      *         // Land the server rows before the optimistic state drops
-     *         await collection.utils.writeUpsert(updated);
-     *         return { refetch: false };
+     *         await collection.accept(updated);
      *     }
      * });
      *
@@ -378,10 +376,8 @@ export interface CreateCollectionOptions<
      * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: async ({ transaction }) => {
      *         const ids = transaction.mutations.map(mutation => mutation.original.id);
+     *         // The realtime delete event or a reload() removes the rows
      *         await Promise.all(ids.map(id => customDeleteLogic(id)));
-     *         // Remove the rows before the optimistic state drops
-     *         await collection.utils.writeDelete(ids);
-     *         return { refetch: false };
      *     }
      * });
      *
@@ -394,7 +390,7 @@ export interface CreateCollectionOptions<
     onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
-     * If true, the built-in handlers refetch the collection's active queries
+     * If true, the built-in handlers reload the collection's live subsets
      * after a successful insert, update, or delete, before the mutation
      * settles. Defaults to false: the built-in handlers write the server
      * response into the synced layer before they settle, and the realtime
@@ -402,9 +398,9 @@ export interface CreateCollectionOptions<
      * hook changes rows you must read right after the mutation.
      *
      * Only affects the built-in default handlers. A custom
-     * onInsert/onUpdate/onDelete should write the server response with
-     * `collection.utils.writeUpsert` before it returns and return
-     * `{ refetch: false }`; see the README, "Mutations and Refetch".
+     * onInsert/onUpdate should land the server response with
+     * `await collection.accept(rows)` before it returns. A custom handler
+     * that needs a refetch can call `await collection.reload()` instead.
      *
      * @default false
      *

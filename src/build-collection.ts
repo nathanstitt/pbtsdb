@@ -74,6 +74,7 @@ export interface PbCollectionUtils<T extends object> extends UtilsRecord {
      * endpoint's response. A row older than the stored one is ignored.
      * Resolves when the rows are accepted; they become visible with the
      * settlement of any persisting mutation, so a mutation handler can await it.
+     * Throws on an eager collection that is idle: it does not start a full load.
      */
     accept: (rows: readonly T[]) => Promise<void>
     /**
@@ -486,7 +487,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             logger.debug('Ignoring realtime echo while sync is not running', { collectionName, id })
             return
         }
-        ledger.release(ACCEPTED, [id])
+        membership.drop([ACCEPTED], [id])
         filer.upsertExpanded([event.record], relationTargets).catch(error =>
             logger.error('Failed to upsert expanded records from realtime echo', {
                 collectionName,
@@ -499,6 +500,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // does not. On-demand marks ready synchronously, so the wait ends at once.
     async function ensureSyncing(): Promise<boolean> {
         if (collection.isReady()) return true
+        if (collection.status === 'error') return false
         const idle = collection.status === 'idle' || collection.status === 'cleaned-up'
         if (syncMode === 'eager') {
             // Filing must not start a full eager load; a load already
