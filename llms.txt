@@ -188,8 +188,8 @@ function BooksList() {
 - Transaction states: pending → persisting → completed
 - Use `newRecordId()` to generate PocketBase-compatible IDs
 - `row.$hasPendingWrites` is true while a row has an unsettled optimistic change (`$synced` is deprecated)
-- A custom `onInsert`/`onUpdate`/`onDelete` should `await collection.accept(serverRows)` before it returns `void`; otherwise the row shows its previous server value from settle until the realtime echo
-- `collection.accept(rows)` lands server-returned rows as confirmed state; `collection.reload()` refetches every live query's subset and drops rows the results do not confirm. Both resolve on acceptance and are also on `collection.utils`
+- A custom `onInsert`/`onUpdate` should `await collection.accept(serverRows)` and a custom `onDelete` should `await collection.evict(ids)` before it returns `void`; otherwise the row shows its previous server value from settle until the realtime echo
+- `collection.accept(rows)` lands server-returned rows as confirmed state; `collection.evict(ids)` removes rows the server deleted; `collection.reload()` refetches every live query's subset and drops rows the results do not confirm. All three resolve on acceptance and are also on `collection.utils`
 
 ## Common Patterns
 

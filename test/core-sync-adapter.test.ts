@@ -1,7 +1,9 @@
 import { eq, useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
+import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -99,6 +101,53 @@ describe('core sync adapter', () => {
             await books.cleanup()
         }
     }, 15000)
+
+    it('settles a custom delete handler that calls evict(), with the row gone at settle', async () => {
+        // Swallow delete echoes for books, so only evict() can remove the row.
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+            if (!topic.startsWith('books/')) return real(topic, listener)
+            return real(topic, event => {
+                if ((event as RecordSubscription<Books>).action !== 'delete') listener(event)
+            })
+        })
+        const seed = await pb.collection('books').create<Books>(await newBook('Fiction', 'evict'))
+        let evict: (ids: string[]) => Promise<void> = async () => undefined
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            onDelete: async ({ transaction }) => {
+                const ids = transaction.mutations.map(mutation => mutation.original.id)
+                await Promise.all(ids.map(id => pb.collection('books').delete(id)))
+                await evict(ids)
+            },
+        })
+        evict = ids => books.evict(ids)
+        const { result } = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+        )
+        try {
+            await waitForLoadFinish(result)
+            await books.waitForSubscription()
+            expect(books.get(seed.id)).toBeDefined()
+            const tx = books.delete(seed.id)
+            await tx.when('settled')
+            expect(tx.state).toBe('completed')
+            expect(books.get(seed.id)).toBeUndefined()
+            await new Promise(resolve => setTimeout(resolve, 300))
+            expect(books.get(seed.id)).toBeUndefined()
+            expect(result.current.data.some(b => b.id === seed.id)).toBe(false)
+        } finally {
+            await removeBook(seed.id)
+            await books.cleanup()
+        }
+    }, 15000)
+
+    it('evict() is a no-op on a collection that is not syncing', async () => {
+        const books = createCollection<Schema>(pb)('books', { syncMode: 'on-demand' })
+        await expect(books.evict(['missing'])).resolves.toBeUndefined()
+        expect(books.status).toBe('idle')
+    })
 
     it('releases a row only a topic held when that topic closes', async () => {
         const control = await pb

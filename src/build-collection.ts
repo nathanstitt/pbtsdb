@@ -85,6 +85,14 @@ export interface PbCollectionUtils<T extends object> extends UtilsRecord {
      * persisting mutation.
      */
     reload: () => Promise<void>
+    /**
+     * Remove rows the server deleted, for example after a custom endpoint
+     * deleted them. The rows leave every holder, and a fetch in flight does
+     * not put them back. Resolves when the removal is accepted, so a custom
+     * delete handler can await it. A no-op while the collection is not
+     * syncing.
+     */
+    evict: (ids: readonly string[]) => Promise<void>
 }
 
 /**
@@ -137,6 +145,8 @@ export interface CollectionSubscriptionHelpers<T extends object> {
     accept: PbCollectionUtils<T>['accept']
     /** See {@link PbCollectionUtils.reload}. */
     reload: PbCollectionUtils<T>['reload']
+    /** See {@link PbCollectionUtils.evict}. */
+    evict: PbCollectionUtils<T>['evict']
 }
 
 /**
@@ -357,6 +367,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         await settleHandler()
     }
 
+    // The server deleted `ids`: no fetch in flight may put them back, and
+    // they leave every holder. Acceptance is at commit, so awaiting it from
+    // inside a handler cannot wait for that handler's own transaction.
+    async function evict(ids: readonly string[]): Promise<void> {
+        for (const id of ids) adapter.noteDeleted(id)
+        await whenAccepted(membership.dropAll(ids))
+    }
+
     const defaultDelete: DeleteMutationFn<RecordType> = async ({ transaction }) => {
         const ids = await Promise.all(
             transaction.mutations.map(async mutation => {
@@ -364,8 +382,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return mutation.original.id
             })
         )
-        for (const id of ids) adapter.noteDeleted(id)
-        membership.dropAll(ids)
+        await evict(ids)
         await settleHandler()
     }
 
@@ -398,7 +415,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         onInsert: resolveHandler(options?.onInsert, defaultInsert),
         onUpdate: resolveHandler(options?.onUpdate, defaultUpdate),
         onDelete: resolveHandler(options?.onDelete, defaultDelete),
-        utils: { accept, reload: adapter.reload },
+        utils: { accept, reload: adapter.reload, evict },
     })
 
     // A reconnect the server did not resume lost every event of the gap.
@@ -556,15 +573,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     // Awaits acceptance, not visibility: a custom mutation handler that calls
-    // accept() would otherwise wait for its own transaction.
+    // accept() or evict() would otherwise wait for its own transaction.
+    async function whenAccepted(applied: ReturnType<typeof membership.land>): Promise<void> {
+        if (applied === true || applied === false) return
+        const accepted = whenSyncAccepted(applied)
+        if (accepted !== true) await accepted
+    }
+
     async function accept(rows: readonly RecordType[]): Promise<void> {
         if (!(await ensureSyncing())) {
             throw new Error(`Collection '${collectionName}' is not syncing; accept() has no store`)
         }
-        const applied = membership.land(ACCEPTED, rows)
-        if (applied === true || applied === false) return
-        const accepted = whenSyncAccepted(applied)
-        if (accepted !== true) await accepted
+        await whenAccepted(membership.land(ACCEPTED, rows))
     }
 
     // A parent's hold on this collection as a relation target. Keeps sync
@@ -636,6 +656,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         expectFiling: fetcher.expectFiling,
         accept,
         reload: adapter.reload,
+        evict,
         fetchRelations: views.fetchRelations,
         withRealtime: views.withRealtime,
     })

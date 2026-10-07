@@ -376,8 +376,9 @@ export interface CreateCollectionOptions<
      * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: async ({ transaction }) => {
      *         const ids = transaction.mutations.map(mutation => mutation.original.id);
-     *         // The realtime delete event or a reload() removes the rows
      *         await Promise.all(ids.map(id => customDeleteLogic(id)));
+     *         // Remove the rows before the optimistic state drops
+     *         await collection.evict(ids);
      *     }
      * });
      *
@@ -399,8 +400,9 @@ export interface CreateCollectionOptions<
      *
      * Only affects the built-in default handlers. A custom
      * onInsert/onUpdate should land the server response with
-     * `await collection.accept(rows)` before it returns. A custom handler
-     * that needs a refetch can call `await collection.reload()` instead.
+     * `await collection.accept(rows)` before it returns, and a custom
+     * onDelete should `await collection.evict(ids)`. A custom handler that
+     * needs a refetch can call `await collection.reload()` instead.
      *
      * @default false
      *

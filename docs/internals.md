@@ -51,7 +51,7 @@ In on-demand mode `markReady` runs when sync starts. In eager mode it runs when 
 
 TanStack DB drops a transaction's optimistic state when its handler settles. A row the server fills in (a number, a timestamp) must be in the synced store by then, so the built-in handlers land the server's rows from inside the handler under the `ACCEPTED` holder. The receipt is not awaited: the transaction is accepted at `commit()`, and it becomes visible when the handler's transaction settles. The ledger drops a row the store already supersedes, because a realtime echo may have landed a newer copy while the request was in flight.
 
-`accept(rows)` is the same path made public, for rows a custom endpoint returns. It awaits acceptance only, so a custom handler can await it.
+`accept(rows)` is the same path made public, for rows a custom endpoint returns. `evict(ids)` is the delete handler's path made public: it tombstones the ids for every fetch in flight (`noteDeleted`) and releases every holder. Both await acceptance only, so a custom handler can await them.
 
 ## Pending filings
 

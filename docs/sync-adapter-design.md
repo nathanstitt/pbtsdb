@@ -226,7 +226,8 @@ rows it filed, so the ledger can release them exactly.
 The `utils.writeInsert/Upsert/Delete/Batch` family is removed from the
 public API. A direct write lets the application put a row in the store
 with no holder and no staleness check, which is what the ledger exists to
-prevent. tinycld boards is the only consumer, and it has two needs:
+prevent. tinycld boards is the only consumer, and it has two needs; a
+custom delete handler adds a third:
 
 1. **A custom endpoint returned the server's row.** `useMoveCardToBoard`
    and `useSprintLifecycle` call `pb.send` on a server endpoint, then
@@ -251,11 +252,18 @@ prevent. tinycld boards is the only consumer, and it has two needs:
    confirm, so it is the recovery path after any lost echo. It replaces
    `utils.refetch()` and `queryClient.invalidateQueries([name])`.
 
-   Revocation is rare, so seven reloads at that moment is acceptable. If
-   it is not, add `collection.evict(ids)`: release every ref of the given
-   rows with no request. Not in the first version.
+   Revocation is rare, so seven reloads at that moment is acceptable.
 
-Both methods are on the collection and on `collection.utils` (typed
+3. **A custom delete handler removed rows.** Until the delete echo
+   arrives, the row would show again once the optimistic state drops.
+
+   New method: `collection.evict(ids)`. The server deleted these rows.
+   Release every ref of the given rows with no request, and tombstone the
+   ids for every fetch in flight. The built-in delete handler uses the
+   same path. A custom `onDelete` awaits it before it returns, as a
+   custom `onInsert` awaits `accept`.
+
+All three methods are on the collection and on `collection.utils` (typed
 `PbCollectionUtils<T>`), on the collection's record type. Every upstream
 adapter returns its functions in `utils`, which is where TanStack DB
 devtools and users look for them.

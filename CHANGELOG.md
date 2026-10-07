@@ -16,8 +16,9 @@ All notable changes to this project will be documented in this file.
 - `createCollection(pb, queryClient, factoryOptions?)` is now `createCollection(pb, factoryOptions?)`.
 - `collection.utils.writeInsert/writeUpdate/writeUpsert/writeDelete/writeBatch` and
   `collection.utils.refetch` are removed. Use `collection.accept(rows)` for rows the
-  server returned and `collection.reload()` to refetch every live subset. Both are
-  also on `collection.utils`.
+  server returned, `collection.evict(ids)` for rows the server deleted, and
+  `collection.reload()` to refetch every live subset. All three are also on
+  `collection.utils`.
 - `queryClient.invalidateQueries([collectionName])` no longer reaches pbtsdb. Call
   `collection.reload()`.
 - The `ignoreAutoCancellation` option is removed. Every request carries its own key,
