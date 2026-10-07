@@ -626,4 +626,87 @@ describe('realtime client', () => {
         if (!second) throw new Error('no EventSource opened')
         expect(second.url).not.toContain('resume=')
     })
+
+    it('reset closes the old connection, reconnects with no resume, and reports a reload once', async () => {
+        const { client, sent, reconnects, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const first = connect('client-1')
+        await sub
+        expect(sent).toHaveLength(1)
+
+        client.reset()
+        expect(first.closed).toBe(true)
+        expect(client.isConnected()).toBe(false)
+        expect(client.clientId()).toBeUndefined()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(2)
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        expect(second.url).not.toContain('resume=')
+
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+        expect(reconnects).toEqual([false])
+    })
+
+    it('settles a subscribe pending at reset time once the new connection posts', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await flush()
+        const firstSource = FakeEventSource.instances.at(-1)
+        if (!firstSource) throw new Error('no EventSource opened')
+        firstSource.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        gate.shift()?.()
+        await first
+        expect(sent).toHaveLength(1)
+
+        let pendingSettled = false
+        const pending = client
+            .subscribe('t2', () => undefined)
+            .then(fn => {
+                pendingSettled = true
+                return fn
+            })
+        client.reset()
+        await flush()
+        expect(pendingSettled).toBe(false)
+        expect(firstSource.closed).toBe(true)
+
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        expect(second).not.toBe(firstSource)
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+        gate.shift()?.()
+        await pending
+        expect(pendingSettled).toBe(true)
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
+    })
+
+    it('reset with no topics registered opens no connection', async () => {
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => undefined,
+            eventSource: url => new FakeEventSource(url),
+        })
+        FakeEventSource.instances = []
+        client.reset()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(0)
+        expect(client.isConnected()).toBe(false)
+    })
 })

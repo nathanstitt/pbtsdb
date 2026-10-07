@@ -45,6 +45,19 @@ export function realtimeClientFor(pb: PocketBase): RealtimeClient {
     return entryFor(pb).client
 }
 
+/**
+ * Forgets the shared realtime connection's server-side session and
+ * reconnects under `pb`'s current auth, re-sending every subscribed topic.
+ * Call this after an auth change (login, logout, switching users) that the
+ * connection cannot otherwise detect — an unchanged topic list sends no
+ * POST on its own, so without this the server would keep serving the
+ * previous user's subscriptions. A no-op if `pb` has no realtime connection
+ * yet (nothing has subscribed through it).
+ */
+export function resetRealtime(pb: PocketBase): void {
+    entries.get(pb)?.client.reset()
+}
+
 export function transportFor(pb: PocketBase): Transport {
     const entry = entryFor(pb)
     return {

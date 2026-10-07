@@ -65,7 +65,7 @@ A mark records that every row with `field === value` is in the store, so a subse
 
 ## Realtime client
 
-`src/realtime-client.ts`: `createRealtimeClient`; `src/transport.ts`: `transportFor`, `realtimeClientFor`
+`src/realtime-client.ts`: `createRealtimeClient`; `src/transport.ts`: `transportFor`, `realtimeClientFor`, `resetRealtime`
 
 pbtsdb opens its own SSE connection to `/api/realtime`, one per `PocketBase` instance, instead of the SDK's. The SDK's client could not do three things pbtsdb needs: carry query parameters on the connection URL (resume), drop a topic the server rejects (it re-sends it with every later request, which then fails), and tell a caller when the server has a topic.
 
@@ -76,6 +76,8 @@ The connection carries no auth; the POST does, through `pb.send`. The client id 
 The refetch listener in `build-collection.ts` is registered when the collection starts syncing (`loading` or `ready`) and removed when it reaches `cleaned-up`, so a long-lived `pb` does not accumulate one listener per `buildCollection` call.
 
 React Native has no `EventSource`; the client reads `globalThis.EventSource` at connect time, so a polyfill installed before the first subscription (tinycld uses `react-native-sse`) is picked up.
+
+`reset()` (`resetRealtime(pb)` at the `transport.ts` level) exists because the connection carries no auth of its own and an unchanged topic list sends no POST: a `pb.authStore` change (login, logout, switching users) is otherwise invisible to it, and the server would keep serving the previous session's subscriptions. `reset()` keeps every `listeners` registration — unlike `disconnect()`, which also rejects pending waiters and clears them — and forgets only the server-side session (`confirmed`, `clientId`, `lastSeq`, any pending reconnect timer), then connects again at once if any topic is registered. The new connection has no client id, so it is a first connect for the server; pbtsdb still treats it as a reconnect for its own purposes (`everConnected` is left `true`), so `onReconnect(false)` fires once that POST succeeds and every ready collection refetches, the same as a non-resumed reconnect after a dropped connection.
 
 ## Sync-session refs and holds
 

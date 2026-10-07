@@ -2,7 +2,7 @@ import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { realtimeClientFor, transportFor } from '../src/transport'
+import { realtimeClientFor, resetRealtime, transportFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -125,5 +125,29 @@ describe('reconnect refetch lifecycle', () => {
         await waitForLoadFinish(result)
         getFullList.mockRestore()
         await books.cleanup()
+    }, 20000)
+
+    it('resetRealtime reconnects a ready, subscribed collection and triggers one refetch', async () => {
+        const books = createBooksCollection(queryClient)
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        expect((books as unknown as { isSubscribed: () => boolean }).isSubscribed()).toBe(true)
+
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        getFullList.mockClear()
+
+        resetRealtime(pb)
+        await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
+        await waitFor(
+            () =>
+                expect((books as unknown as { isSubscribed: () => boolean }).isSubscribed()).toBe(
+                    true
+                ),
+            { timeout: 10000 }
+        )
+
+        await books.cleanup()
+        getFullList.mockRestore()
     }, 20000)
 })

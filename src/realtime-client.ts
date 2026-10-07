@@ -57,6 +57,16 @@ export interface RealtimeClient {
     isConnected: () => boolean
     clientId: () => string | undefined
     disconnect: () => void
+    /**
+     * Forgets the server-side session (client id, confirmed topics) and
+     * reconnects at once if any topic is registered, posting the full list
+     * under whatever auth the caller's `send` carries now. Call this after
+     * an auth change (login, logout, user switch) the shared connection
+     * cannot otherwise see, so the server does not keep serving the old
+     * user's subscriptions. Registrations and listeners are kept; pending
+     * `subscribe` calls settle once the new connection's POST completes.
+     */
+    reset: () => void
     /** @internal Simulates the live connection dropping, the way `onerror` would; tests use it. */
     simulateDisconnect: () => void
 }
@@ -332,6 +342,18 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         },
         simulateDisconnect() {
             if (source) handleConnectionLost(source)
+        },
+        reset() {
+            if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+            reconnectTimer = undefined
+            source?.close()
+            source = undefined
+            connected = false
+            confirmed = []
+            clientId = undefined
+            lastSeq = undefined
+            attempts = 0
+            if (listeners.size > 0) connect()
         },
     }
 }

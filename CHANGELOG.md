@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Resume protocol for servers that support it: `?resume=<clientId>&after=<seq>`, `resumed` in `PB_CONNECT`, `seq` on events.
+- `resetRealtime(pb)`: call after an auth change (login, logout, switching users) so the shared connection re-subscribes every topic under the new auth instead of silently keeping the previous session.
 - Internal: `realtimeClientFor(pb)` is exported for tests that intercept realtime events.
 
 ## [0.11.0] - 2026-10-05
