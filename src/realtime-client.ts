@@ -370,7 +370,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             }
             set.add(listener)
             if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
-            const ready = submit()
+            // While disabled nothing can confirm a topic; the registration
+            // goes out with the first POST after enable(). Resolving now lets
+            // the caller open and close entries, so idle cleanup still runs.
+            const ready = disabled ? Promise.resolve() : submit()
             const unsubscribe = async () => {
                 const current = listeners.get(topic)
                 if (!current?.delete(listener)) return

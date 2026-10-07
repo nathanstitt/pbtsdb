@@ -3,6 +3,8 @@ import {
     createLiveQueryCollection,
     type LoadSubsetOptions,
     type SyncConfig,
+    whenSyncAccepted,
+    withAcceptedReceipt,
 } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
 
@@ -15,7 +17,32 @@ type Row = { id: string }
  * passed to `from()` and hands that subscription to `loadSubset`. An upgrade
  * that changes either fails here, with a message naming the assumption.
  */
-describe('TanStack DB assumptions behind views', () => {
+describe('TanStack DB internals pbtsdb relies on', () => {
+    // `whenSyncAccepted` is marked @internal upstream. accept(), evict() and
+    // reload() resolve on it so a mutation handler never waits for its own
+    // transaction's visibility.
+    it('whenSyncAccepted reads the acceptance a commit receipt carries', async () => {
+        const pending = () => new Promise<void>(() => undefined)
+        const accepted = Promise.resolve()
+        expect(
+            whenSyncAccepted(true),
+            'whenSyncAccepted no longer passes a synchronous receipt through'
+        ).toBe(true)
+        expect(
+            whenSyncAccepted(withAcceptedReceipt(pending(), true)),
+            'whenSyncAccepted no longer reads the accepted marker withAcceptedReceipt sets'
+        ).toBe(true)
+        expect(
+            whenSyncAccepted(withAcceptedReceipt(pending(), accepted)),
+            'whenSyncAccepted no longer returns the accepted promise'
+        ).toBe(accepted)
+        const plain = pending()
+        expect(
+            whenSyncAccepted(plain),
+            'whenSyncAccepted no longer falls back to the receipt itself'
+        ).toBe(plain)
+    })
+
     it('calls subscribeChanges on the object passed to from() and hands loadSubset that subscription', async () => {
         const seen: unknown[] = []
         let written = false

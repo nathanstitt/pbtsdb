@@ -34,7 +34,7 @@ only because of query-db-collection:
 | Delete echoes, case 1 | on-demand prune races the echo | Gone. Only pbtsdb deletes rows. |
 | Loaded-subset marks: observer-cache invalidation and the microtask | react-query serves a cached query without asking the marks | Gone. No observer cache. |
 | Authoritative writes, ownership claim (PR #23) | cache ownership of written rows | Gone. The ledger owns rows. |
-| `tanstack-internals.test.ts` | pinned undocumented behaviour | Deleted. |
+| `tanstack-internals.test.ts` | pinned undocumented behaviour | Replaced by `tanstack-assumptions.test.ts`, which pins the internals still used: `from()` → `subscribeChanges` for views, and `whenSyncAccepted` (`@internal` upstream). |
 
 What stays: write-back timing (a core TanStack rule), pending filings,
 sync-session refs and holds, realtime filter per chunk, PocketBase limits,

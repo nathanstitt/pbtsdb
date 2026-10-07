@@ -761,9 +761,27 @@ describe('realtime client', () => {
         await flush()
         expect(FakeEventSource.instances).toHaveLength(2)
         connect('client-2')
+        await flush()
         await pending
         expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
         expect(reconnects).toEqual([false])
+    })
+
+    it('a subscribe while disabled resolves at once and goes out with the first POST after enable', async () => {
+        const { client, sent, connect } = setup()
+        client.disable()
+        const unsubscribe = await client.subscribe('t1', () => undefined)
+        expect(FakeEventSource.instances).toHaveLength(0)
+        expect(sent).toEqual([])
+        await unsubscribe()
+        expect(client.topics()).toEqual([])
+
+        await client.subscribe('t2', () => undefined)
+        client.enable()
+        await flush()
+        connect('client-1')
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-1', subscriptions: ['t2'] })
     })
 
     it('reset with no topics registered opens no connection', async () => {

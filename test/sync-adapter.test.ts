@@ -40,7 +40,16 @@ function deferred() {
     return { promise, resolve }
 }
 
-function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) {
+type SetupExtra = {
+    realtimeMode?: 'collection' | 'query'
+    withViewExpand?: (opts: LoadSubsetOptions) => LoadSubsetOptions
+}
+
+function setup(
+    syncMode: 'eager' | 'on-demand' = 'on-demand',
+    subsetGcTime = 0,
+    extra: SetupExtra = {}
+) {
     const calls: Call[] = []
     let served: Row[] | undefined
     const fetcher: Fetcher<Row> = {
@@ -99,7 +108,7 @@ function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) 
     const adapter = createSyncAdapter<Row>({
         collectionName: 'rows',
         syncMode,
-        realtimeMode: 'query',
+        realtimeMode: extra.realtimeMode ?? 'query',
         subsetGcTime,
         ledger,
         store,
@@ -107,7 +116,10 @@ function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) 
         fetcher,
         subsets,
         realtime,
-        registry: () => ({ tagFor: () => undefined, withViewExpand: opts => opts }),
+        registry: () => ({
+            tagFor: () => undefined,
+            withViewExpand: extra.withViewExpand ?? (opts => opts),
+        }),
         onCleanup,
     })
     const result = adapter.sync(params as unknown as SyncParams)
@@ -535,6 +547,43 @@ describe('sync adapter', () => {
         expect(t.adapter.holdersFor(row('b', 'y'))).toEqual([other])
         expect(t.adapter.holdersFor(row('c', 'z'))).toEqual([])
         t.adapter.expireParked()
+    })
+
+    it('holdersFor counts a where the client cannot evaluate as a match', async () => {
+        // The request is built from the view registry's options, so the
+        // converter never sees the opaque where; only the matcher does.
+        const t = setup('on-demand', 1000, {
+            realtimeMode: 'collection',
+            withViewExpand: () => ({}),
+        })
+        const opaque: LoadSubsetOptions = {
+            where: {
+                type: 'func',
+                name: 'no_such_function',
+                args: [],
+            } as unknown as LoadSubsetOptions['where'],
+        }
+        const load = t.loadSubset(opaque)
+        t.calls[0].resolve([])
+        await load
+        expect(t.adapter.holdersFor(row('a', 'x'))).toEqual([opaque])
+    })
+
+    it('a second load with the same options object releases the first demand first', async () => {
+        const t = setup()
+        const opts = named('x')
+        const first = t.loadSubset(opts)
+        t.calls[0].resolve([row('a', 'x')])
+        await first
+        const second = t.loadSubset(opts)
+        expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+        expect(t.realtime.retainQueryFilters).toHaveBeenCalledTimes(2)
+        t.calls[1].resolve([row('a', 'x')])
+        await second
+        expect(t.ledger.idsOf(opts)).toEqual(['a'])
+        t.unloadSubset(opts)
+        expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(2)
+        expect(t.ledger.has('a')).toBe(false)
     })
 
     it('holdersFor is EAGER in eager mode', async () => {

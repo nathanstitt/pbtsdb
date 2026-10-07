@@ -126,7 +126,7 @@ Path helpers, plus `parseViaKey` and `markFiledSubset`.
 The core sync adapter end to end: a handler that calls `reload()`, `accept()` or `evict()` settles, a closed topic releases the rows only it held, and `reload()` evicts a topic-echoed row the server no longer returns.
 
 #### `tanstack-assumptions.test.ts`
-Pins the undocumented TanStack DB behaviour views rely on: the live query calls `subscribeChanges` on the object passed to `from()` and hands that subscription to `loadSubset`. If this fails after an upgrade, read the assertion message before touching anything else.
+Pins the TanStack DB internals pbtsdb relies on: the live query calls `subscribeChanges` on the object passed to `from()` and hands that subscription to `loadSubset` (views), and `whenSyncAccepted`, marked `@internal` upstream, reads the acceptance receipt `commit()` attaches (accept, evict, reload). If this fails after an upgrade, read the assertion message before touching anything else.
 
 ---
 

@@ -160,21 +160,22 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return true
     }
 
-    // An expression the client cannot evaluate matches nothing, so it
-    // releases nothing.
-    function matcherFor(where: LoadSubsetOptions['where']): (row: T) => boolean {
+    // `unknown` is the answer for an expression the client cannot compile or
+    // evaluate. The release path treats it as no match, so it releases
+    // nothing; the hand-off treats it as a match, so it keeps the row.
+    function matcherFor(where: LoadSubsetOptions['where'], unknown: boolean): (row: T) => boolean {
         if (where === undefined) return () => true
         let evaluate: ReturnType<typeof compileSingleRowExpression>
         try {
             evaluate = compileSingleRowExpression(where)
         } catch {
-            return () => false
+            return () => unknown
         }
         return row => {
             try {
                 return toBooleanPredicate(evaluate(row as Record<string, unknown>))
             } catch {
-                return false
+                return unknown
             }
         }
     }
@@ -206,7 +207,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     ): Applied {
         if (opts.limit !== undefined || opts.cursor || opts.offset !== undefined) return true
         const returned = new Set(ids)
-        const matches = matcherFor(opts.where)
+        const matches = matcherFor(opts.where, false)
         const omitted = [...before.rows]
             .filter(([id, stored]) => !returned.has(id) && ledger.row(id) === stored)
             .filter(([, stored]) => matches(stored))
@@ -356,6 +357,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
 
     function loadSubsetIn(run: Run) {
         return (opts: LoadSubsetOptions): true | Promise<void> => {
+            // Core passes a fresh options object per acquisition; a direct
+            // caller that reuses one must not leak the earlier demand's refs.
+            if (run.demands.has(opts)) expire(run, opts)
             const demand = demandFor(opts)
             const parkedOpts = unpark(run, demand)
             run.demands.set(opts, demand)
@@ -546,7 +550,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             return [...current.demands]
                 .filter(
                     ([opts, demand]) =>
-                        demand.parked === undefined && demand.landed && matcherFor(opts.where)(row)
+                        demand.parked === undefined &&
+                        demand.landed &&
+                        matcherFor(opts.where, true)(row)
                 )
                 .map(([opts]) => opts)
         },
