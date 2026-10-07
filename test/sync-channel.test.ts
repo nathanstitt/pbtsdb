@@ -4,6 +4,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
@@ -48,11 +49,13 @@ describe('realtime rows written through the sync session', () => {
         const ref: { current: ((event: RecordSubscription<Books>) => void) | null } = {
             current: null,
         }
-        const books = pb.collection('books')
-        const real = books.subscribe.bind(books)
-        vi.spyOn(books, 'subscribe').mockImplementation((topic, callback, options) => {
-            ref.current = callback as (event: RecordSubscription<Books>) => void
-            return real(topic, callback, options)
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+            if (topic.startsWith('books/')) {
+                ref.current = listener as unknown as (event: RecordSubscription<Books>) => void
+            }
+            return real(topic, listener)
         })
         return ref
     }

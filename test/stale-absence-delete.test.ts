@@ -2,8 +2,10 @@ import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
@@ -15,7 +17,7 @@ import {
     pb,
     waitForLoadFinish,
 } from './helpers'
-import type { Schema } from './schema'
+import type { Books, Schema } from './schema'
 
 /**
  * Regression coverage for the stale-ABSENCE delete: the missing arm of the
@@ -57,17 +59,15 @@ describe('stale-absence reconcile delete (on-demand)', () => {
     // Ids of every realtime event the collection's handler has received.
     const recordEchoes = () => {
         const echoed = new Set<string>()
-        const books = pb.collection('books')
-        const real = books.subscribe.bind(books)
-        vi.spyOn(books, 'subscribe').mockImplementation((topic, callback, options) =>
-            real(
-                topic,
-                event => {
-                    callback(event)
-                    echoed.add(event.record.id)
-                },
-                options
-            )
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) =>
+            real(topic, event => {
+                listener(event)
+                if (topic.startsWith('books/')) {
+                    echoed.add((event as unknown as RecordSubscription<Books>).record.id)
+                }
+            })
         )
         return echoed
     }

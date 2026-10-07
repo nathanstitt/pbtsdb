@@ -2,8 +2,10 @@ import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
@@ -48,16 +50,13 @@ describe('built-in handlers land the server row before they settle', () => {
     // Realtime events for these ids never reach the collection.
     const muteEchoes = () => {
         const muted = new Set<string>()
-        const books = pb.collection('books')
-        const real = books.subscribe.bind(books)
-        vi.spyOn(books, 'subscribe').mockImplementation((topic, callback, options) =>
-            real(
-                topic,
-                event => {
-                    if (!muted.has(event.record.id)) callback(event)
-                },
-                options
-            )
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) =>
+            real(topic, event => {
+                const typed = event as unknown as RecordSubscription<Books>
+                if (!topic.startsWith('books/') || !muted.has(typed.record.id)) listener(event)
+            })
         )
         return muted
     }
