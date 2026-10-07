@@ -39,7 +39,7 @@ function deferred() {
     return { promise, resolve }
 }
 
-function setup(syncMode: 'eager' | 'on-demand' = 'on-demand') {
+function setup(syncMode: 'eager' | 'on-demand' = 'on-demand', subsetGcTime = 0) {
     const calls: Call[] = []
     let served: Row[] | undefined
     const fetcher: Fetcher<Row> = {
@@ -97,6 +97,7 @@ function setup(syncMode: 'eager' | 'on-demand' = 'on-demand') {
         collectionName: 'rows',
         syncMode,
         realtimeMode: 'query',
+        subsetGcTime,
         ledger,
         store,
         membership,
@@ -379,6 +380,107 @@ describe('sync adapter', () => {
                     { where: gt(new IR.PropRef(['updated']), new Date('2020-01-01T00:00:00Z')) },
                     row('a', 'x')
                 ))
+        })
+    })
+
+    describe('a parked subset', () => {
+        const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+        it('is adopted by an equal load within the window with no request, inheriting its filter refs', async () => {
+            const t = setup('on-demand', 1000)
+            const first = named('x')
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(first)
+            expect(t.ledger.idsOf(first)).toEqual(['a'])
+            expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
+
+            const second = named('x')
+            expect(t.loadSubset(second)).toBe(true)
+            expect(t.calls).toHaveLength(1)
+            expect(t.ledger.idsOf(second)).toEqual(['a'])
+            expect(t.ledger.idsOf(first)).toEqual([])
+            expect(t.realtime.retainQueryFilters).toHaveBeenCalledTimes(1)
+            expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
+
+            t.unloadSubset(second)
+            await wait(1100)
+            expect(t.ledger.has('a')).toBe(false)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+        })
+
+        it('is not adopted by a load with a different request', async () => {
+            const t = setup('on-demand', 1000)
+            const first = named('x')
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(first)
+            const other = t.loadSubset(named('y'))
+            expect(t.calls).toHaveLength(2)
+            t.calls[1].resolve([])
+            await other
+            expect(t.ledger.idsOf(first)).toEqual(['a'])
+        })
+
+        it('expires after the window, releasing its rows and filters', async () => {
+            const t = setup('on-demand', 20)
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(opts)
+            expect(t.ledger.has('a')).toBe(true)
+            await wait(60)
+            expect(t.ledger.has('a')).toBe(false)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+            expect(t.log).toContain('delete:a')
+        })
+
+        it('is adopted and then refetched when the load asks for a refetch', async () => {
+            const t = setup('on-demand', 1000)
+            const first = named('x')
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(first)
+            const second = { ...named('x'), refetch: true }
+            const reloading = t.loadSubset(second)
+            expect(t.ledger.idsOf(second)).toEqual(['a'])
+            expect(t.calls).toHaveLength(2)
+            t.calls[1].resolve([row('b', 'x')])
+            await reloading
+            expect(t.ledger.idsOf(second)).toEqual(['b'])
+            expect(t.ledger.has('a')).toBe(false)
+            t.unloadSubset(second)
+            await wait(1100)
+        })
+
+        it('is expired by a reload instead of being refetched', async () => {
+            const t = setup('on-demand', 1000)
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(opts)
+            await t.adapter.reload()
+            expect(t.calls).toHaveLength(1)
+            expect(t.ledger.has('a')).toBe(false)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+        })
+
+        it('is forgotten by cleanup without a late release', async () => {
+            const t = setup('on-demand', 20)
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(opts)
+            t.cleanup()
+            await wait(60)
+            expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
+            expect(t.realtime.resetQueryFilters).toHaveBeenCalledTimes(1)
         })
     })
 

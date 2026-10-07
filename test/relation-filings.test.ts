@@ -65,7 +65,7 @@ describe('relation filings', () => {
         return row
     }
 
-    function collections() {
+    function collections(subsetGcTime = 0) {
         const c = createCollection<Schema>(pb)
         const authors = c('authors', {
             syncMode: 'on-demand',
@@ -76,6 +76,7 @@ describe('relation filings', () => {
             syncMode: 'on-demand',
             relations: { author: authors },
             alwaysFetchRelations: ['author'],
+            subsetGcTime,
             collectionOptions: { gcTime: 60_000 },
         })
         return { authors, books }
@@ -135,6 +136,35 @@ describe('relation filings', () => {
             await waitFor(() => expect(authors.get(a1.id)).toBeUndefined(), { timeout: 10000 })
         } finally {
             q1.unmount()
+            await books.cleanup()
+            await authors.cleanup()
+        }
+    }, 30000)
+
+    it('a remount within subsetGcTime adopts the parked rows with no request and keeps the filings', async () => {
+        const a1 = await author('a1')
+        const b1 = await book('b1', a1.id)
+        const { authors, books } = collections(5000)
+        const getList = vi.spyOn(pb.collection('books'), 'getList')
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        const requests = () => getList.mock.calls.length + getFullList.mock.calls.length
+        const q1 = byId(books, b1.id)
+        let q2: ReturnType<typeof byId> | undefined
+        try {
+            await waitForLoadFinish(q1.result)
+            await books.waitForSubscription()
+            expect(authors.get(a1.id)).toBeDefined()
+            const before = requests()
+
+            q1.unmount()
+            expect(books.get(b1.id)).toBeDefined()
+            q2 = byId(books, b1.id)
+            await waitForLoadFinish(q2.result)
+            expect(q2.result.current.data.map(b => b.id)).toEqual([b1.id])
+            expect(requests()).toBe(before)
+            expect(authors.get(a1.id)).toBeDefined()
+        } finally {
+            q2?.unmount()
             await books.cleanup()
             await authors.cleanup()
         }

@@ -41,9 +41,12 @@ All notable changes to this project will be documented in this file.
 - `refetchOnMutation: true` calls `collection.reload()` before the handler settles.
   The built-in handlers return `void`. Concurrent `reload()` calls share one
   follow-up reload instead of each fetching every live subset.
-- A query that mounts again sends a request. The react-query cache served it
-  before. An id-keyed query whose rows the store holds is still served without a
-  request.
+- An unloaded on-demand subset stays held for `subsetGcTime` (default 5 s). A query
+  with an equal request that mounts within the window reuses the rows with no
+  request, and realtime keeps them fresh meanwhile. After the window, or on
+  `reload()`, the rows leave unless another holder has them. The react-query cache
+  served a remount for its `gcTime` before; the window is now explicit and realtime
+  covered.
 - Two live queries with equal requests send two requests. react-query deduplicated
   them.
 - No refetch on window focus or on network reconnect; react-query did both by

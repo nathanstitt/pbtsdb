@@ -467,6 +467,18 @@ export interface CreateCollectionOptions<
     realtime?: RealtimeMode
 
     /**
+     * How long, in milliseconds, an on-demand subset stays loaded after its
+     * last live query unsubscribes. A query with an equal request that mounts
+     * within the window reuses the rows with no request; realtime keeps them
+     * fresh meanwhile. Rows a parent filed through a relation follow the
+     * same window. `0` releases a subset as soon as it unloads. A
+     * `reload()` releases every waiting subset.
+     *
+     * @default 5000
+     */
+    subsetGcTime?: number
+
+    /**
      * Additional options passed directly to the underlying TanStack DB collection.
      * Use this to configure indexing, garbage collection, comparison functions,
      * and any other TanStack DB collection options not explicitly exposed by pbtsdb.

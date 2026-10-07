@@ -23,6 +23,8 @@ export interface SyncAdapterDeps<T extends object> {
     collectionName: string
     syncMode: 'eager' | 'on-demand'
     realtimeMode: RealtimeMode
+    /** How long an unloaded subset stays held for an equal load to adopt; 0 releases at once. */
+    subsetGcTime: number
     ledger: Ledger<T>
     store: SyncedStore<T>
     membership: Membership<T>
@@ -64,6 +66,8 @@ type Demand = {
     seq: number
     /** The newest load; a superseded load resolves with it. */
     loading: Promise<string[]> | undefined
+    /** Set once unloaded: the demand waits for an equal load to adopt it, or expires. */
+    parked: ReturnType<typeof setTimeout> | undefined
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -76,6 +80,7 @@ type Run = {
 
 export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): SyncAdapter<T> {
     const { collectionName, syncMode, ledger, store, membership, fetcher, subsets, realtime } = deps
+    const { subsetGcTime } = deps
     let current: Run | undefined
     // One set per fetch in flight: ids the server deleted meanwhile, which
     // the result may still list.
@@ -84,11 +89,20 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function demandFor(opts: LoadSubsetOptions): Demand {
         const request = toRequest(deps.registry().withViewExpand(opts))
         const mode = deps.registry().tagFor(opts)?.realtime ?? deps.realtimeMode
-        if (mode !== 'query') {
-            return { request, filters: undefined, counted: false, seq: 0, loading: undefined }
-        }
+        const base = { request, seq: 0, loading: undefined, parked: undefined }
+        if (mode !== 'query') return { ...base, filters: undefined, counted: false }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
-        return { request, filters, counted: true, seq: 0, loading: undefined }
+        return { ...base, filters, counted: true }
+    }
+
+    // Two demands are equal when they would send the same request and hold
+    // the same realtime filters.
+    function keyOf(demand: Demand): string {
+        return JSON.stringify([demand.request, demand.filters], (_key, value: unknown) =>
+            value && typeof value === 'object' && !Array.isArray(value)
+                ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+                : value
+        )
     }
 
     async function settle(applied: Applied, wait: Wait): Promise<void> {
@@ -223,16 +237,51 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return loading
     }
 
+    function expire(run: Run, opts: LoadSubsetOptions): void {
+        const demand = run.demands.get(opts)
+        if (!demand) return
+        if (demand.parked !== undefined) clearTimeout(demand.parked)
+        run.demands.delete(opts)
+        if (demand.counted) realtime.releaseQueryFilters(demand.filters)
+        membership.drop([opts])
+    }
+
+    // An unloaded subset is parked: its rows stay held and its realtime
+    // filters stay open for `subsetGcTime`, so a panel that mounts again
+    // adopts them with no request. A reload or cleanup expires every parked
+    // demand, because a parked demand is a cache.
     function unloadSubset(run: Run, opts: LoadSubsetOptions): void {
         try {
             const demand = run.demands.get(opts)
             if (!demand) return
-            run.demands.delete(opts)
-            if (demand.counted) realtime.releaseQueryFilters(demand.filters)
-            membership.drop([opts])
+            if (subsetGcTime <= 0 || demand.parked !== undefined) {
+                expire(run, opts)
+                return
+            }
+            demand.parked = setTimeout(() => {
+                if (current === run) expire(run, opts)
+            }, subsetGcTime)
         } catch (error) {
             logger.error('unloadSubset failed', { collectionName, error })
         }
+    }
+
+    function expireParked(run: Run): void {
+        for (const [opts, demand] of [...run.demands]) {
+            if (demand.parked !== undefined) expire(run, opts)
+        }
+    }
+
+    /** Take the parked demand equal to `demand`, keeping its filter refs for the caller. */
+    function unpark(run: Run, demand: Demand): LoadSubsetOptions | undefined {
+        const key = keyOf(demand)
+        for (const [opts, parked] of run.demands) {
+            if (parked.parked === undefined || keyOf(parked) !== key) continue
+            clearTimeout(parked.parked)
+            run.demands.delete(opts)
+            return opts
+        }
+        return undefined
     }
 
     function serve(opts: LoadSubsetOptions, demand: Demand): Applied {
@@ -244,22 +293,48 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return membership.reconcile(opts, served, [ACCEPTED])
     }
 
+    // Adopting a parked demand moves its rows to the new holder in one
+    // transaction and inherits its realtime filter refs.
+    function adopt(opts: LoadSubsetOptions, parkedOpts: LoadSubsetOptions): Applied {
+        const rows: T[] = []
+        for (const id of ledger.idsOf(parkedOpts)) {
+            const row = ledger.row(id)
+            if (row) rows.push(row)
+        }
+        return membership.reconcile(opts, rows, [ACCEPTED, parkedOpts])
+    }
+
+    // Rows already at hand for a new demand: a parked equal demand's, or
+    // the store's. False when a fetch is needed.
+    function startFromHeld(
+        opts: LoadSubsetOptions,
+        demand: Demand,
+        parkedOpts: LoadSubsetOptions | undefined
+    ): Applied {
+        if (parkedOpts === undefined) return serve(opts, demand)
+        const adopted = adopt(opts, parkedOpts)
+        return opts.refetch === true ? false : adopted
+    }
+
     function loadSubsetIn(run: Run) {
         return (opts: LoadSubsetOptions): true | Promise<void> => {
             const demand = demandFor(opts)
+            const parkedOpts = unpark(run, demand)
             run.demands.set(opts, demand)
-            if (demand.counted) realtime.retainQueryFilters(demand.filters)
+            if (parkedOpts === undefined && demand.counted) {
+                realtime.retainQueryFilters(demand.filters)
+            }
             try {
-                const applied = serve(opts, demand)
+                const applied = startFromHeld(opts, demand, parkedOpts)
                 if (applied !== false) return applied
             } catch (error) {
-                unloadSubset(run, opts)
+                expire(run, opts)
                 throw error
             }
             return load(run, opts, demand, 'visible', opts.refetch === true).then(
                 () => undefined,
                 error => {
-                    if (run.demands.get(opts) === demand) unloadSubset(run, opts)
+                    if (run.demands.get(opts) === demand) expire(run, opts)
                     throw error
                 }
             )
@@ -338,6 +413,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     async function reloadNow(): Promise<void> {
         const run = current
         if (!run || !store.isAttached()) return
+        expireParked(run)
         const before = releasable()
         let confirmed: Set<string>
         try {
@@ -386,6 +462,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             // checks it before it writes.
             const cleanup = () => {
                 run.abort.abort()
+                for (const demand of run.demands.values()) {
+                    if (demand.parked !== undefined) clearTimeout(demand.parked)
+                }
                 run.demands.clear()
                 if (current === run) current = undefined
                 store.detach(channel)

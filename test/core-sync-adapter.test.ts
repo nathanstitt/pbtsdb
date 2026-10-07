@@ -154,6 +154,7 @@ describe('core sync adapter', () => {
         const books = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             realtime: 'query',
+            subsetGcTime: 0,
             collectionOptions: { gcTime: 60_000 },
         })
         const fiction = renderHook(() =>
@@ -188,6 +189,7 @@ describe('core sync adapter', () => {
         const books = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             realtime: 'query',
+            subsetGcTime: 0,
             collectionOptions: { gcTime: 60_000 },
         })
         const { result, unmount } = renderHook(() =>
@@ -221,6 +223,7 @@ describe('core sync adapter', () => {
         const books = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             realtime: 'query',
+            subsetGcTime: 0,
             collectionOptions: { gcTime: 60_000 },
         })
         const { result, unmount } = renderHook(() =>

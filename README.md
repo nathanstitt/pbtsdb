@@ -293,6 +293,10 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 `disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
 
+### Subset Lifetime
+
+In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. Set `subsetGcTime: 0` to release a subset as soon as it unloads.
+
 ### Sync Modes
 
 Every collection is either **eager** (the default) or **on-demand**:

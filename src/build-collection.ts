@@ -205,6 +205,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const syncMode = options?.syncMode ?? 'eager'
     const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
     const refetchOnMutation = options?.refetchOnMutation ?? false
+    const subsetGcTime = options?.subsetGcTime ?? 5000
 
     function assertRealtimeMode(mode: RealtimeMode): void {
         if (!REALTIME_MODES.includes(mode)) {
@@ -314,6 +315,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         collectionName,
         syncMode,
         realtimeMode,
+        subsetGcTime,
         ledger,
         store,
         membership,
