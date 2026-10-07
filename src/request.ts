@@ -46,18 +46,6 @@ export function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
     return request
 }
 
-export function queryKeyFor<C extends string>(
-    collectionName: C,
-    opts?: LoadSubsetOptions
-): [C] | [C, PbRequest] {
-    const request = toRequest(opts)
-    return Object.keys(request).length === 0 ? [collectionName] : [collectionName, request]
-}
-
-export function requestFromQueryKey(queryKey: readonly unknown[]): PbRequest | undefined {
-    return queryKey[1] as PbRequest | undefined
-}
-
 /**
  * The filters a query's realtime entries send: every chunk of a keyed subset,
  * or the single converted filter. `undefined` means the whole collection.

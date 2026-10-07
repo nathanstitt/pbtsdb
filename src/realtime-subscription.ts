@@ -7,13 +7,20 @@ import type { Transport } from './transport'
 export interface RealtimeSubscriptionDeps<T extends object> {
     transport: Transport
     collectionName: string
-    handleEvent: (event: RecordSubscription<T>) => void
+    /** An event and the topic that delivered it: `'*'` or the filter string. */
+    handleEvent: (event: RecordSubscription<T>, topic: string) => void
     /** The expand union the next subscribe carries; pure, compared to detect drift. */
     pendingExpand: () => string | undefined
     /** Options for the next subscribe attempt; calls the factory callback. */
     subscribeOptions: () => RecordSubscribeOptions | undefined
     /** An entry opened, so the collections its expand reaches should be held. */
     onEntryOpened: () => void
+    /**
+     * The topic's entry is closed and the topic is no longer wanted, so the
+     * rows it delivered lose that topic's holder. Not called for a restart,
+     * which reopens the same topic.
+     */
+    onEntryClosed: (topic: string) => void
     /** Nothing is open and nothing is wanted. */
     onIdle: () => void
 }
@@ -63,6 +70,8 @@ export function createRealtimeSubscription<T extends object>(
     // client rejects an oversized topic before sending it, so these widen
     // to '*' instead.
     const oversizedFilters = new Set<string>()
+    // Topics that opened at least once, so the ledger may hold rows under them.
+    const delivered = new Set<string>()
 
     const isStarOpen = () => starUnsubscribe !== null
     const isOpen = () => isStarOpen() || filterEntries.size > 0
@@ -97,8 +106,9 @@ export function createRealtimeSubscription<T extends object>(
             starUnsubscribe = await deps.transport.subscribe<T>(
                 collectionName,
                 deps.subscribeOptions(),
-                deps.handleEvent
+                event => deps.handleEvent(event, '*')
             )
+            delivered.add('*')
             starExpand = expand
             logger.debug('Subscription started', { collectionName })
             notifyOpened()
@@ -137,11 +147,10 @@ export function createRealtimeSubscription<T extends object>(
         const options = filteredOptions(filter)
         const expand = deps.pendingExpand()
         try {
-            const unsubscribe = await deps.transport.subscribe<T>(
-                collectionName,
-                options,
-                deps.handleEvent
+            const unsubscribe = await deps.transport.subscribe<T>(collectionName, options, event =>
+                deps.handleEvent(event, filter)
             )
+            delivered.add(filter)
             filterEntries.set(filter, { unsubscribe, expand })
             logger.debug('Filtered subscription started', { collectionName, filter })
             notifyOpened()
@@ -172,6 +181,23 @@ export function createRealtimeSubscription<T extends object>(
 
     async function closeFilters(keep: (filter: string) => boolean = () => false): Promise<void> {
         await Promise.all([...filterEntries.keys()].filter(f => !keep(f)).map(closeFilter))
+    }
+
+    // A topic's rows stay held while its entry is open or the topic is still
+    // wanted: a restart reopens the same topic, and a filter closed because
+    // '*' opened comes back when '*' is no longer wanted. Runs after every
+    // close in the pass has settled.
+    function releaseClosedTopics(): void {
+        const wanted = wantedFilters()
+        for (const topic of delivered) {
+            const live =
+                topic === '*'
+                    ? isStarOpen() || wantsStar()
+                    : filterEntries.has(topic) || wanted.has(topic)
+            if (live) continue
+            delivered.delete(topic)
+            deps.onEntryClosed(topic)
+        }
     }
 
     // Oversized filters are found first, synchronously, so one pass can
@@ -216,6 +242,7 @@ export function createRealtimeSubscription<T extends object>(
             const wanted = wantedFilters()
             await closeFilters(filter => wanted.has(filter))
         }
+        releaseClosedTopics()
         if (!isOpen() && !wantsStar() && wantedFilters().size === 0) deps.onIdle()
         if (expandDrifted()) restart()
     }
