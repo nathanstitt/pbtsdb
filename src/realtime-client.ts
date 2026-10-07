@@ -57,6 +57,8 @@ export interface RealtimeClient {
     isConnected: () => boolean
     clientId: () => string | undefined
     disconnect: () => void
+    /** @internal Simulates the live connection dropping, the way `onerror` would; tests use it. */
+    simulateDisconnect: () => void
 }
 
 export const REALTIME_BACKOFF_MS: readonly number[] = [200, 300, 500, 1000, 1200, 1500, 2000]
@@ -118,6 +120,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         const list = topics()
         if (list.length === 0) {
             close(true)
+            clientId = undefined
+            lastSeq = undefined
             return
         }
         if (sameList(list, confirmed)) return
@@ -132,7 +136,17 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             resubmit = true
             return
         }
-        if (!connected || !clientId) return
+        if (!connected || !clientId) {
+            if (listeners.size === 0) {
+                const pending = waiters
+                waiters = []
+                close(true)
+                clientId = undefined
+                lastSeq = undefined
+                settleWaiters(pending)
+            }
+            return
+        }
         submitting = true
         const pending = waiters
         waiters = []
@@ -200,18 +214,21 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         }, delay)
     }
 
+    function handleConnectionLost(target: EventSourceLike): void {
+        if (source !== target) return
+        logger.debug('Realtime connection lost', { clientId })
+        close(false)
+        scheduleReconnect()
+    }
+
     function connect(): void {
         if (source) return
         const previousId = clientId
         const target = openSource(connectUrl())
         source = target
-        target.onerror = () => {
-            if (source !== target) return
-            logger.debug('Realtime connection lost', { clientId })
-            close(false)
-            scheduleReconnect()
-        }
+        target.onerror = () => handleConnectionLost(target)
         target.addEventListener('PB_CONNECT', (ev: Event) => {
+            if (source !== target) return
             const message = ev as MessageEvent
             let data: { clientId?: string; resumed?: boolean } = {}
             try {
@@ -230,9 +247,19 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                 confirmed = []
             }
             attachAll(target)
-            submit().catch(() => undefined)
-            if (everConnected) deps.onReconnect?.(resumed)
-            everConnected = true
+            const isReconnect = everConnected
+            submit().then(
+                () => {
+                    if (isReconnect) deps.onReconnect?.(resumed)
+                    everConnected = true
+                },
+                () => {
+                    everConnected = true
+                    if (!isReconnect || source !== target) return
+                    close(false)
+                    scheduleReconnect()
+                }
+            )
         })
     }
 
@@ -240,6 +267,13 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         subscribe(topic, listener) {
             if (topic.length > REALTIME_TOPIC_MAX_LENGTH) {
                 return Promise.reject(new RealtimeTopicTooLongError(topic.length))
+            }
+            if (!source) {
+                try {
+                    connect()
+                } catch (error) {
+                    return Promise.reject(error)
+                }
             }
             let set = listeners.get(topic)
             const isNew = set === undefined
@@ -249,9 +283,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             }
             set.add(listener)
             if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
-            if (!source) connect()
-            const confirmedAlready = connected && confirmed.includes(topic)
-            const ready = confirmedAlready ? Promise.resolve() : submit()
+            const ready = submit()
             const unsubscribe = async () => {
                 const current = listeners.get(topic)
                 if (!current?.delete(listener)) return
@@ -292,6 +324,9 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             listeners.clear()
             dispatchers.clear()
             settleWaiters(pending, new RealtimeDisconnectedError())
+        },
+        simulateDisconnect() {
+            if (source) handleConnectionLost(source)
         },
     }
 }

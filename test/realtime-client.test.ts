@@ -350,4 +350,195 @@ describe('realtime client', () => {
         await expect(second).rejects.toThrow('boom')
         expect(client.topics()).toEqual([])
     })
+
+    it('settles an unsubscribe made while disconnected instead of hanging forever', async () => {
+        const { client, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = connect()
+        const unsubscribe = await sub
+        source.fail()
+        await unsubscribe()
+        expect(FakeEventSource.instances).toHaveLength(1)
+        expect(client.isConnected()).toBe(false)
+    })
+
+    it('always re-POSTs on subscribe so a topic the server is about to drop is kept', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const a = client.subscribe('A', () => undefined)
+        const b = client.subscribe('B', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        gate.shift()?.()
+        const unsubA = await a
+        await b
+        expect(sent).toHaveLength(1)
+
+        // Unsubscribe A: its POST (without A) starts and is held open by the gate.
+        void unsubA()
+        await flush()
+        expect(sent).toHaveLength(2)
+        expect(sent[1].subscriptions).toEqual(['B'])
+
+        // A is subscribed again while that POST is still in flight and `confirmed`
+        // still lists A (from the very first POST) — it must not resolve at once.
+        let resubscribed = false
+        const resubA = client
+            .subscribe('A', () => undefined)
+            .then(fn => {
+                resubscribed = true
+                return fn
+            })
+        await flush()
+        expect(resubscribed).toBe(false)
+
+        gate.shift()?.()
+        await flush()
+        gate.shift()?.()
+        await flush()
+        expect(resubscribed).toBe(true)
+        expect(sent).toHaveLength(3)
+        expect(sent[2].subscriptions).toEqual(['B', 'A'])
+        await resubA
+    })
+
+    it('fires onReconnect only after the re-POST following reconnect settles', async () => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        const order: string[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                order.push(`send:${body.subscriptions.join(',')}`)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => order.push(`reconnect:${resumed}`),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const first = FakeEventSource.instances.at(-1)
+        if (!first) throw new Error('no EventSource opened')
+        first.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await vi.advanceTimersByTimeAsync(0)
+        gate.shift()?.()
+        await sub
+        first.fail()
+        await vi.advanceTimersByTimeAsync(0)
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(order.at(-1)).toBe('send:t1')
+        gate.shift()?.()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(order).toEqual(['send:t1', 'send:t1', 'reconnect:false'])
+    })
+
+    it('retries a re-POST that fails after reconnect instead of leaving the server with no topics', async () => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        let failNext = false
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                if (failNext) {
+                    failNext = false
+                    throw new Error('boom')
+                }
+                sent.push(body)
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const first = FakeEventSource.instances.at(-1)
+        if (!first) throw new Error('no EventSource opened')
+        first.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+        expect(sent).toHaveLength(1)
+        first.fail()
+        await vi.advanceTimersByTimeAsync(0)
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        failNext = true
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(FakeEventSource.instances).toHaveLength(3)
+        const third = FakeEventSource.instances.at(-1)
+        if (!third) throw new Error('no third EventSource opened')
+        third.emit('PB_CONNECT', { clientId: 'client-3' }, 'client-3')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(sent.at(-1)).toEqual({ clientId: 'client-3', subscriptions: ['t1'] })
+        expect(client.topics()).toEqual(['t1'])
+    })
+
+    it('ignores a stray PB_CONNECT from a superseded EventSource', async () => {
+        vi.useFakeTimers()
+        const { client, sent, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const first = connect('client-1')
+        await sub
+        first.fail()
+        await vi.advanceTimersByTimeAsync(0)
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+
+        first.emit('PB_CONNECT', { clientId: 'client-stale' }, 'client-stale')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(client.clientId()).toBe('client-2')
+    })
+
+    it('rejects without leaving a registration when connect() throws synchronously', async () => {
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => undefined,
+            eventSource: () => {
+                throw new Error('no EventSource available')
+            },
+        })
+        await expect(client.subscribe('t1', () => undefined)).rejects.toThrow(
+            'no EventSource available'
+        )
+        expect(client.topics()).toEqual([])
+    })
+
+    it('clears the client id when the last topic is unsubscribed so the next subscribe starts fresh', async () => {
+        const { client, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        connect()
+        const unsubscribe = await sub
+        await unsubscribe()
+        expect(client.clientId()).toBeUndefined()
+
+        FakeEventSource.instances = []
+        void client.subscribe('t2', () => undefined)
+        await flush()
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no EventSource opened')
+        expect(second.url).not.toContain('resume=')
+    })
 })

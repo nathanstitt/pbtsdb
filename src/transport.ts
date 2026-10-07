@@ -29,7 +29,7 @@ function entryFor(pb: PocketBase): Entry {
         const reconnectListeners = new Set<(resumed: boolean) => void>()
         const client = createRealtimeClient({
             url: pb.buildURL('/api/realtime'),
-            send: body => pb.send('/api/realtime', { method: 'POST', body }),
+            send: body => pb.send('/api/realtime', { method: 'POST', body, requestKey: null }),
             onReconnect: resumed => {
                 for (const listener of reconnectListeners) listener(resumed)
             },
