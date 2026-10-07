@@ -97,8 +97,8 @@ Fetching and filing relations, stripping, views, held targets, keyed loads from 
 **`loaded subsets`**: a back-relation subset (`book_tags_via_book`) served from
 the store once the parent has filed it, one request when nothing filed it, a
 plain base query does not mark the subset, a second child
-(`book_metadata_via_book`), invalidation when a child row is pruned
-(`writeDelete`), invalidation when the target's realtime subscription stops,
+(`book_metadata_via_book`), invalidation when a child row is pruned,
+invalidation when the target's realtime subscription stops,
 cleanup clearing every mark, a back-relation filed by a different parent
 (`book_tags_via_tag`, from the tags collection), and a nested via path
 (`book_tags_via_book.tag`, junction subset and its tags both served without

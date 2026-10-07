@@ -7,24 +7,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-07
+
+### Breaking
+
+- pbtsdb now builds on `@tanstack/db`'s core sync API. `@tanstack/query-db-collection`
+  and `@tanstack/react-query` are no longer dependencies.
+- `createCollection(pb, queryClient, factoryOptions?)` is now `createCollection(pb, factoryOptions?)`.
+- `collection.utils.writeInsert/writeUpdate/writeUpsert/writeDelete/writeBatch` and
+  `collection.utils.refetch` are removed. Use `collection.accept(rows)` for rows the
+  server returned and `collection.reload()` to refetch every live subset. Both are
+  also on `collection.utils`.
+- `queryClient.invalidateQueries([collectionName])` no longer reaches pbtsdb. Call
+  `collection.reload()`.
+- The `ignoreAutoCancellation` option is removed. Every request carries its own key,
+  so the SDK's auto-cancellation never aborts a pbtsdb load.
+- `collectionOptions` no longer accepts `utils`, which pbtsdb manages.
+- Requires `@tanstack/db` >=0.12.1 and `@tanstack/react-db` >=0.5.5.
+
 ### Changed
 
-- Requires `@tanstack/db` >=0.12.1, `@tanstack/query-db-collection` >=1.4.0,
-  and `@tanstack/react-db` >=0.5.5.
+- Row membership is owned by pbtsdb's ledger (see `docs/internals.md`, "Ledger"). A
+  realtime event or a mutation write-back never refetches a query.
+- A realtime delete on a filtered subscription releases only that subscription's
+  rows, so a row that leaves one filter stays while another live query holds it.
 - pbtsdb writes realtime echoes, mutation write-backs, and filed relation rows
-  through the collection's sync session instead of query-db-collection's
-  direct writes. Since query-db-collection 1.3 a direct write to an
-  on-demand collection refetches every active query; pbtsdb's own writes
-  cause no request. Each written row is added to every cached query of the
-  collection, so those queries own it as before.
+  through the collection's sync session instead of direct writes to the cache.
 - The built-in insert and update handlers write the server response, and the
   built-in delete handler removes the row, before they return. TanStack DB
   0.12 drops the optimistic state when the handler settles; the settled row is
   now the server's row with no gap in which the previous row shows.
-- `refetchOnMutation: true` refetches with `collection.utils.refetch()` before
-  the handler settles. The built-in handlers always return
-  `{ refetch: false }`, so query-db-collection logs no deprecation warning.
-- `collectionOptions` no longer accepts `utils`, which pbtsdb manages.
+- `refetchOnMutation: true` calls `collection.reload()` before the handler settles.
+  The built-in handlers return `void`.
 
 ### Fixed
 

@@ -1,11 +1,10 @@
 {
     "name": "pbtsdb",
-    "version": "0.12.0",
-    "description": "Type-safe PocketBase integration with TanStack Query and TanStack DB",
+    "version": "1.0.0",
+    "description": "Type-safe PocketBase integration with TanStack DB",
     "keywords": [
         "pocketbase",
         "tanstack",
-        "tanstack-query",
         "tanstack-db",
         "database",
         "react",
@@ -58,9 +57,7 @@
     },
     "peerDependencies": {
         "@tanstack/db": ">=0.12.1",
-        "@tanstack/query-db-collection": ">=1.4.0",
         "@tanstack/react-db": ">=0.5.5",
-        "@tanstack/react-query": ">=5.0.0",
         "pocketbase": ">=0.22.0",
         "react": ">=18.0.0",
         "react-dom": ">=18.0.0"
@@ -79,9 +76,7 @@
     "devDependencies": {
         "@biomejs/biome": "^2.5.0",
         "@tanstack/db": ">=0.12.1",
-        "@tanstack/query-db-collection": ">=1.4.0",
         "@tanstack/react-db": ">=0.5.5",
-        "@tanstack/react-query": ">=5.101.0",
         "@testing-library/react": ">=16.3.2",
         "@types/node": ">=25.0.10",
         "@types/react": ">=19.2.10",
