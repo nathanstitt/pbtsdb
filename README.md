@@ -445,8 +445,8 @@ const books = c('books', {
 
 Every books request expands `author`; the expanded authors are filed into
 `authors` (an on-demand target has its sync started) and removed from the
-book rows. Read them through `materialize()` in a query, a join, or
-`authors.get(book.author)`:
+book rows. Read them through `materialize()` in a query or through a join,
+inside the `useLiveQuery` that needs them:
 
 ```typescript
 import { eq } from '@tanstack/db';
@@ -469,6 +469,14 @@ served from the synced store when every id is present, except when the query
 reads through a `fetchRelations()` view, whose fetch goes to PocketBase so its
 paths get filed; anything else is fetched in one batched request. An empty
 `inArray(id, [])` yields no rows and no request.
+
+Do not read a related row with `authors.get(book.author)` in a component. A
+`get()` is a one-time read: the component does not re-render when the author
+changes, and the row can leave the store while the component still shows it,
+because a filed row stays only as long as a live query holds the parent row
+that filed it. A `useLiveQuery` with `materialize()` or a join holds the rows
+it reads and re-renders when they change. `get()` is for code outside React
+that needs a value right now, such as a mutation handler or a test.
 
 Fetch a relation for one query only with `fetchRelations()`; the view shares the
 collection's store, realtime subscription, and mutations, and only its fetches

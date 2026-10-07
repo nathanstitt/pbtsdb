@@ -196,7 +196,12 @@ function BooksList() {
 **Approach 1: Related data (Recommended)**
 
 PocketBase `expand` only files related records into their own collections;
-rows never carry `expand`. Read related records from the target collection.
+rows never carry `expand`. Read related records from the target collection
+through `materialize()` or a join inside the `useLiveQuery` that needs them.
+Do not read them with `collection.get(id)` in a component: a `get()` does not
+re-render when the row changes, and the row can leave the store while the
+component still shows it. `get()` is for code outside React, such as a mutation
+handler.
 
 ```typescript
 import { eq } from '@tanstack/db';
