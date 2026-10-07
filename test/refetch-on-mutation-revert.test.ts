@@ -5,6 +5,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
@@ -84,16 +85,17 @@ describe('optimistic move snap-back via stale realtime echo (refetchOnMutation d
      * arrive. The real subscription is still established underneath.
      */
     const captureRealtimeHandler = () => {
-        const ref: { current: ((d: RecordSubscription<Books>) => void) | null } = {
+        const ref: { current: ((event: RecordSubscription<Books>) => void) | null } = {
             current: null,
         }
-        const real = pb.collection('books').subscribe.bind(pb.collection('books'))
-        vi.spyOn(pb.collection('books'), 'subscribe').mockImplementation(
-            (topic, callback, options) => {
-                ref.current = callback as (d: RecordSubscription<Books>) => void
-                return real(topic, callback, options)
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+            if (topic.startsWith('books/')) {
+                ref.current = listener as unknown as (event: RecordSubscription<Books>) => void
             }
-        )
+            return real(topic, listener)
+        })
         return ref
     }
 

@@ -1,5 +1,33 @@
 import { describe, expect, it } from 'vitest'
-import { subsetFilters } from '../src/pocketbase-limits'
+import { realtimeTopic, subsetFilters } from '../src/pocketbase-limits'
+
+describe('realtimeTopic', () => {
+    it('is the bare wildcard topic with no options', () => {
+        expect(realtimeTopic('books', undefined)).toBe('books/*')
+    })
+
+    it('moves unknown option keys into query and keeps headers apart', () => {
+        const topic = realtimeTopic('books', {
+            filter: "genre = 'Fiction'",
+            expand: 'author',
+            headers: { 'X-Token': 'abc' },
+        })
+        const encoded = encodeURIComponent(
+            JSON.stringify({
+                query: { filter: "genre = 'Fiction'", expand: 'author' },
+                headers: { 'X-Token': 'abc' },
+            })
+        )
+        expect(topic).toBe(`books/*?options=${encoded}`)
+    })
+
+    it('leaves reserved keys out of query', () => {
+        const topic = realtimeTopic('books', { requestKey: 'k', query: { fields: 'id' } })
+        expect(topic).toBe(
+            `books/*?options=${encodeURIComponent(JSON.stringify({ query: { fields: 'id' } }))}`
+        )
+    })
+})
 
 describe('subsetFilters', () => {
     it('joins a short subset into one filter, escaping quotes', () => {

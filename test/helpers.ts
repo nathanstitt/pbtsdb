@@ -165,6 +165,25 @@ export async function getTestAuthorId(): Promise<string> {
 }
 
 /**
+ * The `query.filter` encoded in a realtime topic built by {@link realtimeTopic},
+ * or `undefined` when the topic carries no options.
+ */
+export function topicFilter(topic: string): string | undefined {
+    return topicQuery(topic)?.filter as string | undefined
+}
+
+/**
+ * The decoded `query` object from a realtime topic built by
+ * {@link realtimeTopic}, or `undefined` when the topic carries no options.
+ */
+export function topicQuery(topic: string): Record<string, unknown> | undefined {
+    const [, encoded] = topic.split('?options=')
+    if (!encoded) return undefined
+    const decoded = JSON.parse(decodeURIComponent(encoded)) as { query?: Record<string, unknown> }
+    return decoded.query
+}
+
+/**
  * Wait for a live query result to finish loading.
  * Works with both array results (from .from()) and single object results (from .findOne()).
  * @param result - The result object from renderHook containing { current: { isLoading: boolean } }

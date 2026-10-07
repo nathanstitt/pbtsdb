@@ -43,6 +43,7 @@ import {
     toRequest,
 } from './request'
 import { createSyncedWriteGuard, type SyncedWrite } from './synced-write-guard'
+import { transportFor } from './transport'
 import type {
     CreateCollectionOptions,
     ExtractRecordType,
@@ -260,8 +261,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         guard,
         filer,
     })
+    const transport = transportFor(pb)
     const realtime = createRealtimeSubscription<RecordType>({
-        pb,
+        transport,
         collectionName,
         handleEvent: event => handleRealtimeEvent(event),
         pendingExpand: pendingSubscribeExpand,
@@ -416,6 +418,29 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     }
 
     const collection = createTanStackCollection(collectionOptions)
+
+    // A reconnect the server did not resume lost every event of the gap.
+    // Refetch what is live; a resumed connection replayed it already.
+    // Registered only while the collection is syncing: it is removed on
+    // `cleaned-up` so a long-lived `pb` does not accumulate one listener per
+    // `buildCollection` call. A restart after cleanup registers again.
+    let removeReconnectListener: (() => void) | undefined
+    collection.on('status:change', event => {
+        if (!removeReconnectListener && (event.status === 'loading' || event.status === 'ready')) {
+            removeReconnectListener = transport.onReconnect(resumed => {
+                if (resumed || !realtime.isOpen() || !collection.isReady()) return
+                void collection.utils.refetch().catch(error =>
+                    logger.error('Failed to refetch after realtime reconnect', {
+                        collectionName,
+                        error,
+                    })
+                )
+            })
+        } else if (removeReconnectListener && event.status === 'cleaned-up') {
+            removeReconnectListener()
+            removeReconnectListener = undefined
+        }
+    })
 
     // Captured before the base collection's own subscribeChanges is replaced
     // below, so views and the base both reach TanStack's original.

@@ -10,12 +10,14 @@ import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
     createTestQueryClient,
     getTestSlug,
     pb,
+    topicFilter,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
@@ -165,7 +167,7 @@ describe('paging', () => {
 
     it('delivers a create echo to a sorted limited query and files its relation', async () => {
         const { authors, books } = make()
-        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const subscribe = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -190,7 +192,9 @@ describe('paging', () => {
         expect(result.current.data[0].author?.id).toBe(authorId)
 
         // The subscription carries the where only: no sort, limit, or cursor.
-        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        const filters = subscribe.mock.calls
+            .filter(call => call[0].startsWith('books/'))
+            .map(call => topicFilter(call[0]))
         expect(filters).toEqual([`author = "${authorId}"`])
 
         const created = await pb.collection('books').create({
@@ -213,7 +217,7 @@ describe('paging', () => {
 
     it('a cursor in the where subscribes to its slice only', async () => {
         const { books } = make()
-        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const subscribe = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -226,7 +230,9 @@ describe('paging', () => {
         await waitForLoadFinish(result)
         await books.waitForSubscription()
         expect(pageCounts(result.current.data)).toEqual([9, 8, 7, 6, 5])
-        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        const filters = subscribe.mock.calls
+            .filter(call => call[0].startsWith('books/'))
+            .map(call => topicFilter(call[0]))
         expect(filters).toEqual([`(author = "${authorId}" && page_count < 10)`])
 
         const created: string[] = []
@@ -259,7 +265,7 @@ describe('paging', () => {
 
     it('a filtered join source subscribes to its id batch', async () => {
         const { authors, books } = make()
-        const subscribe = vi.spyOn(pb.collection('authors'), 'subscribe')
+        const subscribe = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         // TanStack makes `authors` (the `.from()` side) the lazy source here and
         // loads it by an `in(id, …)` batch of the Fantasy books' authors. The
         // seed data (pb_migrations/1763864662_seed_test_data.js) holds Fantasy
@@ -285,7 +291,9 @@ describe('paging', () => {
         // The subscription's own where (`id = authorId`) must not be
         // displaced by the join's id batch; dropping it would leave rows the
         // base query itself asked for uncovered by realtime.
-        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        const filters = subscribe.mock.calls
+            .filter(call => call[0].startsWith('authors/'))
+            .map(call => topicFilter(call[0]))
         const idFilters = filters.filter(f => f?.includes('||'))
         expect(idFilters.length).toBeGreaterThan(0)
         for (const filter of idFilters) {
@@ -295,7 +303,7 @@ describe('paging', () => {
 
     it('a lazy source joined by its foreign key subscribes to that key', async () => {
         const { authors, books } = make()
-        const bookSubscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const bookSubscribe = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -314,14 +322,16 @@ describe('paging', () => {
         // a batch keyed on the foreign key. That key must reach the subscribe
         // filter; folding it into `books`' empty base where would widen
         // realtime to the whole collection.
-        const filters = bookSubscribe.mock.calls.map(call => call[2]?.filter)
+        const filters = bookSubscribe.mock.calls
+            .filter(call => call[0].startsWith('books/'))
+            .map(call => topicFilter(call[0]))
         expect(filters).toContain(`author = "${authorId}"`)
         expect(filters).not.toContain(undefined)
     }, 30000)
 
     it('an unfiltered sorted, limited query opens no extra entry for the tie-check', async () => {
         const { books } = make()
-        const subscribe = vi.spyOn(pb.collection('books'), 'subscribe')
+        const subscribe = vi.spyOn(realtimeClientFor(pb), 'subscribe')
         const { result } = renderHook(() =>
             useLiveQuery(q =>
                 q
@@ -333,7 +343,9 @@ describe('paging', () => {
         await waitForLoadFinish(result)
         await books.waitForSubscription()
 
-        const filters = subscribe.mock.calls.map(call => call[2]?.filter)
+        const filters = subscribe.mock.calls
+            .filter(call => call[0].startsWith('books/'))
+            .map(call => topicFilter(call[0]))
         expect(filters).toEqual([undefined])
     }, 30000)
 })

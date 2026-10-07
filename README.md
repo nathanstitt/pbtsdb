@@ -286,6 +286,21 @@ const { data } = useLiveQuery((q) =>
 - **Shared:** Multiple components using the same collection share one subscription
 - **No manual control needed:** The collection handles all subscription management internally
 
+### Reconnects
+
+pbtsdb runs its own realtime connection. When the connection drops, it reconnects with backoff and refetches every live query, because PocketBase does not replay events missed during the gap. A server that supports pbtsdb's resume extension (`?resume=<clientId>&after=<seq>` on the SSE URL, `resumed: true` in `PB_CONNECT`, `seq` on each event) replays the gap instead, and no refetch runs.
+
+Call `resetRealtime(pb)` after an auth change the connection cannot see on its own — login, logout, or switching users. pbtsdb's connection is independent of `pb.realtime`, so changing `pb`'s auth token does not by itself tell the server anything, and if the subscribed topics haven't changed, pbtsdb would otherwise send no POST at all and keep serving the previous user's data:
+
+```typescript
+import { resetRealtime } from 'pbtsdb';
+
+await pb.collection('users').authWithPassword(email, password);
+resetRealtime(pb); // re-subscribes every open topic under the new auth
+```
+
+This forgets the connection's server-side session and reconnects at once, re-sending every currently subscribed topic under whatever auth `pb` carries now; every ready collection refetches once that POST succeeds, the same as a non-resumed reconnect.
+
 ### Sync Modes
 
 Every collection is either **eager** (the default) or **on-demand**:

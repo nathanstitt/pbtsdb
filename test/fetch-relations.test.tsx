@@ -5,6 +5,7 @@ import PocketBase from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createCollection } from '../src'
+import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -15,6 +16,7 @@ import {
     pb,
     resetLogger,
     setLogger,
+    topicQuery,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
@@ -438,17 +440,19 @@ describe('Fetch relations', () => {
             // with in its own spy, so production calling it can be counted
             // without this test invoking a PocketBase unsubscribe itself.
             const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
-            const realSubscribe = pb
-                .collection('book_tags')
-                .subscribe.bind(pb.collection('book_tags'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             const subscribeSpy = vi
-                .spyOn(pb.collection('book_tags'), 'subscribe')
-                .mockImplementation(async (...args) => {
-                    const unsubscribe = await realSubscribe(...args)
+                .spyOn(client, 'subscribe')
+                .mockImplementation(async (topic, listener) => {
+                    const unsubscribe = await realSubscribe(topic, listener)
+                    if (!topic.startsWith('book_tags/')) return unsubscribe
                     const spy = vi.fn(unsubscribe)
                     unsubscribeSpies.push(spy)
                     return spy
                 })
+            const bookTagsCalls = () =>
+                subscribeSpy.mock.calls.filter(call => call[0].startsWith('book_tags/'))
 
             try {
                 const bookView = bookTags.fetchRelations('book')
@@ -484,9 +488,9 @@ describe('Fetch relations', () => {
                 // the full union is sufficient (no arbitrary sleep needed).
                 await waitFor(
                     () => {
-                        const last = subscribeSpy.mock.calls.at(-1)
-                        const options = last?.[2] as { expand?: string } | undefined
-                        expect(options?.expand).toBe('book,tag')
+                        const last = bookTagsCalls().at(-1)
+                        const query = last ? topicQuery(last[0]) : undefined
+                        expect(query?.expand).toBe('book,tag')
                     },
                     { timeout: 10000 }
                 )
@@ -500,7 +504,7 @@ describe('Fetch relations', () => {
                     expect(settledUnsubscribes.length).toBe(unsubscribeSpies.length - 1)
                 })
             } finally {
-                subscribeSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 20000)
     })
@@ -611,15 +615,19 @@ describe('Fetch relations', () => {
             })
 
             const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
-            const realSubscribe = pb.collection('books').subscribe.bind(pb.collection('books'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             const subscribeSpy = vi
-                .spyOn(pb.collection('books'), 'subscribe')
-                .mockImplementation(async (...args) => {
-                    const unsubscribe = await realSubscribe(...args)
+                .spyOn(client, 'subscribe')
+                .mockImplementation(async (topic, listener) => {
+                    const unsubscribe = await realSubscribe(topic, listener)
+                    if (!topic.startsWith('books/')) return unsubscribe
                     const spy = vi.fn(unsubscribe)
                     unsubscribeSpies.push(spy)
                     return spy
                 })
+            const booksCalls = () =>
+                subscribeSpy.mock.calls.filter(call => call[0].startsWith('books/'))
 
             try {
                 const first = renderHook(() =>
@@ -663,7 +671,7 @@ describe('Fetch relations', () => {
                 expect(internals(authors).subscriberCount).toBe(1)
                 // books was held from the first view and never released across
                 // the two restarts: exactly one PocketBase subscribe, no unsubscribe.
-                expect(subscribeSpy).toHaveBeenCalledTimes(1)
+                expect(booksCalls()).toHaveLength(1)
                 expect(unsubscribeSpies[0]).not.toHaveBeenCalled()
 
                 first.unmount()
@@ -673,7 +681,7 @@ describe('Fetch relations', () => {
                 await waitFor(() => expect(internals(bookTags).heldRelationTargetCount()).toBe(0))
                 await waitFor(() => expect(unsubscribeSpies[0]).toHaveBeenCalledTimes(1))
             } finally {
-                subscribeSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
 
@@ -687,20 +695,17 @@ describe('Fetch relations', () => {
                 relations: { book: books, tag: tags },
             })
 
-            const realSubscribe = pb
-                .collection('book_tags')
-                .subscribe.bind(pb.collection('book_tags'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             let failing = false
             let failures = 0
-            const subscribeSpy = vi
-                .spyOn(pb.collection('book_tags'), 'subscribe')
-                .mockImplementation(async (...args) => {
-                    if (failing) {
-                        failures += 1
-                        throw new Error('subscribe rejected')
-                    }
-                    return realSubscribe(...args)
-                })
+            vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+                if (failing && topic.startsWith('book_tags/')) {
+                    failures += 1
+                    return Promise.reject(new Error('subscribe rejected'))
+                }
+                return realSubscribe(topic, listener)
+            })
 
             try {
                 const first = renderHook(() =>
@@ -746,7 +751,7 @@ describe('Fetch relations', () => {
                 expect(internals(tags).subscriberCount).toBe(0)
                 expect(internals(authors).subscriberCount).toBe(0)
             } finally {
-                subscribeSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
 
@@ -755,20 +760,20 @@ describe('Fetch relations', () => {
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
-            const realSubscribe = pb.collection('books').subscribe.bind(pb.collection('books'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             let throwNextUnsubscribe = true
-            const subscribeSpy = vi
-                .spyOn(pb.collection('books'), 'subscribe')
-                .mockImplementation(async (...args) => {
-                    const unsubscribe = await realSubscribe(...args)
-                    return async () => {
-                        await unsubscribe()
-                        if (throwNextUnsubscribe) {
-                            throwNextUnsubscribe = false
-                            throw new Error('unsubscribe failed')
-                        }
+            vi.spyOn(client, 'subscribe').mockImplementation(async (topic, listener) => {
+                const unsubscribe = await realSubscribe(topic, listener)
+                if (!topic.startsWith('books/')) return unsubscribe
+                return async () => {
+                    await unsubscribe()
+                    if (throwNextUnsubscribe) {
+                        throwNextUnsubscribe = false
+                        throw new Error('unsubscribe failed')
                     }
-                })
+                }
+            })
 
             const mount = () =>
                 renderHook(() =>
@@ -809,7 +814,7 @@ describe('Fetch relations', () => {
                     timeout: 10000,
                 })
             } finally {
-                subscribeSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 30000)
 
@@ -819,15 +824,19 @@ describe('Fetch relations', () => {
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
             const unsubscribeSpies: ReturnType<typeof vi.fn>[] = []
-            const realSubscribe = pb.collection('authors').subscribe.bind(pb.collection('authors'))
+            const client = realtimeClientFor(pb)
+            const realSubscribe = client.subscribe.bind(client)
             const subscribeSpy = vi
-                .spyOn(pb.collection('authors'), 'subscribe')
-                .mockImplementation(async (...args) => {
-                    const unsubscribe = await realSubscribe(...args)
+                .spyOn(client, 'subscribe')
+                .mockImplementation(async (topic, listener) => {
+                    const unsubscribe = await realSubscribe(topic, listener)
+                    if (!topic.startsWith('authors/')) return unsubscribe
                     const spy = vi.fn(unsubscribe)
                     unsubscribeSpies.push(spy)
                     return spy
                 })
+            const authorsCalls = () =>
+                subscribeSpy.mock.calls.filter(call => call[0].startsWith('authors/'))
 
             try {
                 for (let cycle = 0; cycle < 20; cycle++) {
@@ -854,10 +863,10 @@ describe('Fetch relations', () => {
                     expect(internals(authors).subscriberCount).toBe(0)
                     expect(internals(books).heldRelationTargetCount()).toBe(0)
                 }
-                expect(subscribeSpy).toHaveBeenCalledTimes(unsubscribeSpies.length)
+                expect(authorsCalls()).toHaveLength(unsubscribeSpies.length)
                 for (const spy of unsubscribeSpies) expect(spy).toHaveBeenCalledTimes(1)
             } finally {
-                subscribeSpy.mockRestore()
+                vi.restoreAllMocks()
             }
         }, 120000)
 
