@@ -39,6 +39,8 @@ export interface Membership<T extends object> {
     drop: (holders: readonly Holder[], ids?: Iterable<string>) => Applied
     /** Remove `ids` from every holder. */
     dropAll: (ids: Iterable<string>) => Applied
+    /** Reference the stored rows among `ids` for each of `holders`; no row changes. */
+    hold: (holders: readonly Holder[], ids: Iterable<string>) => Applied
 }
 
 type Change<T> = { writes: SyncWrite<T>[]; gone: T[] }
@@ -162,6 +164,12 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
                     gone.push(...pick(before, released))
                 }
                 return { writes: writesFor([], NO_WRITES, removed), gone }
+            }),
+        hold: (holders, ids) =>
+            apply(() => {
+                const listed = [...ids]
+                for (const holder of holders) ledger.hold(holder, listed)
+                return { writes: [], gone: [] }
             }),
         dropAll: ids =>
             apply(() => {

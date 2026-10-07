@@ -37,6 +37,8 @@ export interface Ledger<T extends object> {
     release: (holder: Holder, ids?: Iterable<string>) => string[]
     /** Set `holder`'s references to exactly `rows`. */
     replace: (holder: Holder, rows: readonly T[]) => LedgerWrites<T> & { removed: string[] }
+    /** Reference the stored rows among `ids` for `holder`, writing nothing. */
+    hold: (holder: Holder, ids: Iterable<string>) => void
     /** Remove the row from every holder. False when absent. */
     releaseAll: (id: string) => boolean
     /** Every holder that references at least one row. */
@@ -178,6 +180,12 @@ export function createLedger<T extends object>(): Ledger<T> {
             const stale = [...(byHolder.get(holder) ?? [])].filter(id => !keep.has(id))
             const writes = retain(holder, rows)
             return { ...writes, removed: release(holder, stale) }
+        },
+        hold(holder, ids) {
+            for (const id of ids) {
+                const entry = entries.get(id)
+                if (entry) link(id, entry, holder)
+            }
         },
         releaseAll(id) {
             const entry = entries.get(id)

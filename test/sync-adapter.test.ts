@@ -11,7 +11,7 @@ import {
 } from '@tanstack/db'
 import { describe, expect, it, vi } from 'vitest'
 import type { Fetcher, FetchOptions, FetchResult } from '../src/fetch-records'
-import { ACCEPTED, createLedger } from '../src/ledger'
+import { ACCEPTED, createLedger, EAGER } from '../src/ledger'
 import { createLoadedSubsets } from '../src/loaded-subsets'
 import { createMembership } from '../src/membership'
 import { type PbRequest, realtimeFiltersFor, toRequest } from '../src/request'
@@ -513,6 +513,32 @@ describe('sync adapter', () => {
             expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
             expect(t.realtime.resetQueryFilters).toHaveBeenCalledTimes(1)
         })
+    })
+
+    it('holdersFor lists the live, landed demands whose where matches the row', async () => {
+        const t = setup('on-demand', 1000)
+        const live = named('x')
+        const other = named('y')
+        const parked = { ...named('x'), limit: 1 }
+        const loading = { ...named('x'), limit: 2 }
+        for (const [index, opts] of [live, other, parked].entries()) {
+            const load = t.loadSubset(opts)
+            t.calls[index].resolve([])
+            await load
+        }
+        t.unloadSubset(parked)
+        void t.loadSubset(loading)
+        expect(t.adapter.holdersFor(row('a', 'x'))).toEqual([live])
+        expect(t.adapter.holdersFor(row('b', 'y'))).toEqual([other])
+        expect(t.adapter.holdersFor(row('c', 'z'))).toEqual([])
+        t.adapter.expireParked()
+    })
+
+    it('holdersFor is EAGER in eager mode', async () => {
+        const t = setup('eager')
+        t.calls[0].resolve([])
+        await flush()
+        expect(t.adapter.holdersFor(row('a'))).toEqual([EAGER])
     })
 
     it('isDeleted reports an id deleted while a fetch is in flight, and forgets it after', async () => {

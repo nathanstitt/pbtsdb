@@ -56,6 +56,13 @@ export interface SyncAdapter<T extends object> {
     isDeleted: (id: string) => boolean
     /** Release every parked subset now, for example because the auth changed. */
     expireParked: () => void
+    /**
+     * The holders a server-confirmed row belongs to by its values: `EAGER`
+     * in eager mode, else every live, landed demand whose `where` the row
+     * matches on the client. For a row the server wrote, so no row the
+     * server lacks can enter through here.
+     */
+    holdersFor: (row: T) => Holder[]
 }
 
 /** `visible` for a load core awaits; `accepted` for a path a mutation handler can reach. */
@@ -505,6 +512,16 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         isDeleted: id => [...tombstones].some(deleted => deleted.has(id)),
         expireParked: () => {
             if (current) expireParked(current)
+        },
+        holdersFor: row => {
+            if (!current) return []
+            if (syncMode === 'eager') return [EAGER]
+            return [...current.demands]
+                .filter(
+                    ([opts, demand]) =>
+                        demand.parked === undefined && demand.landed && matcherFor(opts.where)(row)
+                )
+                .map(([opts]) => opts)
         },
     }
 }

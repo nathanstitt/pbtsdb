@@ -363,17 +363,27 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         expireAccepted(rows)
     }
 
-    // A row only ACCEPTED holds after the window is one no live query shows:
-    // the echo would have given it a topic, a load a subset. Dropping the
-    // holder then bounds what write-backs keep; a row another holder took
-    // meanwhile stays.
+    // ACCEPTED is a bridge until the echo gives the row a topic or a load a
+    // subset. When the window ends the row is handed to every live query
+    // whose filter matches it, so a missing echo (realtime down, event
+    // lost) never removes a row the user still sees; a row no live query
+    // matches leaves. A row another holder took meanwhile keeps it.
     const acceptedTimers = new Set<ReturnType<typeof setTimeout>>()
+    function settleAccepted(ids: readonly string[]): void {
+        for (const id of ids) {
+            const row = ledger.row(id)
+            if (!row) continue
+            const holders = adapter.holdersFor(row)
+            if (holders.length > 0) membership.hold(holders, [id])
+        }
+        membership.drop([ACCEPTED], ids)
+    }
     function expireAccepted(rows: readonly RecordType[]): void {
         if (subsetGcTime <= 0) return
         const ids = rows.map(idOf).filter((id): id is string => id !== undefined)
         const timer = setTimeout(() => {
             acceptedTimers.delete(timer)
-            membership.drop([ACCEPTED], ids)
+            settleAccepted(ids)
         }, subsetGcTime)
         acceptedTimers.add(timer)
     }

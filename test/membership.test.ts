@@ -145,6 +145,18 @@ describe('membership', () => {
         expect(ledger.holderCount('a')).toBe(1)
     })
 
+    it('hold links stored rows to holders and writes nothing', () => {
+        const { log, ledger, membership } = setup()
+        membership.land(ACCEPTED, [row('a', 'A')])
+        log.length = 0
+        expect(membership.hold(['sub', 'topic'], ['a', 'missing'])).toBe(true)
+        expect(log).toEqual([])
+        expect(ledger.holderCount('a')).toBe(3)
+        expect(ledger.has('missing')).toBe(false)
+        membership.drop([ACCEPTED], ['a'])
+        expect(ledger.has('a')).toBe(true)
+    })
+
     it('accept of a stale copy of a held row writes nothing and adds no holder', () => {
         const { log, ledger, membership } = setup()
         membership.land('topic', [row('a', 'A', '2026-01-02 00:00:00.000Z')])

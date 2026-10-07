@@ -60,8 +60,10 @@ All notable changes to this project will be documented in this file.
   so they no longer grow for the life of the parent.
 - A mutation write-back or `accept()` adds the accepted holder only to a row nothing
   holds yet. A row a query or topic already holds is refreshed in place, so a saved
-  row leaves with its query instead of staying for the session. The accepted holder
-  itself expires after `subsetGcTime`, so a written row no live query covers leaves.
+  row leaves with its query instead of staying for the session. When `subsetGcTime`
+  ends, the row is handed to every live query whose filter matches it and the
+  accepted holder is dropped, so a written row no live query covers leaves and a row
+  the user still sees stays even if no realtime echo came.
 - pbtsdb resets its realtime session itself when `pb.authStore` changes to another
   auth record. `disconnectRealtime(pb)` closes the connection and keeps it closed
   until `resetRealtime(pb)`.

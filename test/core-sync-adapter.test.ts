@@ -3,7 +3,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
-import { realtimeClientFor } from '../src/transport'
+import { disconnectRealtime, realtimeClientFor, resetRealtime } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -214,6 +214,35 @@ describe('core sync adapter', () => {
         } finally {
             if (createdId) await removeBook(createdId)
             await removeBook(control.id)
+            await books.cleanup()
+        }
+    }, 15000)
+
+    it('a row the user created stays in a matching live query when no echo comes', async () => {
+        disconnectRealtime(pb)
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            subsetGcTime: 300,
+            omitOnInsert: ['created', 'updated'] as const,
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const { result } = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+        )
+        const created = await newBook('Fiction', 'no-echo')
+        try {
+            await waitForLoadFinish(result)
+            expect(realtimeClientFor(pb).isConnected()).toBe(false)
+            const tx = books.insert(created)
+            await tx.when('settled')
+            expect(tx.state).toBe('completed')
+            expect(result.current.data.some(b => b.id === created.id)).toBe(true)
+            await new Promise(resolve => setTimeout(resolve, 1000))
+            expect(books.get(created.id)).toBeDefined()
+            expect(result.current.data.some(b => b.id === created.id)).toBe(true)
+        } finally {
+            resetRealtime(pb)
+            await removeBook(created.id)
             await books.cleanup()
         }
     }, 15000)
