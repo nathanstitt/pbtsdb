@@ -38,6 +38,14 @@ export class RealtimeTopicTooLongError extends Error {
     }
 }
 
+/** Rejects a `subscribe` whose topic was never confirmed because `disconnect()` was called first. */
+export class RealtimeDisconnectedError extends Error {
+    constructor() {
+        super('Realtime client was disconnected before this subscription was confirmed')
+        this.name = 'RealtimeDisconnectedError'
+    }
+}
+
 /**
  * One SSE connection to PocketBase with its topic list. Topic changes made
  * in one tick go out in one POST; `subscribe` resolves once the server has
@@ -242,7 +250,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             set.add(listener)
             if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
             if (!source) connect()
-            const ready = isNew || !connected ? submit() : Promise.resolve()
+            const confirmedAlready = connected && confirmed.includes(topic)
+            const ready = confirmedAlready ? Promise.resolve() : submit()
             const unsubscribe = async () => {
                 const current = listeners.get(topic)
                 if (!current?.delete(listener)) return
@@ -278,6 +287,11 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             close(true)
             clientId = undefined
             lastSeq = undefined
+            const pending = waiters
+            waiters = []
+            listeners.clear()
+            dispatchers.clear()
+            settleWaiters(pending, new RealtimeDisconnectedError())
         },
     }
 }

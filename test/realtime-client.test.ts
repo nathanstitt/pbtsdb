@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     createRealtimeClient,
     type EventSourceLike,
+    RealtimeDisconnectedError,
     RealtimeTopicTooLongError,
 } from '../src/realtime-client'
 
@@ -298,5 +299,55 @@ describe('realtime client', () => {
 
         await client.subscribe('t2', () => undefined)
         expect(sent).toEqual([{ clientId: 'client-1', subscriptions: ['t2'] }])
+    })
+
+    it('rejects a pending subscribe on disconnect and leaves no registration behind', async () => {
+        const { client } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        client.disconnect()
+        await expect(sub).rejects.toBeInstanceOf(RealtimeDisconnectedError)
+        expect(client.topics()).toEqual([])
+    })
+
+    it('keeps a second subscribe to an unconfirmed topic pending, and rejects both if the POST fails', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>((_resolve, reject) =>
+                    gate.push(() => reject(new Error('boom')))
+                )
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        expect(sent).toHaveLength(1)
+
+        let secondSettled = false
+        const second = client
+            .subscribe('t1', () => undefined)
+            .catch(error => {
+                secondSettled = true
+                throw error
+            })
+        await flush()
+        expect(secondSettled).toBe(false)
+
+        while (gate.length > 0) gate.shift()?.()
+        await expect(first).rejects.toThrow('boom')
+        await flush()
+        while (gate.length > 0) gate.shift()?.()
+        await expect(second).rejects.toThrow('boom')
+        expect(client.topics()).toEqual([])
     })
 })
