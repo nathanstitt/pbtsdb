@@ -195,6 +195,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
      * state for this client is gone too (the last topic was removed, or the
      * caller is disconnecting outright) — not on a transient error, where a
      * resumed reconnect may still find the server holding the old list.
+     * `everConnected` resets with it: a session after a full teardown is a
+     * first connect again, not a reconnect.
      */
     function close(forget: boolean): void {
         if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
@@ -202,7 +204,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         source?.close()
         source = undefined
         connected = false
-        if (forget) confirmed = []
+        if (forget) {
+            confirmed = []
+            everConnected = false
+        }
     }
 
     function scheduleReconnect(): void {
@@ -241,7 +246,6 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             const resumed = data.resumed === true && id === previousId
             clientId = id
             connected = true
-            attempts = 0
             if (!resumed) {
                 lastSeq = undefined
                 confirmed = []
@@ -250,6 +254,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             const isReconnect = everConnected
             submit().then(
                 () => {
+                    attempts = 0
                     if (isReconnect) deps.onReconnect?.(resumed)
                     everConnected = true
                 },

@@ -91,23 +91,39 @@ describe('reconnect refetch lifecycle', () => {
     }, 20000)
 
     it('does not refetch a collection that is not ready when the connection reconnects', async () => {
-        // A second collection keeps the shared connection open and reconnecting,
-        // while `books` here is never subscribed to, so it stays "not ready".
-        const authors = createAuthorsCollection(queryClient)
-        const authorsHook = renderHook(() => useLiveQuery(q => q.from({ authors })))
-        await waitForLoadFinish(authorsHook.result)
-        await authors.waitForSubscription()
+        // Holds the collection's first load open, so its reconnect listener
+        // registers (status 'loading') while `isReady()` is still false.
+        let releaseFirstLoad: (() => void) | undefined
+        const firstLoadGate = new Promise<void>(resolve => {
+            releaseFirstLoad = resolve
+        })
+        const booksService = pb.collection('books')
+        const original = booksService.getFullList.bind(booksService)
+        const getFullList = vi.spyOn(booksService, 'getFullList')
+        getFullList.mockImplementation(async (...args) => {
+            await firstLoadGate
+            return original(...args)
+        })
 
         const books = createBooksCollection(queryClient)
-        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
-        getFullList.mockClear()
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
+        const refetch = vi.spyOn(
+            (books as unknown as { utils: { refetch: () => Promise<void> } }).utils,
+            'refetch'
+        )
+
+        await waitFor(() => {
+            expect((books as unknown as { isSubscribed: () => boolean }).isSubscribed()).toBe(true)
+        })
+        expect((books as unknown as { isReady: () => boolean }).isReady()).toBe(false)
 
         realtimeClientFor(pb).simulateDisconnect()
         await new Promise(resolve => setTimeout(resolve, 1000))
-        expect(getFullList).not.toHaveBeenCalled()
+        expect(refetch).not.toHaveBeenCalled()
 
+        releaseFirstLoad?.()
+        await waitForLoadFinish(result)
         getFullList.mockRestore()
         await books.cleanup()
-        await authors.cleanup()
     }, 20000)
 })

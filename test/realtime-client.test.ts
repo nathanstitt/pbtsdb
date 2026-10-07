@@ -456,6 +456,7 @@ describe('realtime client', () => {
         FakeEventSource.instances = []
         let failNext = false
         const sent: { clientId: string; subscriptions: string[] }[] = []
+        const reconnects: boolean[] = []
         const client = createRealtimeClient({
             url: 'http://pb.test/api/realtime',
             send: async body => {
@@ -466,6 +467,7 @@ describe('realtime client', () => {
                 sent.push(body)
             },
             eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
             backoff: [0],
         })
         const sub = client.subscribe('t1', () => undefined)
@@ -483,12 +485,95 @@ describe('realtime client', () => {
         second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
         await vi.advanceTimersByTimeAsync(0)
         expect(FakeEventSource.instances).toHaveLength(3)
+        expect(reconnects).toEqual([])
         const third = FakeEventSource.instances.at(-1)
         if (!third) throw new Error('no third EventSource opened')
         third.emit('PB_CONNECT', { clientId: 'client-3' }, 'client-3')
         await vi.advanceTimersByTimeAsync(0)
         expect(sent.at(-1)).toEqual({ clientId: 'client-3', subscriptions: ['t1'] })
         expect(client.topics()).toEqual(['t1'])
+        expect(reconnects).toEqual([false])
+    })
+
+    it('walks the backoff table while a re-POST keeps failing after reconnect', async () => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        let failNext = false
+        const reconnects: boolean[] = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => {
+                if (failNext) {
+                    failNext = false
+                    throw new Error('boom')
+                }
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
+            backoff: [10, 20, 40],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const first = FakeEventSource.instances.at(-1)
+        if (!first) throw new Error('no EventSource opened')
+        first.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+
+        // First failure after the initial connect: backoff[0] = 10ms.
+        first.fail()
+        failNext = true
+        await vi.advanceTimersByTimeAsync(9)
+        expect(FakeEventSource.instances).toHaveLength(1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(FakeEventSource.instances).toHaveLength(2)
+        const second = FakeEventSource.instances.at(-1)
+        if (!second) throw new Error('no second EventSource opened')
+        failNext = true
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(reconnects).toEqual([])
+
+        // That re-POST failed too: backoff walks to index 1 = 20ms, not back to 10ms.
+        await vi.advanceTimersByTimeAsync(19)
+        expect(FakeEventSource.instances).toHaveLength(2)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(FakeEventSource.instances).toHaveLength(3)
+        const third = FakeEventSource.instances.at(-1)
+        if (!third) throw new Error('no third EventSource opened')
+        failNext = true
+        third.emit('PB_CONNECT', { clientId: 'client-3' }, 'client-3')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(reconnects).toEqual([])
+
+        // And again to index 2 = 40ms.
+        await vi.advanceTimersByTimeAsync(39)
+        expect(FakeEventSource.instances).toHaveLength(3)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(FakeEventSource.instances).toHaveLength(4)
+        const fourth = FakeEventSource.instances.at(-1)
+        if (!fourth) throw new Error('no fourth EventSource opened')
+        fourth.emit('PB_CONNECT', { clientId: 'client-4' }, 'client-4')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(reconnects).toEqual([false])
+    })
+
+    it('does not fire onReconnect after a disconnect and a fresh subscribe', async () => {
+        const { client, connect, sent, reconnects } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        connect()
+        await sub
+        client.disconnect()
+
+        FakeEventSource.instances = []
+        const second = client.subscribe('t2', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await second
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t2'] })
+        expect(reconnects).toEqual([])
     })
 
     it('ignores a stray PB_CONNECT from a superseded EventSource', async () => {
