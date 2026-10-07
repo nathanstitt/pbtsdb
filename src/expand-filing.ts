@@ -123,11 +123,21 @@ function tailsOf(paths: readonly string[], key: string): string[] {
     return paths.filter(path => path.startsWith(`${key}.`)).map(path => path.slice(key.length + 1))
 }
 
-export function createExpandFiler(
-    collectionName: string,
-    setFiled: SetFiled,
+export interface ExpandFilerDeps {
+    collectionName: string
+    setFiled: SetFiled
+    /** This collection's identity as a parent: the holder its filings carry. */
     holder: object
-): ExpandFiler {
+    /**
+     * A parent record whose filings must not be reconciled: a copy older
+     * than the stored row, or a row deleted while its fetch was in flight.
+     */
+    isStale: (record: object) => boolean
+}
+
+export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
+    const { collectionName, setFiled, holder } = deps
+
     async function fileGroup(
         key: string,
         group: ExpandedGroup,
@@ -136,7 +146,7 @@ export function createExpandFiler(
     ): Promise<boolean> {
         const values = lastById(group.values)
         const filed = await target.writeFiled(values, holder)
-        await upsertExpanded(values, target.relationTargets, tailsOf(requestedPaths, key))
+        await upsertExpanded(values, target.relationTargets, tailsOf(requestedPaths, key), true)
         if (!filed) return false
         for (const [parentId, parentValues] of group.byParent) {
             setFiled(parentId, target, key, idsOf(parentValues))
@@ -164,12 +174,16 @@ export function createExpandFiler(
         }
     }
 
+    // Nested levels are the target's rows, not this parent's, so staleness
+    // is checked at the top level only.
     async function upsertExpanded(
-        records: readonly object[],
+        all: readonly object[],
         targets: RelationTargets | undefined,
-        requestedPaths: readonly string[]
+        requestedPaths: readonly string[],
+        nested = false
     ): Promise<void> {
         if (!targets) return
+        const records = nested ? all : all.filter(record => !deps.isStale(record))
         const grouped = groupExpandedByKey(records)
         const unfiled = new Set<string>()
         for (const [key, group] of grouped) {

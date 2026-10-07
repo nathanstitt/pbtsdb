@@ -295,7 +295,7 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 ### Subset Lifetime
 
-In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. Set `subsetGcTime: 0` to release a subset as soon as it unloads.
+In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. An auth change releases every waiting subset at once, so a load right after a logout never reuses the previous user's rows. Set `subsetGcTime: 0` to release a subset as soon as it unloads.
 
 ### Sync Modes
 

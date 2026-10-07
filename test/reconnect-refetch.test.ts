@@ -1,6 +1,7 @@
-import { useLiveQuery } from '@tanstack/react-db'
+import { eq, useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createCollection } from '../src'
 import {
     disconnectRealtime,
     realtimeClientFor,
@@ -15,6 +16,7 @@ import {
     pb,
     waitForLoadFinish,
 } from './helpers'
+import type { Schema } from './schema'
 
 describe('reconnect refetch lifecycle', () => {
     beforeAll(async () => {
@@ -156,6 +158,43 @@ describe('reconnect refetch lifecycle', () => {
             await authenticateTestUser()
             await waitFor(() => expect(books.isSubscribed()).toBe(true), { timeout: 10000 })
             await books.cleanup()
+            getFullList.mockRestore()
+        }
+    }, 30000)
+
+    it('an auth record change releases waiting subsets so a remount fetches', async () => {
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            subsetGcTime: 5000,
+        })
+        const mount = () =>
+            renderHook(() =>
+                useLiveQuery(q =>
+                    q.from({ books }).where(({ books }) => eq(books.genre, 'Fiction'))
+                )
+            )
+        const getList = vi.spyOn(pb.collection('books'), 'getList')
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        const requests = () => getList.mock.calls.length + getFullList.mock.calls.length
+        const first = mount()
+        let second: ReturnType<typeof mount> | undefined
+        try {
+            await waitForLoadFinish(first.result)
+            await books.waitForSubscription()
+            first.unmount()
+            const before = requests()
+
+            const record = pb.authStore.record
+            if (!record) throw new Error('not authenticated')
+            pb.authStore.save(pb.authStore.token, { ...record, id: 'other0000000000' })
+            second = mount()
+            await waitForLoadFinish(second.result)
+            expect(requests()).toBeGreaterThan(before)
+        } finally {
+            second?.unmount()
+            await authenticateTestUser()
+            await books.cleanup()
+            getList.mockRestore()
             getFullList.mockRestore()
         }
     }, 30000)

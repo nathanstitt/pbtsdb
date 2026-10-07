@@ -15,11 +15,22 @@ export interface Transport {
     ) => Promise<Unsubscribe>
     /** Called after every reconnect of the shared connection. */
     onReconnect: (listener: (resumed: boolean) => void) => () => void
+    /**
+     * Called when `pb.authStore` changes to another auth record, before the
+     * realtime session resets. `reconnectFollows` is true when a reconnect,
+     * and so an `onReconnect` call, will follow: the client is enabled and
+     * has topics. Otherwise the listener must reload on its own.
+     */
+    onAuthChange: (listener: (reconnectFollows: boolean) => void) => () => void
     /** @internal Number of listeners registered through `onReconnect`; tests assert on it. */
     reconnectListenerCount: () => number
 }
 
-type Entry = { client: RealtimeClient; reconnectListeners: Set<(resumed: boolean) => void> }
+type Entry = {
+    client: RealtimeClient
+    reconnectListeners: Set<(resumed: boolean) => void>
+    authListeners: Set<(reconnectFollows: boolean) => void>
+}
 
 const entries = new WeakMap<PocketBase, Entry>()
 
@@ -27,12 +38,14 @@ const entries = new WeakMap<PocketBase, Entry>()
 // the connection's with a 403, and an unchanged topic list sends no POST
 // at all, so a login, logout or user switch must forget the session. A
 // token refresh keeps the record and needs nothing.
-function watchAuth(pb: PocketBase, client: RealtimeClient): void {
+function watchAuth(pb: PocketBase, entry: Entry): void {
     let authId = pb.authStore.record?.id
     pb.authStore.onChange((_token, record) => {
         if (record?.id === authId) return
         authId = record?.id
-        client.reset()
+        const reconnectFollows = entry.client.isEnabled() && entry.client.topics().length > 0
+        for (const listener of entry.authListeners) listener(reconnectFollows)
+        entry.client.reset()
     })
 }
 
@@ -47,8 +60,8 @@ function entryFor(pb: PocketBase): Entry {
                 for (const listener of reconnectListeners) listener(resumed)
             },
         })
-        watchAuth(pb, client)
-        entry = { client, reconnectListeners }
+        entry = { client, reconnectListeners, authListeners: new Set() }
+        watchAuth(pb, entry)
         entries.set(pb, entry)
     }
     return entry
@@ -100,6 +113,12 @@ export function transportFor(pb: PocketBase): Transport {
             entry.reconnectListeners.add(listener)
             return () => {
                 entry.reconnectListeners.delete(listener)
+            }
+        },
+        onAuthChange(listener) {
+            entry.authListeners.add(listener)
+            return () => {
+                entry.authListeners.delete(listener)
             }
         },
         reconnectListenerCount: () => entry.reconnectListeners.size,

@@ -470,6 +470,37 @@ describe('sync adapter', () => {
             expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
         })
 
+        it('is not parked when its load never landed, so an equal load fetches', async () => {
+            const t = setup('on-demand', 1000)
+            const abort = new AbortController()
+            const first = { ...named('x'), signal: abort.signal }
+            const load = t.loadSubset(first)
+            abort.abort()
+            t.unloadSubset(first)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+            t.calls[0].resolve([row('a', 'x')])
+            await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+
+            const second = named('x')
+            const next = t.loadSubset(second)
+            expect(t.calls).toHaveLength(2)
+            t.calls[1].resolve([row('a', 'x')])
+            await next
+            expect(t.ledger.idsOf(second)).toEqual(['a'])
+        })
+
+        it('is released by expireParked', async () => {
+            const t = setup('on-demand', 1000)
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(opts)
+            t.adapter.expireParked()
+            expect(t.ledger.has('a')).toBe(false)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+        })
+
         it('is forgotten by cleanup without a late release', async () => {
             const t = setup('on-demand', 20)
             const opts = named('x')
@@ -482,6 +513,17 @@ describe('sync adapter', () => {
             expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
             expect(t.realtime.resetQueryFilters).toHaveBeenCalledTimes(1)
         })
+    })
+
+    it('isDeleted reports an id deleted while a fetch is in flight, and forgets it after', async () => {
+        const t = setup()
+        const load = t.loadSubset({})
+        t.adapter.noteDeleted('a')
+        expect(t.adapter.isDeleted('a')).toBe(true)
+        t.calls[0].resolve([row('a'), row('b')])
+        await load
+        expect(t.adapter.isDeleted('a')).toBe(false)
+        expect(t.ledger.has('a')).toBe(false)
     })
 
     it('reloads called during a reload share one follow-up reload', async () => {

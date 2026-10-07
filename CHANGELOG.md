@@ -46,7 +46,8 @@ All notable changes to this project will be documented in this file.
   request, and realtime keeps them fresh meanwhile. After the window, or on
   `reload()`, the rows leave unless another holder has them. The react-query cache
   served a remount for its `gcTime` before; the window is now explicit and realtime
-  covered.
+  covered. Only a subset whose rows landed waits; an auth record change releases every
+  waiting subset at once.
 - Two live queries with equal requests send two requests. react-query deduplicated
   them.
 - No refetch on window focus or on network reconnect; react-query did both by
@@ -59,7 +60,8 @@ All notable changes to this project will be documented in this file.
   so they no longer grow for the life of the parent.
 - A mutation write-back or `accept()` adds the accepted holder only to a row nothing
   holds yet. A row a query or topic already holds is refreshed in place, so a saved
-  row leaves with its query instead of staying for the session.
+  row leaves with its query instead of staying for the session. The accepted holder
+  itself expires after `subsetGcTime`, so a written row no live query covers leaves.
 - pbtsdb resets its realtime session itself when `pb.authStore` changes to another
   auth record. `disconnectRealtime(pb)` closes the connection and keeps it closed
   until `resetRealtime(pb)`.

@@ -52,6 +52,10 @@ export interface SyncAdapter<T extends object> {
     subsetsFor: (filter: string) => LoadSubsetOptions[]
     /** The server deleted `id`; a fetch in flight must not put it back. */
     noteDeleted: (id: string) => void
+    /** Whether `id` was deleted while a fetch still in flight was running. */
+    isDeleted: (id: string) => boolean
+    /** Release every parked subset now, for example because the auth changed. */
+    expireParked: () => void
 }
 
 /** `visible` for a load core awaits; `accepted` for a path a mutation handler can reach. */
@@ -68,6 +72,8 @@ type Demand = {
     loading: Promise<string[]> | undefined
     /** Set once unloaded: the demand waits for an equal load to adopt it, or expires. */
     parked: ReturnType<typeof setTimeout> | undefined
+    /** Rows for this demand reached the store at least once; only such a demand may park. */
+    landed: boolean
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -89,7 +95,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function demandFor(opts: LoadSubsetOptions): Demand {
         const request = toRequest(deps.registry().withViewExpand(opts))
         const mode = deps.registry().tagFor(opts)?.realtime ?? deps.realtimeMode
-        const base = { request, seq: 0, loading: undefined, parked: undefined }
+        const base = { request, seq: 0, loading: undefined, parked: undefined, landed: false }
         if (mode !== 'query') return { ...base, filters: undefined, counted: false }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
         return { ...base, filters, counted: true }
@@ -202,6 +208,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     ): Promise<string[]> {
         const applied = membership.reconcile(opts, result.rows)
         if (applied === false) return []
+        const demand = run.demands.get(opts)
+        if (demand) demand.landed = true
         const ids = idsOf(result.rows)
         const released = result.fromStore ? true : releaseOmitted(opts, before, ids)
         await settle(applied, wait)
@@ -254,7 +262,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         try {
             const demand = run.demands.get(opts)
             if (!demand) return
-            if (subsetGcTime <= 0 || demand.parked !== undefined) {
+            if (subsetGcTime <= 0 || demand.parked !== undefined || !demand.landed) {
                 expire(run, opts)
                 return
             }
@@ -290,6 +298,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         if (!served) return false
         demand.seq += 1
         demand.loading = undefined
+        demand.landed = true
         return membership.reconcile(opts, served, [ACCEPTED])
     }
 
@@ -313,6 +322,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     ): Applied {
         if (parkedOpts === undefined) return serve(opts, demand)
         const adopted = adopt(opts, parkedOpts)
+        demand.landed = true
         return opts.refetch === true ? false : adopted
     }
 
@@ -491,6 +501,10 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 .map(([opts]) => opts),
         noteDeleted: id => {
             for (const deleted of tombstones) deleted.add(id)
+        },
+        isDeleted: id => [...tombstones].some(deleted => deleted.has(id)),
+        expireParked: () => {
+            if (current) expireParked(current)
         },
     }
 }

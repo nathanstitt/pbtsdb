@@ -65,6 +65,8 @@ export interface RealtimeClient {
     disable: () => void
     /** Lifts `disable()` and connects at once if any topic is registered. */
     enable: () => void
+    /** False while `disable()` is in effect. */
+    isEnabled: () => boolean
     /**
      * Forgets the server-side session (client id, confirmed topics) and
      * reconnects at once if any topic is registered, posting the full list
@@ -420,5 +422,6 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             disabled = false
             if (listeners.size > 0) connect()
         },
+        isEnabled: () => !disabled,
     }
 }

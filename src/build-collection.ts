@@ -30,7 +30,7 @@ import { createLoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
 import { createMembership } from './membership'
 import { createRealtimeSubscription } from './realtime-subscription'
-import { idOf } from './records'
+import { idOf, updatedAtOf } from './records'
 import type { PbRequest } from './request'
 import { createSyncAdapter, type SyncAdapterDeps } from './sync-adapter'
 import { createSyncedStore } from './synced-store'
@@ -288,7 +288,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         },
     })
     const held = createHeldTargets(collectionName, parentHolder)
-    const filer = createExpandFiler(collectionName, held.setFiled, parentHolder)
+    // A result row older than the stored row, or deleted while its fetch
+    // was in flight, must not re-file its relations over newer state.
+    const filer = createExpandFiler({
+        collectionName,
+        setFiled: held.setFiled,
+        holder: parentHolder,
+        isStale: record => {
+            const id = idOf(record)
+            if (id === undefined) return true
+            if (adapter.isDeleted(id)) return true
+            const incoming = updatedAtOf(record)
+            const stored = updatedAtOf(ledger.row(id))
+            return incoming !== undefined && stored !== undefined && incoming < stored
+        },
+    })
     const fetcher = createFetcher<RecordType>({
         pb,
         collectionName,
@@ -323,7 +337,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         subsets,
         realtime,
         registry: (): ReturnType<SyncAdapterDeps<RecordType>['registry']> => registry,
-        onCleanup: () => held.clearFiled(),
+        onCleanup: () => {
+            held.clearFiled()
+            for (const timer of acceptedTimers) clearTimeout(timer)
+            acceptedTimers.clear()
+        },
     })
 
     // `false` disables the mutation; `undefined` selects the built-in handler.
@@ -340,7 +358,24 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const result = membership.accept(rows)
         if (result === false) {
             logger.debug('Dropping write-back while sync is not running', { collectionName })
+            return
         }
+        expireAccepted(rows)
+    }
+
+    // A row only ACCEPTED holds after the window is one no live query shows:
+    // the echo would have given it a topic, a load a subset. Dropping the
+    // holder then bounds what write-backs keep; a row another holder took
+    // meanwhile stays.
+    const acceptedTimers = new Set<ReturnType<typeof setTimeout>>()
+    function expireAccepted(rows: readonly RecordType[]): void {
+        if (subsetGcTime <= 0) return
+        const ids = rows.map(idOf).filter((id): id is string => id !== undefined)
+        const timer = setTimeout(() => {
+            acceptedTimers.delete(timer)
+            membership.drop([ACCEPTED], ids)
+        }, subsetGcTime)
+        acceptedTimers.add(timer)
     }
 
     // reload() resolves on acceptance, so awaiting it here cannot wait for
@@ -436,22 +471,35 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // `buildCollection` call. A restart after cleanup registers again.
     // Cleanup also clears marks a parent set before sync ever started; the
     // adapter's own cleanup runs only for a started sync.
-    let removeReconnectListener: (() => void) | undefined
+    // An auth change expires parked subsets at once, so a load issued right
+    // after a logout cannot adopt the previous user's rows, and reloads when
+    // no reconnect will do it.
+    function reloadFor(reason: string): void {
+        void adapter
+            .reload()
+            .catch(error =>
+                logger.error(`Failed to reload after ${reason}`, { collectionName, error })
+            )
+    }
+    let removeTransportListeners: (() => void) | undefined
     collection.on('status:change', event => {
         if (event.status === 'cleaned-up') subsets.clear()
-        if (!removeReconnectListener && (event.status === 'loading' || event.status === 'ready')) {
-            removeReconnectListener = transport.onReconnect(resumed => {
+        if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
+            const removeReconnect = transport.onReconnect(resumed => {
                 if (resumed || !realtime.isOpen() || !collection.isReady()) return
-                void adapter.reload().catch(error =>
-                    logger.error('Failed to reload after realtime reconnect', {
-                        collectionName,
-                        error,
-                    })
-                )
+                reloadFor('realtime reconnect')
             })
-        } else if (removeReconnectListener && event.status === 'cleaned-up') {
-            removeReconnectListener()
-            removeReconnectListener = undefined
+            const removeAuth = transport.onAuthChange(reconnectFollows => {
+                adapter.expireParked()
+                if (!reconnectFollows && collection.isReady()) reloadFor('auth change')
+            })
+            removeTransportListeners = () => {
+                removeReconnect()
+                removeAuth()
+            }
+        } else if (removeTransportListeners && event.status === 'cleaned-up') {
+            removeTransportListeners()
+            removeTransportListeners = undefined
         }
     })
 
@@ -607,7 +655,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (!(await ensureSyncing())) {
             throw new Error(`Collection '${collectionName}' is not syncing; accept() has no store`)
         }
-        await whenAccepted(membership.accept(rows))
+        const applied = membership.accept(rows)
+        if (applied !== false) expireAccepted(rows)
+        await whenAccepted(applied)
     }
 
     // Parents whose hold covers each realtime filter, so a delete on that

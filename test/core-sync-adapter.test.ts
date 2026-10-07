@@ -218,6 +218,35 @@ describe('core sync adapter', () => {
         }
     }, 15000)
 
+    it('a written row no live topic covers leaves after subsetGcTime; one a query loaded stays', async () => {
+        const seed = await pb.collection('books').create<Books>(await newBook('Fiction', 'kept'))
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            realtime: 'query',
+            subsetGcTime: 300,
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const { result } = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+        )
+        try {
+            await waitForLoadFinish(result)
+            await books.waitForSubscription()
+            const orphan = {
+                ...(await newBook('Thriller', 'orphan')),
+                created: '2026-01-01 00:00:00.000Z',
+                updated: '2026-01-01 00:00:00.000Z',
+            } as Books
+            await books.accept([orphan])
+            expect(books.get(orphan.id)).toBeDefined()
+            await waitFor(() => expect(books.get(orphan.id)).toBeUndefined(), { timeout: 3000 })
+            expect(books.get(seed.id)).toBeDefined()
+        } finally {
+            await removeBook(seed.id)
+            await books.cleanup()
+        }
+    }, 15000)
+
     it('on-demand: realtime going idle releases ACCEPTED', async () => {
         const seed = await pb.collection('books').create<Books>(await newBook('Mystery', 'idle'))
         const books = createCollection<Schema>(pb)('books', {
