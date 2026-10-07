@@ -1,3 +1,4 @@
+import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
@@ -15,9 +16,12 @@ import {
     resetLogger,
     setLogger,
     type TestLogger,
+    topicFilter,
     waitForLoadFinish,
 } from './helpers'
 import type { Books, Schema } from './schema'
+
+type RecordIdentity = { id: string; collectionId: string; collectionName: string }
 
 /**
  * Regression coverage for a realtime delete echo whose record was already
@@ -236,5 +240,101 @@ describe('realtime delete echo idempotency', () => {
             captured.filter(e => /Delete operation: Item with key/i.test(e.message))
         ).toHaveLength(0)
         expect(result.current.data.find(b => b.id === seed.id)).toBeUndefined()
+    }, 25000)
+
+    it('query mode: a delete releases only the delivering topic and its subsets', async () => {
+        const handlers = new Map<string, (event: RecordSubscription<Books>) => void>()
+        const client = realtimeClientFor(pb)
+        const real = client.subscribe.bind(client)
+        vi.spyOn(client, 'subscribe').mockImplementation((topic, listener) => {
+            const filter = topic.startsWith('books/') ? topicFilter(topic) : undefined
+            if (filter) {
+                handlers.set(filter, listener as unknown as (e: RecordSubscription<Books>) => void)
+            }
+            return real(topic, listener)
+        })
+        const authorId = await getTestAuthorId()
+        const title = `Per Topic ${getTestSlug('ptd')}`
+        const create = (isbn: string) =>
+            pb.collection('books').create<Books & RecordIdentity>({
+                title,
+                isbn,
+                genre: 'Fiction',
+                author: authorId,
+                published_date: '',
+                page_count: 0,
+            })
+        const shared = await create(getTestSlug('ptd-a'))
+        const created = [shared.id]
+        try {
+            const collection = createCollection<Schema>(pb)('books', {
+                syncMode: 'on-demand',
+                realtime: 'query',
+            })
+            const byTitle = renderHook(() =>
+                useLiveQuery(q =>
+                    q.from({ books: collection }).where(({ books }) => eq(books.title, title))
+                )
+            )
+            const byIsbn = renderHook(() =>
+                useLiveQuery(q =>
+                    q.from({ books: collection }).where(({ books }) => eq(books.isbn, shared.isbn))
+                )
+            )
+            const handlerFor = (value: string) =>
+                [...handlers].find(([filter]) => filter.includes(value))?.[1]
+            await waitFor(
+                () => {
+                    expect(byTitle.result.current.data.map(b => b.id)).toEqual([shared.id])
+                    expect(byIsbn.result.current.data.map(b => b.id)).toEqual([shared.id])
+                    expect(handlerFor(title)).toBeDefined()
+                    expect(handlerFor(shared.isbn)).toBeDefined()
+                },
+                { timeout: 10000 }
+            )
+            const titleTopic = handlerFor(title)
+            const isbnTopic = handlerFor(shared.isbn)
+            if (!titleTopic || !isbnTopic) throw new Error('topic handlers not captured')
+
+            // A leave event: a delete carrying only the id, on one topic.
+            const leave = (book: RecordIdentity): RecordSubscription<Books> => {
+                const record: RecordIdentity = {
+                    id: book.id,
+                    collectionId: book.collectionId,
+                    collectionName: book.collectionName,
+                }
+                return { action: 'delete', record: record as unknown as Books }
+            }
+
+            isbnTopic(leave(shared))
+            expect(collection.base.has(shared.id)).toBe(true)
+            expect(byTitle.result.current.data.map(b => b.id)).toEqual([shared.id])
+
+            titleTopic(leave(shared))
+            expect(collection.base.has(shared.id)).toBe(false)
+            await waitFor(() => expect(byTitle.result.current.data).toEqual([]))
+
+            // A row only the title topic holds: created after both loads.
+            const topicOnly = await create(getTestSlug('ptd-b'))
+            created.push(topicOnly.id)
+            await waitFor(() => expect(collection.base.has(topicOnly.id)).toBe(true), {
+                timeout: 5000,
+            })
+            titleTopic(leave(topicOnly))
+            expect(collection.base.has(topicOnly.id)).toBe(false)
+
+            byTitle.unmount()
+            byIsbn.unmount()
+            expect(captured).toHaveLength(0)
+        } finally {
+            await Promise.all(
+                created.map(id =>
+                    pb
+                        .collection('books')
+                        .delete(id)
+                        .catch(() => {})
+                )
+            )
+        }
     }, 25000)
 })

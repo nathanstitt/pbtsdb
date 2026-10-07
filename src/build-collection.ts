@@ -79,7 +79,8 @@ export interface PbCollectionUtils<T extends object> extends UtilsRecord {
     accept: (rows: readonly T[]) => Promise<void>
     /**
      * Refetch every live query's subset (the whole collection in eager mode)
-     * and release every row the results do not confirm. Resolves when the
+     * and release the realtime-topic and accepted holders of rows the results
+     * do not confirm; rows a subset or a parent holds stay. Resolves when the
      * rows are accepted; they become visible with the settlement of any
      * persisting mutation.
      */
@@ -97,19 +98,40 @@ export interface CollectionSubscriptionHelpers<T extends object> {
     waitForSubscription: (timeout?: number) => Promise<void>
     /** Check if collection has an active subscription */
     isSubscribed: () => boolean
-    /** Relation targets declared through `relations` */
+    /**
+     * Relation targets declared through `relations`. Relation plumbing, not public API.
+     * @internal
+     */
     relationTargets: RelationTargets | undefined
-    /** Number of relation targets currently held live */
+    /**
+     * Number of relation targets currently held live. Relation plumbing, not public API.
+     * @internal
+     */
     heldRelationTargetCount: () => number
-    /** Record that every row with `field === value` is now in this collection's store */
+    /**
+     * Record that every row with `field === value` is now in this collection's store. Relation plumbing, not public API.
+     * @internal
+     */
     markSubsetLoaded: (field: string, value: string) => void
-    /** Number of field/value pairs currently marked loaded */
+    /**
+     * Number of field/value pairs currently marked loaded. Relation plumbing, not public API.
+     * @internal
+     */
     loadedSubsetCount: () => number
-    /** Hold this collection live as a relation target; see RelationTarget.holdLive */
+    /**
+     * Hold this collection live as a relation target; see RelationTarget.holdLive. Relation plumbing, not public API.
+     * @internal
+     */
     holdLive: (holder: object) => HeldTarget
-    /** Receive rows a parent expanded into this collection; see RelationTarget.writeFiled */
+    /**
+     * Receive rows a parent expanded into this collection; see RelationTarget.writeFiled. Relation plumbing, not public API.
+     * @internal
+     */
     writeFiled: (records: object[], holder: object) => Promise<boolean>
-    /** A parent's fetch may file a subset here; see RelationTarget.expectFiling */
+    /**
+     * A parent's fetch may file a subset here; see RelationTarget.expectFiling. Relation plumbing, not public API.
+     * @internal
+     */
     expectFiling: (field: string, settles: Promise<void>) => () => void
     /** See {@link PbCollectionUtils.accept}. */
     accept: PbCollectionUtils<T>['accept']
@@ -208,11 +230,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return expand ? { ...base, expand } : base
     }
 
-    // Every held target and every subset mark exists to serve rows realtime
-    // keeps fresh; with nothing live and nothing wanted, release them all.
+    // Every held target, every subset mark and, in on-demand mode, every
+    // accepted row exists to serve rows realtime keeps fresh; with nothing
+    // live and nothing wanted, release them all.
     function releaseAll(): void {
         held.releaseAll()
         subsets.clear()
+        if (syncMode === 'on-demand') membership.drop([ACCEPTED])
     }
 
     // In eager mode the whole collection stays loaded after the last

@@ -90,7 +90,7 @@ holder is one of:
 | Subset | `loadSubset(options)` | `unloadSubset(options)`, or a reload of the same subset whose result omits the row |
 | Realtime topic | a create or update event delivered on that topic's filter | the topic's realtime entry closing while the topic is no longer wanted (on-demand mode), or `reload()` for rows its results do not confirm |
 | Hold | a parent's `holdLive()` on a relation target, per filed row | `release()` on the hold |
-| Accepted | a write-back after persist, an insert echo for this client's own pending row, or `accept(rows)` from the application | the next subset reload or realtime event that covers the row, or `reload()` |
+| Accepted | a write-back after persist, an insert echo for this client's own pending row, or `accept(rows)` from the application | the next subset reload or realtime event that covers the row, a fresh load whose `where` matches the row and whose result omits it (rule 6 exception), realtime going idle (on-demand mode), or `reload()` |
 
 Rules:
 
@@ -105,7 +105,7 @@ Rules:
    `updated` is strictly newer, or equal. A strictly older row is dropped.
    This is the one staleness check, and it is the same rule for echoes,
    write-backs, filed rows and results (see `docs/internals.md`,
-   "Staleness").
+   "Ledger", rule 4).
 5. A delete event releases the delivering topic's ref, the refs of every
    subset whose base `where` is that topic, and the accepted ref. It does
    not touch other topics' refs. A real delete reaches every topic that
@@ -117,6 +117,17 @@ Rules:
 6. The ledger does not evaluate predicates. It never decides that a row
    matches a filter. The server decides, through a load result or a
    realtime topic.
+
+   Exception: `load` evaluates a demand's full `where` on the client
+   (`compileSingleRowExpression`) after a fresh, complete server result
+   (no `limit`, `cursor` or `offset`, not served from the store). A row
+   that `ACCEPTED` or one of the demand's topics held before the fetch,
+   that did not change during the fetch, that matches `where` and that the
+   result omits, loses its `ACCEPTED` and topic holders. Subset, parent
+   and `EAGER` holders stay. Without this, a row accepted after a move
+   and then deleted by another client stays on screen until `reload()`.
+   In on-demand mode, `ACCEPTED` is also released in full when realtime
+   goes idle, because no realtime coverage is left to correct its rows.
 
 Rule 6 is why a row can stay in the collection after it stops matching a
 filter, until the subset reloads or a holder releases it. This is the same

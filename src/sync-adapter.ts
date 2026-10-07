@@ -1,10 +1,12 @@
 import {
+    compileSingleRowExpression,
     LoadSubsetOperationAbortedError,
     type LoadSubsetOptions,
     type SyncConfig,
+    toBooleanPredicate,
     whenSyncAccepted,
 } from '@tanstack/db'
-import type { Fetcher } from './fetch-records'
+import type { Fetcher, FetchResult } from './fetch-records'
 import { ACCEPTED, EAGER, type Holder, type Ledger } from './ledger'
 import type { LoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
@@ -60,6 +62,8 @@ type Demand = {
     counted: boolean
     /** Incremented by every load of this demand; only the newest load reconciles. */
     seq: number
+    /** The newest load; a superseded load resolves with it. */
+    loading: Promise<string[]> | undefined
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -80,9 +84,11 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function demandFor(opts: LoadSubsetOptions): Demand {
         const request = toRequest(deps.registry().withViewExpand(opts))
         const mode = deps.registry().tagFor(opts)?.realtime ?? deps.realtimeMode
-        if (mode !== 'query') return { request, filters: undefined, counted: false, seq: 0 }
+        if (mode !== 'query') {
+            return { request, filters: undefined, counted: false, seq: 0, loading: undefined }
+        }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
-        return { request, filters, counted: true, seq: 0 }
+        return { request, filters, counted: true, seq: 0, loading: undefined }
     }
 
     function idsOf(rows: readonly T[]): string[] {
@@ -100,15 +106,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         request: PbRequest,
         signal: AbortSignal | undefined,
         refetch: boolean
-    ): Promise<T[]> {
+    ): Promise<FetchResult<T>> {
         const deleted = new Set<string>()
         tombstones.add(deleted)
         try {
-            const { rows } = await fetcher.fetchRecords(request, {
+            const { rows, fromStore } = await fetcher.fetchRecords(request, {
                 signal: signal ? AbortSignal.any([run.abort.signal, signal]) : run.abort.signal,
                 refetch,
             })
-            return rows.filter(row => !deleted.has(idOf(row) ?? ''))
+            return { rows: rows.filter(row => !deleted.has(idOf(row) ?? '')), fromStore }
         } finally {
             tombstones.delete(deleted)
         }
@@ -123,7 +129,79 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return true
     }
 
-    async function load(
+    // An expression the client cannot evaluate matches nothing, so it
+    // releases nothing.
+    function matcherFor(where: LoadSubsetOptions['where']): (row: T) => boolean {
+        if (where === undefined) return () => true
+        let evaluate: ReturnType<typeof compileSingleRowExpression>
+        try {
+            evaluate = compileSingleRowExpression(where)
+        } catch {
+            return () => false
+        }
+        return row => {
+            try {
+                return toBooleanPredicate(evaluate(row as Record<string, unknown>))
+            } catch {
+                return false
+            }
+        }
+    }
+
+    // Rows ACCEPTED or this demand's topics hold, as they stand before the
+    // fetch. A row an event or a write-back replaces meanwhile
+    // is a new object, so it is not mistaken for one the result omits.
+    function uncoveredRows(demand: Demand): { holders: Holder[]; rows: Map<string, T> } {
+        const holders = [ACCEPTED, ...(demand.filters ?? ['*'])]
+        const rows = new Map<string, T>()
+        for (const holder of holders) {
+            for (const id of ledger.idsOf(holder)) {
+                const stored = ledger.row(id)
+                if (stored) rows.set(id, stored)
+            }
+        }
+        return { holders, rows }
+    }
+
+    // A complete fresh result is the server's answer for `where`: a row
+    // ACCEPTED or a topic holds, that matches `where` and that the result
+    // omits, is gone or changed on the server (rule 6 exception). A page
+    // (limit, cursor, offset) omits matching rows by design.
+    function releaseOmitted(
+        opts: LoadSubsetOptions,
+        before: { holders: Holder[]; rows: Map<string, T> },
+        ids: readonly string[]
+    ): Applied {
+        if (opts.limit !== undefined || opts.cursor || opts.offset !== undefined) return true
+        const returned = new Set(ids)
+        const matches = matcherFor(opts.where)
+        const omitted = [...before.rows]
+            .filter(([id, stored]) => !returned.has(id) && ledger.row(id) === stored)
+            .filter(([, stored]) => matches(stored))
+            .map(([id]) => id)
+        return omitted.length > 0 ? membership.drop(before.holders, omitted) : true
+    }
+
+    async function install(
+        run: Run,
+        opts: LoadSubsetOptions,
+        wait: Wait,
+        before: { holders: Holder[]; rows: Map<string, T> },
+        result: FetchResult<T>
+    ): Promise<string[]> {
+        const applied = membership.reconcile(opts, result.rows)
+        if (applied === false) return []
+        const ids = idsOf(result.rows)
+        const released = result.fromStore ? true : releaseOmitted(opts, before, ids)
+        await settle(applied, wait)
+        await settle(released, wait)
+        if (!stopped(run, opts, wait)) membership.confirm(opts, [ACCEPTED], ids)
+        return ids
+    }
+
+    // A superseded load resolves with the newer one, so the caller never
+    // resolves before the rows it asked for.
+    function load(
         run: Run,
         opts: LoadSubsetOptions,
         demand: Demand,
@@ -131,19 +209,21 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         refetch: boolean
     ): Promise<string[]> {
         const seq = ++demand.seq
-        const rows = await fetchRows(run, demand.request, opts.signal, refetch).catch(error => {
-            if (stopped(run, opts, wait)) return undefined
-            throw error
-        })
-        if (rows === undefined || stopped(run, opts, wait)) return []
-        if (run.demands.get(opts) !== demand || demand.seq !== seq) return []
-        const applied = membership.reconcile(opts, rows)
-        if (applied === false) return []
-        const ids = idsOf(rows)
-        ledger.release(ACCEPTED, ids)
-        await settle(applied, wait)
-        stopped(run, opts, wait)
-        return ids
+        const before = uncoveredRows(demand)
+        const loading = (async (): Promise<string[]> => {
+            const result = await fetchRows(run, demand.request, opts.signal, refetch).catch(
+                error => {
+                    if (stopped(run, opts, wait)) return undefined
+                    throw error
+                }
+            )
+            if (result === undefined || stopped(run, opts, wait)) return []
+            if (run.demands.get(opts) !== demand) return []
+            if (demand.seq !== seq) return demand.loading ?? []
+            return install(run, opts, wait, before, result)
+        })()
+        demand.loading = loading
+        return loading
     }
 
     function unloadSubset(run: Run, opts: LoadSubsetOptions): void {
@@ -163,9 +243,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         const served = fetcher.serveFromStore(demand.request)
         if (!served) return false
         demand.seq += 1
-        const applied = membership.reconcile(opts, served)
-        if (applied !== false) ledger.release(ACCEPTED, idsOf(served))
-        return applied
+        demand.loading = undefined
+        return membership.reconcile(opts, served, [ACCEPTED])
     }
 
     function loadSubsetIn(run: Run) {
@@ -195,15 +274,13 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function loadEagerRows(run: Run): Promise<string[]> {
         const seq = ++run.eagerSeq
         const loading = (async (): Promise<string[]> => {
-            const rows = await fetchRows(run, {}, undefined, false)
+            const { rows } = await fetchRows(run, {}, undefined, false)
             if (run.abort.signal.aborted) return []
             if (run.eagerSeq !== seq) return run.eagerLoad ?? []
-            const applied = membership.reconcile(EAGER, rows)
+            const applied = membership.reconcile(EAGER, rows, [ACCEPTED])
             if (applied === false) return []
-            const ids = idsOf(rows)
-            ledger.release(ACCEPTED, ids)
             await settle(applied, 'accepted')
-            return ids
+            return idsOf(rows)
         })()
         run.eagerLoad = loading
         return loading

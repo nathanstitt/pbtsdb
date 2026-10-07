@@ -20,8 +20,14 @@ export interface MembershipDeps<T extends object> {
 export interface Membership<T extends object> {
     /** Reference `rows` for `holder`; new and newer rows are written. */
     land: (holder: Holder, rows: readonly T[]) => Applied
-    /** Make `rows` exactly what `holder` references; rows it no longer holds may leave. */
-    reconcile: (holder: Holder, rows: readonly T[]) => Applied
+    /**
+     * Make `rows` exactly what `holder` references; rows it no longer holds
+     * may leave. `releaseAlso` holders release `rows` in the same
+     * transaction; `holder` keeps each of them, so none leaves.
+     */
+    reconcile: (holder: Holder, rows: readonly T[], releaseAlso?: readonly Holder[]) => Applied
+    /** Release `holders` from the `ids` that `keeper` references; `keeper` keeps each row. */
+    confirm: (keeper: Holder, holders: readonly Holder[], ids: Iterable<string>) => Applied
     /** Release `ids` (all of theirs when omitted) from `holders`; rows at zero leave. */
     drop: (holders: readonly Holder[], ids?: Iterable<string>) => Applied
     /** Remove `ids` from every holder. */
@@ -73,6 +79,21 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
         return ids.map(id => rows.get(id)).filter((row): row is T => row !== undefined)
     }
 
+    // Releases a holder from rows another holder still references, so no row
+    // can reach zero; a removal here is a bug and rolls the change back.
+    function releaseKept(keeper: Holder, holders: readonly Holder[], ids: Iterable<string>): void {
+        const kept = new Set(ledger.idsOf(keeper))
+        const covered = [...ids].filter(id => kept.has(id))
+        for (const holder of holders) {
+            const removed = ledger.release(holder, covered)
+            if (removed.length > 0) {
+                throw new Error(
+                    `${deps.collectionName}: releasing a kept row removed ${removed.join(', ')}`
+                )
+            }
+        }
+    }
+
     // The ledger change and its sync transaction succeed or fail together:
     // a throwing write rolls the ledger back, so the two never disagree.
     function apply(change: () => Change<T>): Applied {
@@ -96,11 +117,18 @@ export function createMembership<T extends object>(deps: MembershipDeps<T>): Mem
     return {
         land: (holder, rows) =>
             apply(() => ({ writes: writesFor(rows, ledger.retain(holder, rows), []), gone: [] })),
-        reconcile: (holder, rows) =>
+        reconcile: (holder, rows, releaseAlso = []) =>
             apply(() => {
                 const before = rowsBefore(ledger.idsOf(holder))
                 const { removed, ...changes } = ledger.replace(holder, rows)
+                const ids = rows.map(idOf).filter((id): id is string => id !== undefined)
+                releaseKept(holder, releaseAlso, ids)
                 return { writes: writesFor(rows, changes, removed), gone: pick(before, removed) }
+            }),
+        confirm: (keeper, holders, ids) =>
+            apply(() => {
+                releaseKept(keeper, holders, ids)
+                return { writes: [], gone: [] }
             }),
         drop: (holders, ids) =>
             apply(() => {

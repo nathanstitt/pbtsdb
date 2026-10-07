@@ -18,7 +18,9 @@ export interface HeldTargets {
 
 export function createHeldTargets(collectionName: string, holder: object): HeldTargets {
     const held = new Map<RelationTarget, HeldTarget>()
-    // Kept across releases: a cached refetch re-holds without filing again.
+    // Kept across releases, so a re-hold re-subscribes these filters without
+    // filing again. The rows filed under a released hold leave the target;
+    // a re-hold does not put them back.
     const filedByTarget = new Map<RelationTarget, Map<string, Set<string>>>()
 
     function filtersFor(target: RelationTarget): string[] {

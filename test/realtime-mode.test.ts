@@ -579,7 +579,7 @@ describe('realtime mode', () => {
             }
         }, 30000)
 
-        it('re-holds a query-mode target with its filed rows after a remount served from the store', async () => {
+        it('re-subscribes a query-mode target to its filed filters after a remount served from the store', async () => {
             const authorsSpy = vi.spyOn(realtimeClientFor(pb), 'subscribe')
             const getListSpy = vi.spyOn(pb.collection('books'), 'getList')
             const getFullListSpy = vi.spyOn(pb.collection('books'), 'getFullList')
@@ -607,8 +607,12 @@ describe('realtime mode', () => {
                     }
                 )
                 const filed = filtersOf(authorsSpy, 'authors').at(-1)
-                // An accepted ref keeps the rows in the store after the subset unloads.
-                await books.accept(first.result.current.data)
+                // A parent-style holder keeps the books in the store after the
+                // subset unloads and realtime goes idle, which drops ACCEPTED.
+                // The released hold dropped the authors it filed; only the
+                // filter list survives for the re-hold.
+                const keeper = { parent: 'keeper' }
+                expect(await books.writeFiled(first.result.current.data, keeper)).toBe(true)
 
                 first.unmount()
                 await waitFor(() => expect(authors.isSubscribed()).toBe(false), { timeout: 8000 })

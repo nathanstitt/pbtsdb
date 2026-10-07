@@ -4,7 +4,7 @@ Design notes for the parts of the collection runtime whose reason is not visible
 
 ## Ledger
 
-`src/ledger.ts`: `createLedger`, `retain`, `release`, `replace`, `releaseAll`; `src/membership.ts`: `land`, `reconcile`, `drop`, `dropAll`
+`src/ledger.ts`: `createLedger`, `retain`, `release`, `replace`, `releaseAll`; `src/membership.ts`: `land`, `reconcile`, `confirm`, `drop`, `dropAll`
 
 pbtsdb is the only writer to the collection's synced store, through the sync session's `begin`, `write` and `commit`. The ledger holds a copy of every row in the store together with the holders that reference it. A holder is one of: a loaded subset (the `LoadSubsetOptions` object core passes to `loadSubset` and `unloadSubset`), a realtime topic (`'*'` or a filter string), a parent's hold (the parent's holder token), or the `ACCEPTED` sentinel for rows a mutation write-back or `accept()` landed. In eager mode the whole collection is one holder, `EAGER`.
 
@@ -15,7 +15,9 @@ Rules:
 3. A reload of a subset replaces that holder's set: rows absent from the new result lose that holder only.
 4. A row strictly older by `updated` than the stored row is not stored; its holder is still added. Equal or newer replaces the row. PocketBase bumps `updated` on every write, so equal is the same version, and landing it again is what clears a lingering optimistic overlay.
 5. A delete event on a filter topic releases that topic, every subset whose base `where` is that topic, and `ACCEPTED`. A delete on `'*'` and a delete mutation release every holder. The tinycld fork sends a `delete` carrying only the id to a subscription a row stops matching, so a row that leaves one filter stays while another holder references it.
-6. The ledger evaluates no predicates. The server decides membership, through a load result or a realtime topic.
+6. The ledger evaluates no predicates. The server decides membership, through a load result or a realtime topic. One exception: after a fresh, complete load result (no `limit`, `cursor` or `offset`), `load` in `src/sync-adapter.ts` evaluates the demand's `where` on the client with `compileSingleRowExpression`. A row that `ACCEPTED` or one of the demand's topics held before the fetch, that did not change during the fetch, that matches `where`, and that the result omits, loses its `ACCEPTED` and topic holders. Subset, parent and `EAGER` holders stay. A row accepted with no realtime coverage, then deleted by another client, would otherwise stay until `reload()`.
+
+In on-demand mode, `ACCEPTED` is released in full when realtime goes idle (`releaseAll`, the `onIdle` path in `src/build-collection.ts`), because no realtime topic is left to correct its rows.
 
 A topic holder is released when its realtime entry is closed and the topic is no longer wanted (`onEntryClosed`, on-demand mode only; an eager store keeps it until `reload()` or cleanup). A restart reopens the same topic and keeps the holder.
 
@@ -23,13 +25,15 @@ A row can stay in the store after it stops matching a filter until the subset re
 
 With `rowUpdateMode: 'full'`, TanStack DB keeps the written object as the stored row. The ledger writes a new object for every insert and update (an update merges the incoming row into the stored one, so a partial realtime payload from a `fields` option drops no field), and the ledger row is that object. So the ledger row equals core's stored row, a caller's later in-place change cannot reach the store, and pbtsdb stays clear of the development-only `SyncRowReusedWithoutPreviousValueError`.
 
-Membership changes the ledger and writes the sync transaction as one unit. If a write throws, the ledger rolls back (`track`, `rollback`), so the two never disagree.
+Membership changes the ledger and writes the sync transaction as one unit. If a write throws, the ledger rolls back (`track`, `rollback`), so the two never disagree. A release of `ACCEPTED` from rows a subset or `EAGER` just retained goes through membership too (`reconcile`'s `releaseAlso`, `confirm`); it can remove no row, and membership throws if it does. `load` does that release only after its last abort check, so an aborted load keeps a freshly accepted row's holder.
+
+Persistence wrappers (a TanStack DB collection that persists the synced store and restores it on start) are not supported: a restored row has no holder in the ledger.
 
 ## Sync adapter
 
 `src/sync-adapter.ts`: `loadSubset`, `unloadSubset`, `reload`, `cleanup`
 
-`loadSubset` translates the options with `toRequest` and retains the subset's realtime filters. If the store serves the subset and nothing changes, it returns `true` synchronously. Otherwise it fetches, `reconcile`s the subset holder and awaits the visibility receipt. `options.refetch` skips the store. An aborted load rejects with `LoadSubsetOperationAbortedError`, also when its rows were already accepted. A load whose demand was unloaded, or superseded by a newer load of the same demand (`seq`), installs nothing. `unloadSubset` releases the filters and the holder; it is idempotent and never throws.
+`loadSubset` translates the options with `toRequest` and retains the subset's realtime filters. If the store serves the subset and nothing changes, it returns `true` synchronously. Otherwise it fetches, `reconcile`s the subset holder and awaits the visibility receipt. `options.refetch` skips the store. An aborted load rejects with `LoadSubsetOperationAbortedError`, also when its rows were already accepted. A load whose demand was unloaded installs nothing. A load superseded by a newer load of the same demand (`seq`) installs nothing and resolves with the newer load, so it never resolves before the newer rows land. `unloadSubset` releases the filters and the holder; it is idempotent and never throws.
 
 Each `sync()` call is a run with its own `AbortController`. Every fetch carries the run's signal, and every async path checks it before it writes, so a late result from a discarded run never writes into the next one. `cleanup` aborts the run first. It runs only inside the collection's own cleanup, which also clears the synced store, so it clears the ledger and marks and writes nothing. Core calls `unloadSubset` before it emits `unsubscribed`, so only `unloadSubset` releases.
 

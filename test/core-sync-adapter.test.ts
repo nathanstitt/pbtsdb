@@ -116,7 +116,9 @@ describe('core sync adapter', () => {
         try {
             await waitForLoadFinish(result)
             await books.waitForSubscription()
-            await books.accept([control])
+            // A parent-style holder: realtime going idle releases ACCEPTED in
+            // on-demand mode, so an accepted row would leave too.
+            expect(await books.writeFiled([control], { parent: 'control' })).toBe(true)
             const created = await pb
                 .collection('books')
                 .create<Books>(await newBook('Fiction', 'topic'))
@@ -129,6 +131,30 @@ describe('core sync adapter', () => {
         } finally {
             if (createdId) await removeBook(createdId)
             await removeBook(control.id)
+            await books.cleanup()
+        }
+    }, 15000)
+
+    it('on-demand: realtime going idle releases ACCEPTED', async () => {
+        const seed = await pb.collection('books').create<Books>(await newBook('Mystery', 'idle'))
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            realtime: 'query',
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const { result, unmount } = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+        )
+        try {
+            await waitForLoadFinish(result)
+            await books.waitForSubscription()
+            await books.accept([seed])
+            expect(books.get(seed.id)).toBeDefined()
+            unmount()
+            await waitFor(() => expect(books.isSubscribed()).toBe(false))
+            await waitFor(() => expect(books.get(seed.id)).toBeUndefined())
+        } finally {
+            await removeBook(seed.id)
             await books.cleanup()
         }
     }, 15000)

@@ -346,14 +346,16 @@ const collection = c('books', {
 
 The option only affects the built-in default handlers. A custom `onInsert`, `onUpdate`, or `onDelete` controls write-back itself:
 
-- TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back. To prevent that gap, `await collection.accept(serverRows)` before you return.
+- TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back.
+- For an insert or an update, `await collection.accept(serverRows)` before you return. This closes the gap.
+- For a delete, `accept` cannot help, because it cannot remove a row. No public method removes the row before the optimistic state drops, except `await collection.reload()`. Without it, the deleted row shows again until the delete echo arrives.
 - The handler returns `void`. Core no longer reads a `{ refetch }` result; call `collection.reload()` yourself if the handler needs a refetch.
 
 ### Writing server rows yourself
 
 `collection.accept(rows)` lands rows the server returned, for example the response of a custom endpoint, as confirmed state. A row older than the stored one is ignored. Use it when the screen must update before the realtime echo arrives. It resolves when the rows are accepted, so a custom mutation handler can await it.
 
-`collection.reload()` refetches every live query's subset and drops every row the results do not confirm. Use it when the server state changed with no realtime event, such as after a user loses access to rows.
+`collection.reload()` refetches every live query's subset. Then it releases the realtime-topic and accepted holders of the rows the results do not confirm. A row that a parent filed through a relation stays. Use it when the server state changed with no realtime event, such as after a user loses access to rows.
 
 Both are also on `collection.utils`.
 

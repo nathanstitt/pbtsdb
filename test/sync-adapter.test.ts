@@ -1,4 +1,6 @@
 import {
+    eq,
+    IR,
     LoadSubsetOperationAbortedError,
     type LoadSubsetOptions,
     type SyncConfig,
@@ -6,17 +8,18 @@ import {
 } from '@tanstack/db'
 import { describe, expect, it, vi } from 'vitest'
 import type { Fetcher, FetchOptions, FetchResult } from '../src/fetch-records'
-import { createLedger } from '../src/ledger'
+import { ACCEPTED, createLedger } from '../src/ledger'
 import { createLoadedSubsets } from '../src/loaded-subsets'
 import { createMembership } from '../src/membership'
-import type { PbRequest } from '../src/request'
+import { type PbRequest, realtimeFiltersFor, toRequest } from '../src/request'
 import { createSyncAdapter } from '../src/sync-adapter'
 import { createSyncedStore } from '../src/synced-store'
 
 type Row = { id: string; name: string; updated: string }
 type SyncParams = Parameters<SyncConfig<Row, string | number>['sync']>[0]
 
-const row = (id: string): Row => ({ id, name: id, updated: '2026-01-01 00:00:00.000Z' })
+const row = (id: string, name = id): Row => ({ id, name, updated: '2026-01-01 00:00:00.000Z' })
+const named = (name: string): LoadSubsetOptions => ({ where: eq(new IR.PropRef(['name']), name) })
 
 type Call = {
     request: PbRequest
@@ -270,5 +273,120 @@ describe('sync adapter', () => {
         expect(t.calls[0].options?.refetch).toBe(true)
         t.calls[0].resolve([row('a')])
         await load
+    })
+    describe('a fresh result releases accepted and topic holders it omits', () => {
+        const topic = realtimeFiltersFor(toRequest(named('x')))?.[0]
+        if (topic === undefined) throw new Error('no realtime filter for the where')
+
+        it('a matching row held only by ACCEPTED or the demand topic and omitted leaves the ledger', async () => {
+            const t = setup()
+            const opts = named('x')
+            t.membership.land(ACCEPTED, [row('a', 'x')])
+            t.membership.land(topic, [row('c', 'x')])
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('b', 'x')])
+            await load
+            expect(t.ledger.has('a')).toBe(false)
+            expect(t.ledger.has('c')).toBe(false)
+            expect(t.log).toContain('delete:a')
+            expect(t.log).toContain('delete:c')
+            expect(t.ledger.idsOf(opts)).toEqual(['b'])
+        })
+
+        it('a row the result contains keeps its subset holder and drops ACCEPTED', async () => {
+            const t = setup()
+            const opts = named('x')
+            t.membership.land(ACCEPTED, [row('a', 'x')])
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            expect(t.ledger.idsOf(opts)).toEqual(['a'])
+            expect(t.ledger.idsOf(ACCEPTED)).toEqual([])
+        })
+
+        it('a row that does not match the where is untouched', async () => {
+            const t = setup()
+            const opts = named('x')
+            t.membership.land(ACCEPTED, [row('a', 'y')])
+            t.membership.land(topic, [row('c', 'y')])
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([])
+            await load
+            expect(t.ledger.idsOf(ACCEPTED)).toEqual(['a'])
+            expect(t.ledger.idsOf(topic)).toEqual(['c'])
+        })
+
+        it('a row a subset holds is untouched', async () => {
+            const t = setup()
+            const other: LoadSubsetOptions = {}
+            const loadOther = t.loadSubset(other)
+            t.calls[0].resolve([row('a', 'x')])
+            await loadOther
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[1].resolve([])
+            await load
+            expect(t.ledger.idsOf(other)).toEqual(['a'])
+            expect(t.log).not.toContain('delete:a')
+        })
+
+        it('a row that changes while the fetch is in flight is untouched', async () => {
+            const t = setup()
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.membership.land(ACCEPTED, [row('a', 'x')])
+            t.calls[0].resolve([])
+            await load
+            expect(t.ledger.idsOf(ACCEPTED)).toEqual(['a'])
+        })
+    })
+
+    it('a superseded load resolves only after the newer load has landed its rows', async () => {
+        const t = setup()
+        const opts: LoadSubsetOptions = {}
+        let landedFirst: boolean | undefined
+        const first = Promise.resolve(t.loadSubset(opts)).then(() => {
+            landedFirst = t.ledger.has('b')
+        })
+        const reload = t.adapter.reload()
+        t.calls[0].resolve([row('a')])
+        await flush()
+        expect(landedFirst).toBeUndefined()
+        t.calls[1].resolve([row('b')])
+        await Promise.all([first, reload])
+        expect(landedFirst).toBe(true)
+        expect(t.ledger.idsOf(opts)).toEqual(['b'])
+    })
+
+    it('two overlapping reloads keep every topic row the newer result confirms', async () => {
+        const t = setup()
+        const opts: LoadSubsetOptions = {}
+        const load = t.loadSubset(opts)
+        t.calls[0].resolve([row('a')])
+        await load
+        t.membership.land('topic', [row('a')])
+        const older = t.adapter.reload()
+        const newer = t.adapter.reload()
+        t.calls[1].resolve([])
+        t.calls[2].resolve([row('a')])
+        await Promise.all([older, newer])
+        expect(t.ledger.idsOf('topic')).toEqual(['a'])
+    })
+
+    it('an aborted load keeps the accepted holder of a row it returned', async () => {
+        const t = setup()
+        const visible = deferred()
+        t.receipt(() => withAcceptedReceipt(visible.promise, true))
+        t.membership.land(ACCEPTED, [row('a')])
+        const abort = new AbortController()
+        const opts: LoadSubsetOptions = { signal: abort.signal }
+        const load = t.loadSubset(opts)
+        t.calls[0].resolve([row('a')])
+        await flush()
+        abort.abort()
+        visible.resolve()
+        await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        t.unloadSubset(opts)
+        expect(t.ledger.idsOf(ACCEPTED)).toEqual(['a'])
     })
 })
