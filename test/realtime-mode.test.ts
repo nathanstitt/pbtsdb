@@ -13,7 +13,7 @@ import {
     vi,
 } from 'vitest'
 
-import { createCollection, realtimeClientFor } from '../src'
+import { createCollection } from '../src'
 import {
     REALTIME_MAX_FILTER_LENGTH,
     REALTIME_TOPIC_MAX_LENGTH,
@@ -21,6 +21,7 @@ import {
     subsetFilters,
 } from '../src/pocketbase-limits'
 import type { RealtimeClient } from '../src/realtime-client'
+import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,

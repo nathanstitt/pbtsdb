@@ -117,8 +117,11 @@ describe('reconnect refetch lifecycle', () => {
         })
         expect((books as unknown as { isReady: () => boolean }).isReady()).toBe(false)
 
+        const idBeforeDisconnect = realtimeClientFor(pb).clientId()
         realtimeClientFor(pb).simulateDisconnect()
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        await waitFor(() => expect(realtimeClientFor(pb).clientId()).not.toBe(idBeforeDisconnect), {
+            timeout: 10000,
+        })
         expect(refetch).not.toHaveBeenCalled()
 
         releaseFirstLoad?.()
@@ -137,8 +140,11 @@ describe('reconnect refetch lifecycle', () => {
         const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
         getFullList.mockClear()
 
+        const idBeforeReset = realtimeClientFor(pb).clientId()
         resetRealtime(pb)
-        await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
+        await waitFor(() => expect(realtimeClientFor(pb).clientId()).not.toBe(idBeforeReset), {
+            timeout: 10000,
+        })
         await waitFor(
             () =>
                 expect((books as unknown as { isSubscribed: () => boolean }).isSubscribed()).toBe(
@@ -146,6 +152,7 @@ describe('reconnect refetch lifecycle', () => {
                 ),
             { timeout: 10000 }
         )
+        expect(getFullList).toHaveBeenCalledTimes(1)
 
         await books.cleanup()
         getFullList.mockRestore()

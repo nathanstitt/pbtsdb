@@ -709,4 +709,121 @@ describe('realtime client', () => {
         expect(FakeEventSource.instances).toHaveLength(0)
         expect(client.isConnected()).toBe(false)
     })
+
+    it('reset during an in-flight re-POST reports onReconnect at most once, for the new session only', async () => {
+        FakeEventSource.instances = []
+        const gate: Array<() => void> = []
+        const reconnects: boolean[] = []
+        let gatePosts = false
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => {
+                if (!gatePosts) return
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const firstSource = FakeEventSource.instances.at(-1)
+        if (!firstSource) throw new Error('no EventSource opened')
+        firstSource.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+        expect(reconnects).toEqual([])
+
+        // A real reconnect: the connection drops, and its re-POST is held open.
+        gatePosts = true
+        client.simulateDisconnect()
+        await flush()
+        const secondSource = FakeEventSource.instances.at(-1)
+        if (!secondSource) throw new Error('no second EventSource opened')
+        secondSource.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+
+        // reset() interrupts that in-flight re-POST before it settles.
+        client.reset()
+        await flush()
+        expect(secondSource.closed).toBe(true)
+
+        // The stale re-POST now succeeds, after the session has already moved on.
+        gate.shift()?.()
+        await flush()
+
+        const thirdSource = FakeEventSource.instances.at(-1)
+        if (!thirdSource) throw new Error('no third EventSource opened')
+        expect(thirdSource).not.toBe(secondSource)
+        thirdSource.emit('PB_CONNECT', { clientId: 'client-3' }, 'client-3')
+        await flush()
+
+        // The new session's own POST succeeds too.
+        gate.shift()?.()
+        await flush()
+
+        expect(reconnects.length).toBeLessThanOrEqual(1)
+        if (reconnects.length === 1) expect(reconnects[0]).toBe(false)
+    })
+
+    it('keeps a topic whose in-flight POST is superseded by reset and later rejects', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const gate: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>((resolve, reject) => gate.push({ resolve, reject }))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await flush()
+        const firstSource = FakeEventSource.instances.at(-1)
+        if (!firstSource) throw new Error('no EventSource opened')
+        firstSource.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        expect(sent).toHaveLength(1)
+
+        // Reset while that first POST is still in flight, then let it reject.
+        client.reset()
+        gate.shift()?.reject(new Error('stale POST failed'))
+        await flush()
+
+        const secondSource = FakeEventSource.instances.at(-1)
+        if (!secondSource) throw new Error('no second EventSource opened')
+        expect(secondSource).not.toBe(firstSource)
+        secondSource.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+
+        gate.shift()?.resolve()
+        await first
+        expect(client.topics()).toEqual(['t1'])
+    })
+
+    it('reset never throws, even if reconnecting fails synchronously', async () => {
+        FakeEventSource.instances = []
+        let failNextConnect = false
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => undefined,
+            eventSource: url => {
+                if (failNextConnect) throw new Error('no EventSource available')
+                return new FakeEventSource(url)
+            },
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+
+        failNextConnect = true
+        expect(() => client.reset()).not.toThrow()
+        expect(client.topics()).toEqual(['t1'])
+    })
 })

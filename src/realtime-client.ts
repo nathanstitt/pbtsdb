@@ -94,6 +94,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let attempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
     let everConnected = false
+    /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
+    let session = 0
 
     function topics(): string[] {
         return [...listeners.keys()]
@@ -141,31 +143,57 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         if (clientId === id) confirmed = list
     }
 
+    /**
+     * A POST outlived its session (a `reset()` or full teardown ran while it
+     * was in flight): its waiters never got the topic under the new session,
+     * so they go back to the front of the queue for the next `runSubmit`
+     * pass instead of settling now, and the POST's own outcome is moot.
+     */
+    function requeueStale(pending: Waiter[]): void {
+        waiters = [...pending, ...waiters]
+        resubmit = true
+    }
+
+    /** Nothing is wanted while disconnected: settles whatever is queued, since no POST can ever carry it. */
+    function settleWhileDisconnected(): void {
+        if (listeners.size > 0) return
+        const pending = waiters
+        waiters = []
+        close(true)
+        clientId = undefined
+        lastSeq = undefined
+        settleWaiters(pending)
+    }
+
+    async function postTopics(pending: Waiter[], startedSession: number): Promise<void> {
+        try {
+            await sendTopics()
+            if (session !== startedSession) requeueStale(pending)
+            else settleWaiters(pending)
+        } catch (error) {
+            if (session !== startedSession) {
+                requeueStale(pending)
+            } else {
+                logger.error('Failed to set realtime subscriptions', { error })
+                settleWaiters(pending, error)
+            }
+        }
+    }
+
     async function runSubmit(): Promise<void> {
         if (submitting) {
             resubmit = true
             return
         }
         if (!connected || !clientId) {
-            if (listeners.size === 0) {
-                const pending = waiters
-                waiters = []
-                close(true)
-                clientId = undefined
-                lastSeq = undefined
-                settleWaiters(pending)
-            }
+            settleWhileDisconnected()
             return
         }
         submitting = true
         const pending = waiters
         waiters = []
         try {
-            await sendTopics()
-            settleWaiters(pending)
-        } catch (error) {
-            logger.error('Failed to set realtime subscriptions', { error })
-            settleWaiters(pending, error)
+            await postTopics(pending, session)
         } finally {
             submitting = false
             if (resubmit) {
@@ -206,7 +234,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
      * caller is disconnecting outright) — not on a transient error, where a
      * resumed reconnect may still find the server holding the old list.
      * `everConnected` resets with it: a session after a full teardown is a
-     * first connect again, not a reconnect.
+     * first connect again, not a reconnect. `session` bumps too, so a POST
+     * still in flight from before this teardown cannot settle against it.
      */
     function close(forget: boolean): void {
         if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
@@ -217,6 +246,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         if (forget) {
             confirmed = []
             everConnected = false
+            session += 1
         }
     }
 
@@ -264,13 +294,15 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             const isReconnect = everConnected
             submit().then(
                 () => {
+                    if (source !== target) return
                     attempts = 0
                     if (isReconnect) deps.onReconnect?.(resumed)
                     everConnected = true
                 },
                 () => {
+                    if (source !== target) return
                     everConnected = true
-                    if (!isReconnect || source !== target) return
+                    if (!isReconnect) return
                     close(false)
                     scheduleReconnect()
                 }
@@ -353,7 +385,14 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             clientId = undefined
             lastSeq = undefined
             attempts = 0
-            if (listeners.size > 0) connect()
+            session += 1
+            if (listeners.size > 0) {
+                try {
+                    connect()
+                } catch (error) {
+                    logger.error('Failed to reconnect after reset', { error })
+                }
+            }
         },
     }
 }
