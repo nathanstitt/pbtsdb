@@ -110,8 +110,20 @@ describe('reconnect refetch lifecycle', () => {
 
         releaseFirstLoad?.()
         await waitForLoadFinish(result)
-        await new Promise(resolve => setTimeout(resolve, 300))
-        expect(getFullList).toHaveBeenCalledTimes(1)
+        const callsBeforeReadyReconnect = getFullList.mock.calls.length
+        expect(callsBeforeReadyReconnect).toBe(1)
+
+        const idBeforeReadyReconnect = realtimeClientFor(pb).clientId()
+        realtimeClientFor(pb).simulateDisconnect()
+        await waitFor(
+            () => expect(realtimeClientFor(pb).clientId()).not.toBe(idBeforeReadyReconnect),
+            { timeout: 10000 }
+        )
+        await waitForLoadFinish(result)
+        await waitFor(
+            () => expect(getFullList).toHaveBeenCalledTimes(callsBeforeReadyReconnect + 1),
+            { timeout: 10000 }
+        )
         getFullList.mockRestore()
         await books.cleanup()
     }, 20000)
