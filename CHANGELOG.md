@@ -7,6 +7,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-07
+
+### Changed
+
+- pbtsdb opens its own realtime connection instead of the PocketBase SDK's. Topic changes made in one tick go out in one request, a topic over the server's cap is rejected client-side instead of poisoning the connection, and a subscription resolves once the server has it.
+
+### Fixed
+
+- After a reconnect the server did not resume, every live query refetches. Before, events missed during the gap were silently lost.
+
+### Added
+
+- Resume protocol for servers that support it: `?resume=<clientId>&after=<seq>`, `resumed` in `PB_CONNECT`, `seq` on events.
+- Internal: `realtimeClientFor(pb)` is exported for tests that intercept realtime events.
+
 ## [0.11.0] - 2026-10-05
 
 ### Added

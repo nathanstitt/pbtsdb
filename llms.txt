@@ -278,6 +278,8 @@ const [jobs, customers] = useStore('jobs', 'customers');
 
 - Requires React 18+, TypeScript 5.0+, PocketBase 0.21.0+
 - Collections use TanStack Query for caching and TanStack DB for reactivity
-- Real-time via PocketBase Server-Sent Events (SSE)
-- Automatic reconnection with exponential backoff on subscription failures
+- Real-time via PocketBase Server-Sent Events (SSE), through pbtsdb's own client
+- Automatic reconnection with exponential backoff; a reconnect the server did
+  not resume refetches every live query, since PocketBase does not replay
+  events missed during the gap
 - Default syncMode is 'eager' (matches TanStack DB default)

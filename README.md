@@ -286,6 +286,10 @@ const { data } = useLiveQuery((q) =>
 - **Shared:** Multiple components using the same collection share one subscription
 - **No manual control needed:** The collection handles all subscription management internally
 
+### Reconnects
+
+pbtsdb runs its own realtime connection. When the connection drops, it reconnects with backoff and refetches every live query, because PocketBase does not replay events missed during the gap. A server that supports pbtsdb's resume extension (`?resume=<clientId>&after=<seq>` on the SSE URL, `resumed: true` in `PB_CONNECT`, `seq` on each event) replays the gap instead, and no refetch runs.
+
 ### Sync Modes
 
 Every collection is either **eager** (the default) or **on-demand**:

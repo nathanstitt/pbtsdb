@@ -63,6 +63,20 @@ A mark records that every row with `field === value` is in the store, so a subse
 
 `forgetRow` defers its invalidation with `queueMicrotask`. It runs inside the guarded sync write, which is inside TanStack's write batch, and `invalidateQueries` can start a `queryFn` synchronously up to its first await. That must not re-enter `fetchRecords` mid-batch.
 
+## Realtime client
+
+`src/realtime-client.ts`: `createRealtimeClient`; `src/transport.ts`: `transportFor`, `realtimeClientFor`
+
+pbtsdb opens its own SSE connection to `/api/realtime`, one per `PocketBase` instance, instead of the SDK's. The SDK's client could not do three things pbtsdb needs: carry query parameters on the connection URL (resume), drop a topic the server rejects (it re-sends it with every later request, which then fails), and tell a caller when the server has a topic.
+
+Topic changes made in one tick go out in one `POST /api/realtime` with the whole list, which is what the server expects; an unchanged list sends nothing. `subscribe` resolves after that POST, so `realtime-subscription.ts` opens every wanted entry with `Promise.all` and a load can order itself after the topic. A topic over `REALTIME_TOPIC_MAX_LENGTH` rejects before any request, with `RealtimeTopicTooLongError`. `disconnect()` run before a pending `subscribe` is confirmed rejects it with `RealtimeDisconnectedError`.
+
+The connection carries no auth; the POST does, through `pb.send`. The client id comes from `lastEventId` on `PB_CONNECT`, as in the SDK. Every event may carry a `seq`; the client keeps the last one and reconnects with `?resume=<clientId>&after=<seq>`. A server that replays the gap answers `PB_CONNECT` with the same id and `resumed: true`; the client then neither re-POSTs nor reloads, and the server-confirmed topic list survives the close. Stock PocketBase ignores the parameters, answers with a new id, and the client re-POSTs the topic list and tells each collection to refetch, because every event of the gap is lost. PocketBase closes every SSE connection after 30 minutes and after 5 idle minutes, so this happens on a schedule, not only on failures.
+
+The refetch listener in `build-collection.ts` is registered when the collection starts syncing (`loading` or `ready`) and removed when it reaches `cleaned-up`, so a long-lived `pb` does not accumulate one listener per `buildCollection` call.
+
+React Native has no `EventSource`; the client reads `globalThis.EventSource` at connect time, so a polyfill installed before the first subscription (tinycld uses `react-native-sse`) is picked up.
+
 ## Sync-session refs and holds
 
 `src/realtime-subscription.ts`: `retainQueryFilters`, `resetQueryFilters`, `swapHoldFilters`; `src/build-collection.ts`: `holdLive`
