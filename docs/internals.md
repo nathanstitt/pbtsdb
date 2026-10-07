@@ -83,7 +83,7 @@ React Native has no `EventSource`; the client reads `globalThis.EventSource` at 
 
 TanStack drops a discarded sync session's demands without calling `unloadSubset` and reloads them on the next session, so sync cleanup zeroes the query filter refs. Held-target refs live apart because a hold outlives the sync session.
 
-The realtime topic and filter caps live in `src/pocketbase-limits.ts`. A filter over the cap is recorded in `oversizedFilters` and the collection widens to `'*'`, because the SDK keeps a rejected topic and re-posts it with every later change.
+The realtime topic and filter caps live in `src/pocketbase-limits.ts`. A filter over the cap is recorded in `oversizedFilters` and the collection widens to `'*'`, because a topic over the cap is never sent: the client rejects it client-side (`RealtimeTopicTooLongError`).
 
 ## Realtime filter per chunk
 

@@ -59,9 +59,9 @@ export function createRealtimeSubscription<T extends object>(
     let unfilteredQueryRefs = 0
     const queryRefs = new RefCounter()
     const holdRefs = new RefCounter()
-    // Wanted filters whose topic is over PocketBase's cap. The SDK keeps a
-    // rejected topic and re-posts it with every later change, breaking
-    // realtime for the whole client, so these widen to '*' instead.
+    // Wanted filters whose topic is over PocketBase's cap. The realtime
+    // client rejects an oversized topic before sending it, so these widen
+    // to '*' instead.
     const oversizedFilters = new Set<string>()
 
     const isStarOpen = () => starUnsubscribe !== null
