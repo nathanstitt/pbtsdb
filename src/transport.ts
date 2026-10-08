@@ -15,13 +15,8 @@ export interface Transport {
     ) => Promise<Unsubscribe>
     /** Called after every reconnect of the shared connection. */
     onReconnect: (listener: (resumed: boolean) => void) => () => void
-    /**
-     * Called when `pb.authStore` changes to another auth record, before the
-     * realtime session resets. `reconnectFollows` is true when a reconnect,
-     * and so an `onReconnect` call, will follow: the client is enabled and
-     * has topics. Otherwise the listener must reload on its own.
-     */
-    onAuthChange: (listener: (reconnectFollows: boolean) => void) => () => void
+    /** Called when `pb.authStore` changes to another auth record, before the realtime session resets. */
+    onAuthChange: (listener: () => void) => () => void
     /** @internal Number of listeners registered through `onReconnect`; tests assert on it. */
     reconnectListenerCount: () => number
 }
@@ -29,7 +24,7 @@ export interface Transport {
 type Entry = {
     client: RealtimeClient
     reconnectListeners: Set<(resumed: boolean) => void>
-    authListeners: Set<(reconnectFollows: boolean) => void>
+    authListeners: Set<() => void>
 }
 
 const entries = new WeakMap<PocketBase, Entry>()
@@ -43,8 +38,7 @@ function watchAuth(pb: PocketBase, entry: Entry): void {
     pb.authStore.onChange((_token, record) => {
         if (record?.id === authId) return
         authId = record?.id
-        const reconnectFollows = entry.client.isEnabled() && entry.client.topics().length > 0
-        for (const listener of entry.authListeners) listener(reconnectFollows)
+        for (const listener of entry.authListeners) listener()
         entry.client.reset()
     })
 }

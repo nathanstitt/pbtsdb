@@ -295,7 +295,9 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 ### Subset Lifetime
 
-In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. An auth change releases every waiting subset at once, so a load right after a logout never reuses the previous user's rows. Set `subsetGcTime: 0` to release a subset as soon as it unloads.
+In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. An auth change releases every waiting subset and every accepted row at once and reloads every live subset under the new auth, whether or not realtime is connected, so a load right after a logout never reuses the previous user's rows and the order of `authStore.clear()` and `disconnectRealtime(pb)` does not matter. Set `subsetGcTime: 0` to release a subset as soon as it unloads; `0` also keeps accepted rows until a reload or idle instead of expiring them.
+
+A subset load that fails is retried with backoff (`loadRetryDelays`, default 1, 2, 4, 8, 15 and then every 30 seconds) until it succeeds, so a live query stays loading through an outage instead of entering an error state it cannot leave. A `collection.reload()` or a realtime reconnect retries at once. A response the server gave on purpose, a 4xx other than 408 or 429, is not retried and reports its error.
 
 ### Sync Modes
 

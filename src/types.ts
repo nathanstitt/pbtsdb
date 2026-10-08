@@ -473,12 +473,26 @@ export interface CreateCollectionOptions<
      * last live query unsubscribes. A query with an equal request that mounts
      * within the window reuses the rows with no request; realtime keeps them
      * fresh meanwhile. Rows a parent filed through a relation follow the
-     * same window. `0` releases a subset as soon as it unloads. A
-     * `reload()` releases every waiting subset.
+     * same window, and so does the accepted holder a mutation write-back or
+     * `accept()` gives a row. `0` releases a subset as soon as it unloads
+     * and keeps an accepted row until a reload or idle. A `reload()`
+     * releases every waiting subset.
      *
      * @default 5000
      */
     subsetGcTime?: number
+
+    /**
+     * Waits, in milliseconds, before each retry of a failed subset or eager
+     * load. The last delay repeats until the load succeeds, so a live query
+     * stays loading through an outage instead of entering an error state it
+     * cannot leave; a `reload()` or a realtime reconnect retries at once. A
+     * response the server gave on purpose (a 4xx other than 408 or 429) is
+     * not retried and reports its error. `[]` disables retries.
+     *
+     * @default [1000, 2000, 4000, 8000, 15000, 30000]
+     */
+    loadRetryDelays?: readonly number[]
 
     /**
      * Additional options passed directly to the underlying TanStack DB collection.

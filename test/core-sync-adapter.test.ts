@@ -182,6 +182,40 @@ describe('core sync adapter', () => {
         }
     }, 20000)
 
+    it('a live query stays loading through failed loads and shows the rows once one succeeds', async () => {
+        const seed = await pb.collection('books').create<Books>(await newBook('Fiction', 'retry'))
+        const service = pb.collection('books')
+        const realGetFullList = service.getFullList.bind(service)
+        let failures = 0
+        const getFullList = vi.spyOn(service, 'getFullList').mockImplementation(async (...args) => {
+            if (failures < 3) {
+                failures += 1
+                throw new Error('flaky network')
+            }
+            return realGetFullList(...args)
+        })
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            loadRetryDelays: [20],
+            collectionOptions: { gcTime: 60_000 },
+        })
+        const { result } = renderHook(() =>
+            useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.id, seed.id)))
+        )
+        try {
+            await waitFor(() => expect(result.current.data.map(b => b.id)).toEqual([seed.id]), {
+                timeout: 10000,
+            })
+            expect(failures).toBe(3)
+            expect(getFullList).toHaveBeenCalledTimes(4)
+            expect(result.current.isError).toBe(false)
+        } finally {
+            getFullList.mockRestore()
+            await removeBook(seed.id)
+            await books.cleanup()
+        }
+    }, 30000)
+
     it('releases a row only a topic held when that topic closes', async () => {
         const control = await pb
             .collection('books')

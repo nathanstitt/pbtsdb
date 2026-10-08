@@ -206,6 +206,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
     const refetchOnMutation = options?.refetchOnMutation ?? false
     const subsetGcTime = options?.subsetGcTime ?? 5000
+    const loadRetryDelays = options?.loadRetryDelays ?? [1000, 2000, 4000, 8000, 15000, 30000]
 
     function assertRealtimeMode(mode: RealtimeMode): void {
         if (!REALTIME_MODES.includes(mode)) {
@@ -330,6 +331,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         syncMode,
         realtimeMode,
         subsetGcTime,
+        loadRetryDelays,
         ledger,
         store,
         membership,
@@ -427,7 +429,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // they leave every holder. Acceptance is at commit, so awaiting it from
     // inside a handler cannot wait for that handler's own transaction.
     async function evict(ids: readonly string[]): Promise<void> {
-        for (const id of ids) adapter.noteDeleted(id)
+        for (const id of ids) adapter.noteDeleted(id, '*')
         await whenAccepted(membership.dropAll(ids))
     }
 
@@ -481,9 +483,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // `buildCollection` call. A restart after cleanup registers again.
     // Cleanup also clears marks a parent set before sync ever started; the
     // adapter's own cleanup runs only for a started sync.
-    // An auth change expires parked subsets at once, so a load issued right
-    // after a logout cannot adopt the previous user's rows, and reloads when
-    // no reconnect will do it.
+    // An auth change clears what the previous user left behind at once:
+    // parked subsets, accepted rows and their timers. It reloads every
+    // live demand under the new auth as well, whether or not realtime is
+    // connected, so the order of logout calls does not matter. A reconnect
+    // that follows reloads once more, coalesced with this one.
     function reloadFor(reason: string): void {
         void adapter
             .reload()
@@ -499,9 +503,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 if (resumed || !realtime.isOpen() || !collection.isReady()) return
                 reloadFor('realtime reconnect')
             })
-            const removeAuth = transport.onAuthChange(reconnectFollows => {
+            const removeAuth = transport.onAuthChange(() => {
                 adapter.expireParked()
-                if (!reconnectFollows && collection.isReady()) reloadFor('auth change')
+                for (const timer of acceptedTimers) clearTimeout(timer)
+                acceptedTimers.clear()
+                membership.drop([ACCEPTED])
+                if (store.isAttached()) reloadFor('auth change')
             })
             removeTransportListeners = () => {
                 removeReconnect()
@@ -582,7 +589,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         const id = idOf(event.record)
         if (!id) return
         if (event.action === 'delete') {
-            adapter.noteDeleted(id)
+            adapter.noteDeleted(id, topic)
             const applied =
                 topic === '*'
                     ? membership.dropAll([id])

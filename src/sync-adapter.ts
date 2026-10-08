@@ -25,6 +25,8 @@ export interface SyncAdapterDeps<T extends object> {
     realtimeMode: RealtimeMode
     /** How long an unloaded subset stays held for an equal load to adopt; 0 releases at once. */
     subsetGcTime: number
+    /** Waits before each retry of a failed load; the length is the number of retries. */
+    loadRetryDelays: readonly number[]
     ledger: Ledger<T>
     store: SyncedStore<T>
     membership: Membership<T>
@@ -50,8 +52,12 @@ export interface SyncAdapter<T extends object> {
     reload: () => Promise<void>
     /** The subset holders whose base realtime filter is `filter`. */
     subsetsFor: (filter: string) => LoadSubsetOptions[]
-    /** The server deleted `id`; a fetch in flight must not put it back. */
-    noteDeleted: (id: string) => void
+    /**
+     * The server deleted `id`, as seen on `topic`: `'*'` for a real delete,
+     * a filter string for a row that left that filter. A fetch in flight for
+     * a demand the topic covers must not put the row back.
+     */
+    noteDeleted: (id: string, topic: string) => void
     /** Whether `id` was deleted while a fetch still in flight was running. */
     isDeleted: (id: string) => boolean
     /** Release every parked subset now, for example because the auth changed. */
@@ -81,6 +87,8 @@ type Demand = {
     parked: ReturnType<typeof setTimeout> | undefined
     /** Rows for this demand reached the store at least once; only such a demand may park. */
     landed: boolean
+    /** Ends a retry wait early: a newer load, an unload or a cleanup supersedes it. */
+    wake: (() => void) | undefined
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -89,20 +97,29 @@ type Run = {
     demands: Map<LoadSubsetOptions, Demand>
     eagerSeq: number
     eagerLoad: Promise<string[]> | undefined
+    eagerWake: (() => void) | undefined
 }
 
 export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): SyncAdapter<T> {
     const { collectionName, syncMode, ledger, store, membership, fetcher, subsets, realtime } = deps
-    const { subsetGcTime } = deps
+    const { subsetGcTime, loadRetryDelays } = deps
     let current: Run | undefined
-    // One set per fetch in flight: ids the server deleted meanwhile, which
-    // the result may still list.
-    const tombstones = new Set<Set<string>>()
+    // One entry per fetch in flight: ids the server deleted meanwhile, which
+    // the result may still list, and the realtime filters the demand holds
+    // (undefined: covered by `'*'` only).
+    const tombstones = new Map<Set<string>, readonly string[] | undefined>()
 
     function demandFor(opts: LoadSubsetOptions): Demand {
         const request = toRequest(deps.registry().withViewExpand(opts))
         const mode = deps.registry().tagFor(opts)?.realtime ?? deps.realtimeMode
-        const base = { request, seq: 0, loading: undefined, parked: undefined, landed: false }
+        const base = {
+            request,
+            seq: 0,
+            loading: undefined,
+            parked: undefined,
+            landed: false,
+            wake: undefined,
+        }
         if (mode !== 'query') return { ...base, filters: undefined, counted: false }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
         return { ...base, filters, counted: true }
@@ -128,10 +145,11 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         run: Run,
         request: PbRequest,
         signal: AbortSignal | undefined,
-        refetch: boolean
+        refetch: boolean,
+        filters: readonly string[] | undefined
     ): Promise<FetchResult<T>> {
         const deleted = new Set<string>()
-        tombstones.add(deleted)
+        tombstones.set(deleted, filters)
         try {
             const { rows, fromStore, filings } = await fetcher.fetchRecords(request, {
                 signals: signal ? [run.abort.signal, signal] : [run.abort.signal],
@@ -238,8 +256,79 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return ids
     }
 
-    // A superseded load resolves with the newer one, so the caller never
-    // resolves before the rows it asked for.
+    // A transient failure must not error the live query: one flaky request
+    // would otherwise leave a list empty until a remount. Retries stop when
+    // the demand is gone, superseded or aborted.
+    function superseded(run: Run, opts: LoadSubsetOptions, demand: Demand, seq: number): boolean {
+        return isStopped(run, opts) || run.demands.get(opts) !== demand || demand.seq !== seq
+    }
+
+    // A response the server gave on purpose is not retried: the request is
+    // wrong or forbidden and would fail again. Everything else (no response,
+    // a server error, a timeout, a rate limit) may pass next time.
+    function isRetryable(error: unknown): boolean {
+        const status = (error as { status?: unknown } | null)?.status
+        if (typeof status !== 'number' || status < 400 || status >= 500) return true
+        return status === 408 || status === 429
+    }
+
+    /** The wait before retry number `attempt`; the last delay repeats. Undefined with no delays. */
+    function retryDelay(attempt: number): number | undefined {
+        return loadRetryDelays[Math.min(attempt, loadRetryDelays.length - 1)]
+    }
+
+    /** Sleeps `ms` unless woken through `onWake` first. */
+    function sleep(ms: number, onWake: (wake: () => void) => void): Promise<void> {
+        return new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, ms)
+            onWake(() => {
+                clearTimeout(timer)
+                resolve()
+            })
+        })
+    }
+
+    /**
+     * Waits out the next retry delay. False when the load is no longer
+     * wanted; throws the error when retries are off or it is not retryable.
+     * A demand keeps retrying until it loads, so a live query never enters
+     * the error state it cannot leave; a reload or reconnect wakes the wait.
+     */
+    async function retryAllowed(
+        run: Run,
+        opts: LoadSubsetOptions,
+        demand: Demand,
+        seq: number,
+        attempt: number,
+        error: unknown
+    ): Promise<boolean> {
+        if (superseded(run, opts, demand, seq)) return false
+        const delay = retryDelay(attempt)
+        if (delay === undefined || !isRetryable(error)) throw error
+        logger.warn('Subset load failed; retrying', { collectionName, attempt, error })
+        await sleep(delay, wake => {
+            demand.wake = wake
+        })
+        demand.wake = undefined
+        return !superseded(run, opts, demand, seq)
+    }
+
+    async function fetchWithRetry(
+        run: Run,
+        opts: LoadSubsetOptions,
+        demand: Demand,
+        seq: number,
+        refetch: boolean
+    ): Promise<FetchResult<T> | undefined> {
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await fetchRows(run, demand.request, opts.signal, refetch, demand.filters)
+            } catch (error) {
+                if (!(await retryAllowed(run, opts, demand, seq, attempt, error))) return undefined
+            }
+        }
+    }
+
     function load(
         run: Run,
         opts: LoadSubsetOptions,
@@ -247,28 +336,21 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         wait: Wait,
         refetch: boolean
     ): Promise<string[]> {
+        demand.wake?.()
         const seq = ++demand.seq
         const before = uncoveredRows(demand)
         const loading = (async (): Promise<string[]> => {
-            const result = await fetchRows(run, demand.request, opts.signal, refetch).catch(
-                error => {
-                    if (stopped(run, opts, wait)) return undefined
-                    throw error
-                }
-            )
-            if (result === undefined) return []
+            const result = await fetchWithRetry(run, opts, demand, seq, refetch)
+            if (result !== undefined && !superseded(run, opts, demand, seq)) {
+                return install(run, opts, wait, before, result)
+            }
             // Undo before `stopped` can throw, so an aborted result leaves
-            // the filings as they were.
-            if (isStopped(run, opts) || run.demands.get(opts) !== demand) {
-                result.filings.undo()
-                stopped(run, opts, wait)
-                return []
-            }
-            if (demand.seq !== seq) {
-                result.filings.undo()
-                return demand.loading ?? []
-            }
-            return install(run, opts, wait, before, result)
+            // the filings as they were. A superseded load resolves with the
+            // newer one, so the caller never resolves before its rows.
+            result?.filings.undo()
+            if (demand.seq !== seq) return demand.loading ?? []
+            stopped(run, opts, wait)
+            return []
         })()
         demand.loading = loading
         return loading
@@ -278,6 +360,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         const demand = run.demands.get(opts)
         if (!demand) return
         if (demand.parked !== undefined) clearTimeout(demand.parked)
+        demand.wake?.()
         run.demands.delete(opts)
         if (demand.counted) realtime.releaseQueryFilters(demand.filters)
         membership.drop([opts])
@@ -355,6 +438,32 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return opts.refetch === true ? false : adopted
     }
 
+    // Rows adopted while a reload is running predate it; fetch them again
+    // so the adopter is as fresh as the rest.
+    function refetchAdopted(run: Run, opts: LoadSubsetOptions, demand: Demand): void {
+        void load(run, opts, demand, 'accepted', true).catch(error =>
+            logger.error('Refetch after adopting a parked subset failed', { collectionName, error })
+        )
+    }
+
+    function startHeld(
+        run: Run,
+        opts: LoadSubsetOptions,
+        demand: Demand,
+        parkedOpts: LoadSubsetOptions | undefined
+    ): Applied {
+        try {
+            const applied = startFromHeld(opts, demand, parkedOpts)
+            if (applied !== false && parkedOpts !== undefined && reloading) {
+                refetchAdopted(run, opts, demand)
+            }
+            return applied
+        } catch (error) {
+            expire(run, opts)
+            throw error
+        }
+    }
+
     function loadSubsetIn(run: Run) {
         return (opts: LoadSubsetOptions): true | Promise<void> => {
             // Core passes a fresh options object per acquisition; a direct
@@ -366,29 +475,40 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             if (parkedOpts === undefined && demand.counted) {
                 realtime.retainQueryFilters(demand.filters)
             }
-            try {
-                const applied = startFromHeld(opts, demand, parkedOpts)
-                if (applied !== false) return applied
-            } catch (error) {
-                expire(run, opts)
-                throw error
-            }
-            return load(run, opts, demand, 'visible', opts.refetch === true).then(
-                () => undefined,
-                error => {
-                    if (run.demands.get(opts) === demand) expire(run, opts)
-                    throw error
-                }
-            )
+            const applied = startHeld(run, opts, demand, parkedOpts)
+            if (applied !== false) return applied
+            // A load that fails after its retries keeps its demand: core
+            // reports the error, and the next reload() or reconnect loads
+            // the demand again. An unload releases it as usual.
+            return load(run, opts, demand, 'visible', opts.refetch === true).then(() => undefined)
         }
     }
 
     // A superseded eager load waits for the newer one, so readiness never
     // fires before the rows a later load brings.
+    async function fetchEagerWithRetry(run: Run, seq: number): Promise<FetchResult<T>> {
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await fetchRows(run, {}, undefined, false, undefined)
+            } catch (error) {
+                const delay = retryDelay(attempt)
+                const stale = () => run.abort.signal.aborted || run.eagerSeq !== seq
+                if (delay === undefined || !isRetryable(error) || stale()) throw error
+                logger.warn('Eager load failed; retrying', { collectionName, attempt, error })
+                await sleep(delay, wake => {
+                    run.eagerWake = wake
+                })
+                run.eagerWake = undefined
+                if (stale()) throw error
+            }
+        }
+    }
+
     function loadEagerRows(run: Run): Promise<string[]> {
+        run.eagerWake?.()
         const seq = ++run.eagerSeq
         const loading = (async (): Promise<string[]> => {
-            const { rows, filings } = await fetchRows(run, {}, undefined, false)
+            const { rows, filings } = await fetchEagerWithRetry(run, seq)
             if (run.abort.signal.aborted || run.eagerSeq !== seq) {
                 filings.undo()
                 return run.eagerSeq !== seq ? (run.eagerLoad ?? []) : []
@@ -502,6 +622,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 demands: new Map(),
                 eagerSeq: 0,
                 eagerLoad: undefined,
+                eagerWake: undefined,
             }
             current = run
             store.attach(channel)
@@ -510,8 +631,10 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             // checks it before it writes.
             const cleanup = () => {
                 run.abort.abort()
+                run.eagerWake?.()
                 for (const demand of run.demands.values()) {
                     if (demand.parked !== undefined) clearTimeout(demand.parked)
+                    demand.wake?.()
                 }
                 run.demands.clear()
                 if (current === run) current = undefined
@@ -537,10 +660,12 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             [...(current?.demands ?? [])]
                 .filter(([, demand]) => demand.filters?.includes(filter))
                 .map(([opts]) => opts),
-        noteDeleted: id => {
-            for (const deleted of tombstones) deleted.add(id)
+        noteDeleted: (id, topic) => {
+            for (const [deleted, filters] of tombstones) {
+                if (topic === '*' || filters?.includes(topic)) deleted.add(id)
+            }
         },
-        isDeleted: id => [...tombstones].some(deleted => deleted.has(id)),
+        isDeleted: id => [...tombstones.keys()].some(deleted => deleted.has(id)),
         expireParked: () => {
             if (current) expireParked(current)
         },

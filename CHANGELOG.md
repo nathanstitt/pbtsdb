@@ -58,6 +58,13 @@ All notable changes to this project will be documented in this file.
   parent fetch or echo no longer expands it (lost access, changed relation), or when a
   delete arrives on the hold's realtime topic. Hold filters follow the current filings,
   so they no longer grow for the life of the parent.
+- A subset or eager load that fails is retried with backoff (`loadRetryDelays`, default
+  1, 2, 4, 8, 15 and then every 30 seconds) until it succeeds, so a live query stays
+  loading through an outage instead of entering an error state it cannot leave. A
+  `reload()` or realtime reconnect retries at once. A 4xx other than 408 or 429 is not
+  retried. react-query retried three times and then errored.
+- An auth record change drops accepted rows, releases waiting subsets and reloads every
+  live subset at once, whether or not realtime is connected.
 - A realtime echo that changes a relation files the new related row before it lands
   the parent, and releases the old one after, the same order a fetch uses. A join
   never sees the parent without its relation, so a joined row is not unmounted and

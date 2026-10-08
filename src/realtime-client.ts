@@ -166,6 +166,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
      * pass instead of settling now, and the POST's own outcome is moot.
      */
     function requeueStale(pending: Waiter[]): void {
+        if (disabled) {
+            settleWaiters(pending)
+            return
+        }
         waiters = [...pending, ...waiters]
         resubmit = true
     }
@@ -419,9 +423,15 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             if (source) handleConnectionLost(source)
         },
         reset: forgetSession,
+        // Pending subscribes settle: their topics are registered and go out
+        // with the first POST after enable(), the same as a subscribe made
+        // while disabled.
         disable() {
             disabled = true
             forgetSession()
+            const pending = waiters
+            waiters = []
+            settleWaiters(pending)
         },
         enable() {
             if (!disabled) return

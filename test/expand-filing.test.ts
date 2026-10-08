@@ -168,6 +168,35 @@ describe('expand filer', () => {
         expect(undone).toEqual(['author'])
     })
 
+    it('a filing that throws part-way undoes what it filed and rethrows', async () => {
+        const authors = target()
+        const tags = target()
+        tags.writeFiled.mockImplementation(async () => {
+            throw new Error('target down')
+        })
+        const undone: string[] = []
+        const setFiled = vi.fn((_parent: string, _target: RelationTarget, key: string) => ({
+            commit: () => undefined,
+            undo: () => {
+                undone.push(key)
+            },
+        }))
+        const filer = createExpandFiler({
+            collectionName: 'books',
+            setFiled,
+            holder,
+            isStale: () => false,
+        })
+        await expect(
+            filer.fileExpanded(
+                [{ id: 'b1', expand: { author: { id: 'a1' }, tags: [{ id: 't1' }] } }],
+                { author: authors, tags },
+                ['author', 'tags']
+            )
+        ).rejects.toThrow('target down')
+        expect(undone).toEqual(['author'])
+    })
+
     it('canFileFirst is true only with rows to file and every target to write ready', () => {
         const ready = target()
         const cold = target(false)

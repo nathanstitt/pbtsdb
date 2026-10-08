@@ -325,11 +325,18 @@ export function createExpandFiler(deps: ExpandFilerDeps): ExpandFiler {
         requestedPaths: readonly string[]
     ): Promise<FilingChange> {
         const releases: Releases = []
-        await fileLevel(
-            records.filter(record => !deps.isStale(record)),
-            targets,
-            { requestedPaths, releases, rootsOf: id => [id], prefix: '' }
-        )
+        try {
+            await fileLevel(
+                records.filter(record => !deps.isStale(record)),
+                targets,
+                { requestedPaths, releases, rootsOf: id => [id], prefix: '' }
+            )
+        } catch (error) {
+            // A partial filing must not outlive the error: what landed is
+            // undone, so nothing is held by a filing nobody will commit.
+            for (const change of [...releases].reverse()) change.undo()
+            throw error
+        }
         return {
             commit: () => {
                 for (const change of releases) change.commit()

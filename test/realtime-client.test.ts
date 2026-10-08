@@ -784,6 +784,30 @@ describe('realtime client', () => {
         expect(sent.at(-1)).toEqual({ clientId: 'client-1', subscriptions: ['t2'] })
     })
 
+    it('a subscribe whose POST is in flight when disable() runs settles when that POST returns', async () => {
+        FakeEventSource.instances = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => {
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const pending = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        client.disable()
+        gate.shift()?.()
+        await pending
+        expect(client.topics()).toEqual(['t1'])
+        expect(client.isConnected()).toBe(false)
+    })
+
     it('reset with no topics registered opens no connection', async () => {
         const client = createRealtimeClient({
             url: 'http://pb.test/api/realtime',

@@ -43,6 +43,7 @@ function deferred() {
 type SetupExtra = {
     realtimeMode?: 'collection' | 'query'
     withViewExpand?: (opts: LoadSubsetOptions) => LoadSubsetOptions
+    loadRetryDelays?: readonly number[]
 }
 
 function setup(
@@ -110,6 +111,7 @@ function setup(
         syncMode,
         realtimeMode: extra.realtimeMode ?? 'query',
         subsetGcTime,
+        loadRetryDelays: extra.loadRetryDelays ?? [],
         ledger,
         store,
         membership,
@@ -152,6 +154,10 @@ function setup(
 }
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+const until = async (ready: () => boolean) => {
+    for (let i = 0; i < 50 && !ready(); i++) await flush()
+    expect(ready()).toBe(true)
+}
 
 describe('sync adapter', () => {
     it('a stale first load that finishes after a reload installs nothing', async () => {
@@ -208,7 +214,7 @@ describe('sync adapter', () => {
         const t = setup()
         const opts: LoadSubsetOptions = {}
         const load = t.loadSubset(opts)
-        t.adapter.noteDeleted('a')
+        t.adapter.noteDeleted('a', '*')
         t.calls[0].resolve([row('a'), row('b')])
         await load
         expect(t.ledger.has('a')).toBe(false)
@@ -615,10 +621,122 @@ describe('sync adapter', () => {
         expect(t.calls[2].filings.undo).toHaveBeenCalledTimes(1)
     })
 
+    describe('a failed load', () => {
+        it('retries after each delay and then installs', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0, 0] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(new Error('down'))
+            await until(() => t.calls.length === 2)
+            t.calls[1].resolve([row('a', 'x')])
+            await load
+            expect(t.ledger.idsOf(opts)).toEqual(['a'])
+        })
+
+        it('keeps retrying at the last delay, and a reload() wakes the wait and loads it', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0, 100000] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(new Error('down'))
+            await until(() => t.calls.length === 2)
+            t.calls[1].reject(new Error('still down'))
+            await flush()
+            expect(t.calls).toHaveLength(2)
+
+            const reload = t.adapter.reload()
+            expect(t.calls).toHaveLength(3)
+            t.calls[2].resolve([row('a', 'x')])
+            await Promise.all([load, reload])
+            expect(t.ledger.idsOf(opts)).toEqual(['a'])
+            expect(t.realtime.releaseQueryFilters).not.toHaveBeenCalled()
+        })
+
+        it('does not retry a response the server gave on purpose', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0] })
+            const forbidden = Object.assign(new Error('forbidden'), { status: 403 })
+            const load = t.loadSubset(named('x'))
+            t.calls[0].reject(forbidden)
+            await expect(load).rejects.toBe(forbidden)
+            expect(t.calls).toHaveLength(1)
+        })
+
+        it('retries a server error and a rate limit', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(Object.assign(new Error('busy'), { status: 503 }))
+            await until(() => t.calls.length === 2)
+            t.calls[1].reject(Object.assign(new Error('slow down'), { status: 429 }))
+            await until(() => t.calls.length === 3)
+            t.calls[2].resolve([row('a', 'x')])
+            await load
+            expect(t.ledger.idsOf(opts)).toEqual(['a'])
+        })
+
+        it('stops retrying when the demand is unloaded meanwhile', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0, 0] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(new Error('down'))
+            t.unloadSubset(opts)
+            await load
+            expect(t.calls).toHaveLength(1)
+        })
+
+        it('an eager first load retries before it marks the error', async () => {
+            const t = setup('eager', 0, { loadRetryDelays: [0] })
+            t.calls[0].reject(new Error('down'))
+            await until(() => t.calls.length === 2)
+            expect(t.markError).not.toHaveBeenCalled()
+            t.calls[1].resolve([row('a')])
+            await flush()
+            expect(t.markReady).toHaveBeenCalledTimes(1)
+            expect(t.ledger.has('a')).toBe(true)
+        })
+    })
+
+    it('a delete on a filter topic tombstones only fetches whose demand holds that filter', async () => {
+        const t = setup()
+        const x = named('x')
+        const y = named('y')
+        const xFilter = realtimeFiltersFor(toRequest(x))?.[0]
+        if (!xFilter) throw new Error('no filter for x')
+        const loadX = t.loadSubset(x)
+        const loadY = t.loadSubset(y)
+        t.adapter.noteDeleted('a', xFilter)
+        t.calls[0].resolve([row('a', 'x')])
+        t.calls[1].resolve([row('a', 'y')])
+        await Promise.all([loadX, loadY])
+        expect(t.ledger.idsOf(x)).toEqual([])
+        expect(t.ledger.idsOf(y)).toEqual(['a'])
+    })
+
+    it('a parked subset adopted during a reload is fetched again', async () => {
+        const t = setup('on-demand', 1000)
+        const opts = named('x')
+        const load = t.loadSubset(opts)
+        t.calls[0].resolve([row('a', 'x')])
+        await load
+        const reload = t.adapter.reload()
+        expect(t.calls).toHaveLength(2)
+        t.unloadSubset(opts)
+        const again = named('x')
+        expect(t.loadSubset(again)).toBe(true)
+        expect(t.ledger.idsOf(again)).toEqual(['a'])
+        expect(t.calls).toHaveLength(3)
+        t.calls[1].resolve([row('a', 'x')])
+        t.calls[2].resolve([row('b', 'x')])
+        await reload
+        await until(() => t.ledger.idsOf(again).join() === 'b')
+        expect(t.calls[1].filings.undo).toHaveBeenCalledTimes(1)
+        t.unloadSubset(again)
+        t.adapter.expireParked()
+    })
+
     it('isDeleted reports an id deleted while a fetch is in flight, and forgets it after', async () => {
         const t = setup()
         const load = t.loadSubset({})
-        t.adapter.noteDeleted('a')
+        t.adapter.noteDeleted('a', '*')
         expect(t.adapter.isDeleted('a')).toBe(true)
         t.calls[0].resolve([row('a'), row('b')])
         await load

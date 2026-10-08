@@ -199,6 +199,29 @@ describe('reconnect refetch lifecycle', () => {
         }
     }, 30000)
 
+    it('an auth change followed at once by disconnectRealtime still reloads under the new auth', async () => {
+        const books = createBooksCollection()
+        const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
+        await waitForLoadFinish(result)
+        await books.waitForSubscription()
+        const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
+        getFullList.mockClear()
+        try {
+            const record = pb.authStore.record
+            if (!record) throw new Error('not authenticated')
+            pb.authStore.save(pb.authStore.token, { ...record, id: 'other0000000001' })
+            disconnectRealtime(pb)
+            await waitFor(() => expect(getFullList).toHaveBeenCalledTimes(1), { timeout: 10000 })
+            await new Promise(resolve => setTimeout(resolve, 300))
+            expect(realtimeClientFor(pb).isConnected()).toBe(false)
+        } finally {
+            resetRealtime(pb)
+            await authenticateTestUser()
+            await books.cleanup()
+            getFullList.mockRestore()
+        }
+    }, 30000)
+
     it('disconnectRealtime keeps the connection closed until resetRealtime, which reloads', async () => {
         const books = createBooksCollection()
         const { result } = renderHook(() => useLiveQuery(q => q.from({ books })))
