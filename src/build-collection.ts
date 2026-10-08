@@ -344,7 +344,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             for (const timer of acceptedTimers) clearTimeout(timer)
             acceptedTimers.clear()
         },
+        onLoadStatusChange: () => loadStatusChanged(),
     })
+    const loadStatusChanged = transport.addLoadSource(adapter.loadStatus)
 
     // `false` disables the mutation; `undefined` selects the built-in handler.
     function resolveHandler<H>(option: H | false | undefined, fallback: H): H | undefined {

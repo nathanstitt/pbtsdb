@@ -32,7 +32,13 @@ export {
 } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
-export { disconnectRealtime, resetRealtime } from './transport'
+export type { LoadStatus, RealtimeStatus, SyncStatus, SyncStatusListener } from './sync-status'
+export {
+    disconnectRealtime,
+    getSyncStatus,
+    resetRealtime,
+    subscribeSyncStatus,
+} from './transport'
 export type {
     CreateCollectionOptions,
     ExcludeUndefined,

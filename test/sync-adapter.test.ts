@@ -106,6 +106,7 @@ function setup(
         resetQueryFilters: vi.fn(),
     }
     const onCleanup = vi.fn()
+    const onLoadStatusChange = vi.fn()
     const adapter = createSyncAdapter<Row>({
         collectionName: 'rows',
         syncMode,
@@ -123,6 +124,7 @@ function setup(
             withViewExpand: extra.withViewExpand ?? (opts => opts),
         }),
         onCleanup,
+        onLoadStatusChange,
     })
     const result = adapter.sync(params as unknown as SyncParams)
     const res = result && typeof result === 'object' ? result : {}
@@ -141,6 +143,7 @@ function setup(
         realtime,
         markReady,
         markError,
+        onLoadStatusChange,
         loadSubset,
         unloadSubset,
         cleanup,
@@ -674,6 +677,118 @@ describe('sync adapter', () => {
             t.calls[1].resolve([row('a', 'x')])
             await Promise.all([load, reload])
             expect(t.ledger.idsOf(opts)).toEqual(['a'])
+        })
+
+        it('counts a demand sleeping in retry, and not once it loads', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [100000] })
+            const opts = named('x')
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+            const load = t.loadSubset(opts)
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+            const before = Date.now()
+            t.calls[0].reject(new Error('down'))
+            await flush()
+            const status = t.adapter.loadStatus()
+            expect(status.retrying).toBe(1)
+            expect(status.failed).toBe(0)
+            expect(status.failingSince).toBeGreaterThanOrEqual(before)
+            expect(t.onLoadStatusChange).toHaveBeenCalled()
+
+            const reload = t.adapter.reload()
+            await until(() => t.calls.length === 2)
+            t.calls[1].resolve([row('a', 'x')])
+            await Promise.all([load, reload])
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+        })
+
+        it('keeps failingSince across retries and reports the oldest of several', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0, 100000] })
+            const first = t.loadSubset(named('x'))
+            t.calls[0].reject(new Error('down'))
+            await flush()
+            const since = t.adapter.loadStatus().failingSince
+            expect(since).toBeDefined()
+            await until(() => t.calls.length === 2)
+            t.calls[1].reject(new Error('still down'))
+            await flush()
+            expect(t.adapter.loadStatus().failingSince).toBe(since)
+
+            const second = t.loadSubset(named('y'))
+            await until(() => t.calls.length === 3)
+            t.calls[2].reject(new Error('down'))
+            await flush()
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 2, failed: 0, failingSince: since })
+            t.cleanup()
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+            await expect(first).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+            await expect(second).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        })
+
+        it('does not count a demand once it is unloaded or parked', async () => {
+            const t = setup('on-demand', 100000, { loadRetryDelays: [100000] })
+            const fresh = named('x')
+            const load = t.loadSubset(fresh)
+            t.calls[0].reject(new Error('down'))
+            await flush()
+            expect(t.adapter.loadStatus().retrying).toBe(1)
+            t.unloadSubset(fresh)
+            await load
+            expect(t.adapter.loadStatus().retrying).toBe(0)
+
+            const landed = named('y')
+            await (async () => {
+                const load = t.loadSubset(landed)
+                t.calls[1].resolve([row('a', 'y')])
+                await load
+            })()
+            void t.adapter.reload().catch(() => undefined)
+            t.calls[2].reject(new Error('down'))
+            await flush()
+            expect(t.adapter.loadStatus().retrying).toBe(1)
+            t.unloadSubset(landed)
+            expect(t.adapter.loadStatus().retrying).toBe(0)
+            t.cleanup()
+        })
+
+        it('counts a load the server refused as failed until its demand reloads or leaves', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(Object.assign(new Error('forbidden'), { status: 403 }))
+            await expect(load).rejects.toMatchObject({ status: 403 })
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 1 })
+
+            const reload = t.adapter.reload()
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+            t.calls[1].resolve([row('a', 'x')])
+            await reload
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+
+            const again = t.adapter.reload()
+            t.calls[2].reject(Object.assign(new Error('gone'), { status: 404 }))
+            await expect(again).rejects.toMatchObject({ status: 404 })
+            expect(t.adapter.loadStatus().failed).toBe(1)
+            t.unloadSubset(opts)
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+        })
+
+        it('counts the eager load while it retries and when it fails for good', async () => {
+            const t = setup('eager', 0, { loadRetryDelays: [100000] })
+            t.calls[0].reject(new Error('down'))
+            await flush()
+            expect(t.adapter.loadStatus().retrying).toBe(1)
+            const reload = t.adapter.reload()
+            await until(() => t.calls.length === 2)
+            t.calls[1].resolve([row('a')])
+            await reload
+            expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
+
+            const u = setup('eager', 0, { loadRetryDelays: [0] })
+            u.calls[0].reject(Object.assign(new Error('forbidden'), { status: 403 }))
+            await until(() => u.markError.mock.calls.length === 1)
+            expect(u.adapter.loadStatus()).toEqual({ retrying: 0, failed: 1 })
+            u.cleanup()
+            expect(u.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
         })
 
         it('a reload() queued behind another wakes a waiting retry at once', async () => {

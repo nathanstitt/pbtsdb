@@ -9,7 +9,4 @@
 
 export * from './core'
 
-export {
-    createReactProvider,
-    type ReactProviderResult,
-} from './react.js'
+export { createReactProvider, type ReactProviderResult, useSyncStatus } from './react.js'

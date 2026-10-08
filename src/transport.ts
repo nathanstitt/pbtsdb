@@ -2,6 +2,13 @@ import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { realtimeTopic } from './pocketbase-limits'
 import { createRealtimeClient, type RealtimeClient } from './realtime-client'
+import {
+    createSyncStatusStore,
+    type LoadStatus,
+    type SyncStatus,
+    type SyncStatusListener,
+    type SyncStatusStore,
+} from './sync-status'
 
 export type Unsubscribe = () => Promise<void>
 
@@ -19,12 +26,19 @@ export interface Transport {
     onAuthChange: (listener: () => void) => () => void
     /** @internal Number of listeners registered through `onReconnect`; tests assert on it. */
     reconnectListenerCount: () => number
+    /**
+     * Counts `source` into the client's `SyncStatus.loads`. Returns the
+     * function to call after anything `source` reports may have changed.
+     */
+    addLoadSource: (source: () => LoadStatus) => () => void
 }
 
 type Entry = {
     client: RealtimeClient
     reconnectListeners: Set<(resumed: boolean) => void>
     authListeners: Set<() => void>
+    status: SyncStatusStore
+    loadSources: Set<() => LoadStatus>
 }
 
 const entries = new WeakMap<PocketBase, Entry>()
@@ -47,6 +61,8 @@ function entryFor(pb: PocketBase): Entry {
     let entry = entries.get(pb)
     if (!entry) {
         const reconnectListeners = new Set<(resumed: boolean) => void>()
+        const loadSources = new Set<() => LoadStatus>()
+        let status: SyncStatusStore | undefined
         const client = createRealtimeClient({
             get url() {
                 return pb.buildURL('/api/realtime')
@@ -55,8 +71,13 @@ function entryFor(pb: PocketBase): Entry {
             onReconnect: resumed => {
                 for (const listener of reconnectListeners) listener(resumed)
             },
+            onStatusChange: () => status?.refresh(),
         })
-        entry = { client, reconnectListeners, authListeners: new Set() }
+        status = createSyncStatusStore({
+            realtime: client.status,
+            loads: () => [...loadSources].map(source => source()),
+        })
+        entry = { client, reconnectListeners, authListeners: new Set(), status, loadSources }
         watchAuth(pb, entry)
         entries.set(pb, entry)
     }
@@ -94,6 +115,24 @@ export function disconnectRealtime(pb: PocketBase): void {
     entryFor(pb).client.disable()
 }
 
+/**
+ * The sync state of `pb`'s collections: whether pbtsdb's realtime stream
+ * is up, and how many live loads are stuck in retry or ended in an error
+ * the server meant. The snapshot is stable until a value changes, so it
+ * suits `useSyncExternalStore`; see {@link subscribeSyncStatus}.
+ */
+export function getSyncStatus(pb: PocketBase): SyncStatus {
+    return entryFor(pb).status.get()
+}
+
+/**
+ * Calls `listener` with each new {@link getSyncStatus} snapshot. Returns
+ * the unsubscribe function.
+ */
+export function subscribeSyncStatus(pb: PocketBase, listener: SyncStatusListener): () => void {
+    return entryFor(pb).status.subscribe(listener)
+}
+
 export function transportFor(pb: PocketBase): Transport {
     const entry = entryFor(pb)
     return {
@@ -118,5 +157,9 @@ export function transportFor(pb: PocketBase): Transport {
             }
         },
         reconnectListenerCount: () => entry.reconnectListeners.size,
+        addLoadSource(source) {
+            entry.loadSources.add(source)
+            return entry.status.refresh
+        },
     }
 }

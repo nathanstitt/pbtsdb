@@ -15,6 +15,7 @@ import type { RealtimeSubscription } from './realtime-subscription'
 import { realtimeWhereFor } from './realtime-where'
 import { idOf, idsOf } from './records'
 import { type PbRequest, realtimeFiltersFor, toRequest } from './request'
+import type { LoadStatus } from './sync-status'
 import type { SyncChannel, SyncedStore } from './synced-store'
 import type { RealtimeMode } from './types'
 import type { ViewRegistry } from './views'
@@ -39,6 +40,8 @@ export interface SyncAdapterDeps<T extends object> {
     /** The view registry, created after the collection; read lazily. */
     registry: () => Pick<ViewRegistry<never, object>, 'tagFor' | 'withViewExpand'>
     onCleanup: () => void
+    /** After anything `loadStatus()` reports may have changed. */
+    onLoadStatusChange: () => void
 }
 
 export interface SyncAdapter<T extends object> {
@@ -71,6 +74,8 @@ export interface SyncAdapter<T extends object> {
      * server lacks can enter through here.
      */
     holdersFor: (row: T) => Holder[]
+    /** Live demands sleeping in retry or ended in an error that is not retried. */
+    loadStatus: () => LoadStatus
 }
 
 /** `visible` for a load core awaits; `accepted` for a path a mutation handler can reach. */
@@ -91,6 +96,10 @@ type Demand = {
     landed: boolean
     /** Ends a retry wait early: a newer load, an unload or a cleanup supersedes it. */
     wake: (() => void) | undefined
+    /** When the load now sleeping in retry first failed. */
+    retryingSince: number | undefined
+    /** The newest load ended in an error that is not retried. */
+    failed: boolean
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -100,6 +109,8 @@ type Run = {
     eagerSeq: number
     eagerLoad: Promise<string[]> | undefined
     eagerWake: (() => void) | undefined
+    eagerRetryingSince: number | undefined
+    eagerFailed: boolean
 }
 
 export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): SyncAdapter<T> {
@@ -121,6 +132,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             parked: undefined,
             landed: false,
             wake: undefined,
+            retryingSince: undefined,
+            failed: false,
         }
         if (mode !== 'query') return { ...base, filters: undefined, counted: false }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
@@ -308,6 +321,27 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         for (const demand of run.demands.values()) demand.wake?.()
     }
 
+    const { onLoadStatusChange } = deps
+
+    function loadStatus(): LoadStatus {
+        const status: LoadStatus = { retrying: 0, failed: 0 }
+        const run = current
+        if (!run) return status
+        const count = (retryingSince: number | undefined, failed: boolean) => {
+            if (failed) status.failed += 1
+            if (retryingSince === undefined) return
+            status.retrying += 1
+            if (status.failingSince === undefined || retryingSince < status.failingSince) {
+                status.failingSince = retryingSince
+            }
+        }
+        for (const demand of run.demands.values()) {
+            if (demand.parked === undefined) count(demand.retryingSince, demand.failed)
+        }
+        count(run.eagerRetryingSince, run.eagerFailed)
+        return status
+    }
+
     /**
      * Waits out the next retry delay. False when the load is no longer
      * wanted; throws the error when retries are off or it is not retryable.
@@ -323,9 +357,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         error: unknown
     ): Promise<boolean> {
         if (superseded(run, opts, demand, seq)) return false
-        if (loadRetryDelays.length === 0 || !isRetryable(error)) throw error
+        if (loadRetryDelays.length === 0 || !isRetryable(error)) {
+            demand.failed = true
+            onLoadStatusChange()
+            throw error
+        }
         const delay = retryDelay(attempt, error)
         logger.warn('Subset load failed; retrying', { collectionName, attempt, delay, error })
+        demand.retryingSince ??= Date.now()
+        onLoadStatusChange()
         await sleep(delay, wake => {
             demand.wake = wake
         })
@@ -340,11 +380,26 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         seq: number,
         refetch: boolean
     ): Promise<FetchResult<T> | undefined> {
-        for (let attempt = 0; ; attempt++) {
-            try {
-                return await fetchRows(run, demand.request, opts.signal, refetch, demand.filters)
-            } catch (error) {
-                if (!(await retryAllowed(run, opts, demand, seq, attempt, error))) return undefined
+        try {
+            for (let attempt = 0; ; attempt++) {
+                try {
+                    return await fetchRows(
+                        run,
+                        demand.request,
+                        opts.signal,
+                        refetch,
+                        demand.filters
+                    )
+                } catch (error) {
+                    if (!(await retryAllowed(run, opts, demand, seq, attempt, error))) {
+                        return undefined
+                    }
+                }
+            }
+        } finally {
+            if (demand.seq === seq) {
+                demand.retryingSince = undefined
+                onLoadStatusChange()
             }
         }
     }
@@ -358,6 +413,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     ): Promise<string[]> {
         demand.wake?.()
         const seq = ++demand.seq
+        demand.failed = false
+        demand.retryingSince = undefined
+        onLoadStatusChange()
         const before = uncoveredRows(demand)
         const loading = (async (): Promise<string[]> => {
             const result = await fetchWithRetry(run, opts, demand, seq, refetch)
@@ -384,6 +442,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         run.demands.delete(opts)
         if (demand.counted) realtime.releaseQueryFilters(demand.filters)
         membership.drop([opts])
+        onLoadStatusChange()
     }
 
     // An unloaded subset is parked: its rows stay held and its realtime
@@ -401,6 +460,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             demand.parked = setTimeout(() => {
                 if (current === run) expire(run, opts)
             }, subsetGcTime)
+            onLoadStatusChange()
         } catch (error) {
             logger.error('unloadSubset failed', { collectionName, error })
         }
@@ -419,6 +479,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             if (parked.parked === undefined || keyOf(parked) !== key) continue
             clearTimeout(parked.parked)
             run.demands.delete(opts)
+            onLoadStatusChange()
             return opts
         }
         return undefined
@@ -506,25 +567,44 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
 
     // A superseded eager load waits for the newer one, so readiness never
     // fires before the rows a later load brings.
+    /** Like `retryAllowed` for the eager load; throws when the load is stale, so it never installs. */
+    async function eagerRetryAllowed(
+        run: Run,
+        seq: number,
+        attempt: number,
+        error: unknown
+    ): Promise<void> {
+        const stale = () => run.abort.signal.aborted || run.eagerSeq !== seq
+        if (stale()) throw error
+        if (loadRetryDelays.length === 0 || !isRetryable(error)) {
+            run.eagerFailed = true
+            onLoadStatusChange()
+            throw error
+        }
+        const delay = retryDelay(attempt, error)
+        logger.warn('Eager load failed; retrying', { collectionName, attempt, delay, error })
+        run.eagerRetryingSince ??= Date.now()
+        onLoadStatusChange()
+        await sleep(delay, wake => {
+            run.eagerWake = wake
+        })
+        run.eagerWake = undefined
+        if (stale()) throw error
+    }
+
     async function fetchEagerWithRetry(run: Run, seq: number): Promise<FetchResult<T>> {
-        for (let attempt = 0; ; attempt++) {
-            try {
-                return await fetchRows(run, {}, undefined, false, undefined)
-            } catch (error) {
-                const stale = () => run.abort.signal.aborted || run.eagerSeq !== seq
-                if (loadRetryDelays.length === 0 || !isRetryable(error) || stale()) throw error
-                const delay = retryDelay(attempt, error)
-                logger.warn('Eager load failed; retrying', {
-                    collectionName,
-                    attempt,
-                    delay,
-                    error,
-                })
-                await sleep(delay, wake => {
-                    run.eagerWake = wake
-                })
-                run.eagerWake = undefined
-                if (stale()) throw error
+        try {
+            for (let attempt = 0; ; attempt++) {
+                try {
+                    return await fetchRows(run, {}, undefined, false, undefined)
+                } catch (error) {
+                    await eagerRetryAllowed(run, seq, attempt, error)
+                }
+            }
+        } finally {
+            if (run.eagerSeq === seq) {
+                run.eagerRetryingSince = undefined
+                onLoadStatusChange()
             }
         }
     }
@@ -532,6 +612,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     function loadEagerRows(run: Run): Promise<string[]> {
         run.eagerWake?.()
         const seq = ++run.eagerSeq
+        run.eagerFailed = false
+        run.eagerRetryingSince = undefined
+        onLoadStatusChange()
         const loading = (async (): Promise<string[]> => {
             const { rows, filings } = await fetchEagerWithRetry(run, seq)
             if (run.abort.signal.aborted || run.eagerSeq !== seq) {
@@ -652,6 +735,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 eagerSeq: 0,
                 eagerLoad: undefined,
                 eagerWake: undefined,
+                eagerRetryingSince: undefined,
+                eagerFailed: false,
             }
             current = run
             store.attach(channel)
@@ -672,6 +757,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 subsets.clear()
                 if (syncMode === 'on-demand') realtime.resetQueryFilters()
                 deps.onCleanup()
+                onLoadStatusChange()
             }
             if (syncMode === 'eager') {
                 void startEager(run, params.markReady, params.markError)
@@ -713,5 +799,6 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
                 )
                 .map(([opts]) => opts)
         },
+        loadStatus,
     }
 }
