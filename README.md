@@ -21,6 +21,7 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
   - [Related data](#related-data)
   - [React Integration](#react-integration)
   - [Subscriptions](#subscriptions)
+  - [Sync Status API](#sync-status-api)
   - [Utility Functions](#utility-functions)
 - [Usage Examples](#usage-examples)
   - [Includes (Nested Subqueries)](#includes-nested-subqueries)
@@ -292,6 +293,49 @@ resetRealtime(pb); // open it again; every ready collection reloads
 ```
 
 `disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
+
+### Sync Status
+
+Two problems are visible only to pbtsdb: the realtime stream dropping while REST still works, so lists look fine but stop updating; and a query sleeping in its load retry backoff, so a list sits in "loading" with no reason shown. `getSyncStatus(pb)` reports both, for every collection of one client:
+
+```typescript
+import { getSyncStatus, subscribeSyncStatus } from 'pbtsdb';
+
+const status = getSyncStatus(pb);
+// {
+//     realtime:
+//         | { state: 'disabled' }    // disconnectRealtime(pb), or no collection has subscribed yet
+//         | { state: 'connecting' }  // the first connection of a session is opening
+//         | { state: 'connected' }   // stream open, PB_CONNECT received
+//         | { state: 'reconnecting'; attempt: number; nextRetryAt: number; since: number },
+//     loads: {
+//         retrying: number,       // live queries sleeping in loadRetryDelays backoff
+//         failingSince?: number,  // when the oldest of them first failed, epoch ms
+//         failed: number,         // live queries whose load ended in a 4xx that is not retried
+//     },
+// }
+
+const stop = subscribeSyncStatus(pb, status => console.log(status));
+```
+
+`reconnecting` means the stream was up and dropped, or a retry never came up, and the next retry is scheduled; the first connection of a session reports `connecting` instead. `nextRetryAt` and `since` are epoch milliseconds, and `nextRetryAt` changes only when a new retry is scheduled. `disabled` is not a problem state: it is what `disconnectRealtime(pb)` asks for, and what an app sees before login.
+
+`retrying` counts only demands a live query still holds; a parked subset or an unmounted query is never counted. `failed` is separate because a 403 or 404 is an answer, not an outage; the count drops when the query reloads or unmounts.
+
+The snapshot is stable: `getSyncStatus(pb)` returns the same object, with the same nested objects, until a value changes. The React entry point wraps it in `useSyncStatus(pb)`:
+
+```tsx
+import { useSyncStatus } from 'pbtsdb';
+
+function SyncNotice() {
+    const { realtime, loads } = useSyncStatus(pb);
+    if (realtime.state === 'reconnecting') return <p>Live updates paused, reconnecting…</p>;
+    if (loads.retrying > 0) return <p>Retrying {loads.retrying} queries…</p>;
+    return null;
+}
+```
+
+The shape of `SyncStatus` is public and changes only in a major release.
 
 ### Subset Lifetime
 
@@ -750,6 +794,32 @@ Setting the matching header on REST requests remains the application's job, via
 An `expand` you add here is yours: pbtsdb strips only the paths it requested
 through `alwaysFetchRelations` and `fetchRelations()`, so records expanded by
 this option stay on the echoed rows, untyped.
+
+### Sync Status API
+
+#### getSyncStatus()
+
+```typescript
+getSyncStatus(pb: PocketBase): SyncStatus
+```
+
+The current [sync status](#sync-status) of `pb`'s collections. The returned object is stable until a value changes.
+
+#### subscribeSyncStatus()
+
+```typescript
+subscribeSyncStatus(pb: PocketBase, listener: (status: SyncStatus) => void): () => void
+```
+
+Calls `listener` with each new snapshot. Returns the unsubscribe function.
+
+#### useSyncStatus()
+
+```typescript
+useSyncStatus(pb: PocketBase): SyncStatus
+```
+
+React hook over the two functions above, built on `useSyncExternalStore`. Exported from `pbtsdb`, not from `pbtsdb/core`.
 
 ### Utility Functions
 

@@ -1,5 +1,6 @@
 import { logger } from './logger'
 import { REALTIME_TOPIC_MAX_LENGTH } from './pocketbase-limits'
+import type { RealtimeStatus } from './sync-status'
 
 export interface RealtimeEvent {
     action: string
@@ -22,13 +23,15 @@ export type EventSourceLike = {
 }
 
 export interface RealtimeClientDeps {
-    /** Absolute URL of `/api/realtime`. */
-    url: string
+    /** Absolute URL of `/api/realtime`; read each time a connection opens. */
+    readonly url: string
     /** `POST /api/realtime` with the SDK's auth; rejects on a non-2xx response. */
     send: (body: { clientId: string; subscriptions: string[] }) => Promise<unknown>
     eventSource?: (url: string) => EventSourceLike
     /** After a reconnect. `resumed` is true when the server replayed the gap. */
     onReconnect?: (resumed: boolean) => void
+    /** After any transition `status()` may report; may fire with no change. */
+    onStatusChange?: () => void
     backoff?: readonly number[]
 }
 
@@ -58,6 +61,7 @@ export interface RealtimeClient {
     subscribe: (topic: string, listener: RealtimeListener) => Promise<() => Promise<void>>
     topics: () => string[]
     isConnected: () => boolean
+    status: () => RealtimeStatus
     clientId: () => string | undefined
     disconnect: () => void
     /**
@@ -108,6 +112,9 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let resubmit = false
     let attempts = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    /** When the current reconnect episode began; cleared once a connection's POST succeeds. */
+    let lostAt: number | undefined
+    let nextRetryAt = 0
     let everConnected = false
     /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
     let session = 0
@@ -115,6 +122,19 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
 
     function topics(): string[] {
         return [...listeners.keys()]
+    }
+
+    function status(): RealtimeStatus {
+        if (disabled || (!source && reconnectTimer === undefined)) return { state: 'disabled' }
+        if (connected) return { state: 'connected' }
+        if (lostAt !== undefined) {
+            return { state: 'reconnecting', attempt: attempts, nextRetryAt, since: lostAt }
+        }
+        return { state: 'connecting' }
+    }
+
+    function statusChanged(): void {
+        deps.onStatusChange?.()
     }
 
     function dispatcherFor(topic: string): EventListener {
@@ -150,6 +170,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             close(true)
             clientId = undefined
             lastSeq = undefined
+            statusChanged()
             return
         }
         if (sameList(list, confirmed)) return
@@ -182,6 +203,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         close(true)
         clientId = undefined
         lastSeq = undefined
+        statusChanged()
         settleWaiters(pending)
     }
 
@@ -266,6 +288,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         if (forget) {
             confirmed = []
             everConnected = false
+            lostAt = undefined
             session += 1
         }
     }
@@ -283,6 +306,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         clientId = undefined
         lastSeq = undefined
         attempts = 0
+        lostAt = undefined
         session += 1
         if (listeners.size > 0) {
             try {
@@ -291,11 +315,14 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                 logger.error('Failed to reconnect after reset', { error })
             }
         }
+        statusChanged()
     }
 
     function scheduleReconnect(): void {
         const delay = backoff[Math.min(attempts, backoff.length - 1)] ?? 0
         attempts += 1
+        lostAt ??= Date.now()
+        nextRetryAt = Date.now() + delay
         reconnectTimer = setTimeout(() => {
             reconnectTimer = undefined
             if (listeners.size > 0) connect()
@@ -307,6 +334,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         logger.debug('Realtime connection lost', { clientId })
         close(false)
         scheduleReconnect()
+        statusChanged()
     }
 
     function connect(): void {
@@ -314,6 +342,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         const previousId = clientId
         const target = openSource(connectUrl())
         source = target
+        statusChanged()
         target.addEventListener('error', () => handleConnectionLost(target))
         target.addEventListener('PB_CONNECT', (ev: Event) => {
             if (source !== target) return
@@ -339,16 +368,20 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             // must still count as a reconnect so the gap is reloaded.
             const isReconnect = everConnected
             everConnected = true
+            statusChanged()
             submit().then(
                 () => {
                     if (source !== target) return
                     attempts = 0
+                    lostAt = undefined
+                    statusChanged()
                     if (isReconnect) deps.onReconnect?.(resumed)
                 },
                 () => {
                     if (source !== target || !isReconnect) return
                     close(false)
                     scheduleReconnect()
+                    statusChanged()
                 }
             )
         })
@@ -408,6 +441,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         },
         topics,
         isConnected: () => connected,
+        status,
         clientId: () => clientId,
         disconnect() {
             close(true)
@@ -417,6 +451,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             waiters = []
             listeners.clear()
             dispatchers.clear()
+            statusChanged()
             settleWaiters(pending, new RealtimeDisconnectedError())
         },
         simulateDisconnect() {
@@ -437,6 +472,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             if (!disabled) return
             disabled = false
             if (listeners.size > 0) connect()
+            statusChanged()
         },
         isEnabled: () => !disabled,
     }

@@ -1,4 +1,7 @@
-import React, { createContext, type ReactNode, useContext } from 'react'
+import type PocketBase from 'pocketbase'
+import React, { createContext, type ReactNode, useContext, useSyncExternalStore } from 'react'
+import type { SyncStatus } from './sync-status'
+import { getSyncStatus, subscribeSyncStatus } from './transport'
 
 /**
  * UseStore hook type for variadic collection access.
@@ -159,4 +162,27 @@ export function createReactProvider<CollectionsMap extends Record<string, unknow
         Provider,
         useStore: useStore as UseStoreFn<CollectionsMap>,
     }
+}
+
+/**
+ * The current {@link SyncStatus} of `pb`'s collections, re-rendering on
+ * each change. Use it for a connectivity notice: the realtime stream
+ * dropping while REST still works, or queries stuck in retry.
+ *
+ * @example
+ * ```tsx
+ * function SyncNotice() {
+ *     const { realtime, loads } = useSyncStatus(pb);
+ *     if (realtime.state === 'reconnecting') return <p>Reconnecting…</p>;
+ *     if (loads.retrying > 0) return <p>Retrying {loads.retrying} queries</p>;
+ *     return null;
+ * }
+ * ```
+ */
+export function useSyncStatus(pb: PocketBase): SyncStatus {
+    return useSyncExternalStore(
+        listener => subscribeSyncStatus(pb, listener),
+        () => getSyncStatus(pb),
+        () => getSyncStatus(pb)
+    )
 }

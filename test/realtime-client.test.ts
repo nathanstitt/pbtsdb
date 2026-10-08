@@ -914,6 +914,116 @@ describe('realtime client', () => {
         expect(client.topics()).toEqual(['t1'])
     })
 
+    describe('status', () => {
+        it('walks disabled, connecting, connected, reconnecting and back, notifying at each step', async () => {
+            vi.useFakeTimers()
+            vi.setSystemTime(1_000_000)
+            FakeEventSource.instances = []
+            const seen: string[] = []
+            const client = createRealtimeClient({
+                url: 'http://pb.test/api/realtime',
+                send: async () => undefined,
+                eventSource: url => new FakeEventSource(url),
+                onStatusChange: () => seen.push(client.status().state),
+                backoff: [10, 20],
+            })
+            expect(client.status()).toEqual({ state: 'disabled' })
+
+            const sub = client.subscribe('t1', () => undefined)
+            expect(client.status()).toEqual({ state: 'connecting' })
+            await vi.advanceTimersByTimeAsync(0)
+            const first = FakeEventSource.instances[0]
+            first.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+            await sub
+            expect(client.status()).toEqual({ state: 'connected' })
+
+            first.fail()
+            expect(client.status()).toEqual({
+                state: 'reconnecting',
+                attempt: 1,
+                nextRetryAt: 1_000_010,
+                since: 1_000_000,
+            })
+            // The retry opens a connection; the snapshot holds until a new one is scheduled.
+            await vi.advanceTimersByTimeAsync(10)
+            expect(FakeEventSource.instances).toHaveLength(2)
+            expect(client.status()).toEqual({
+                state: 'reconnecting',
+                attempt: 1,
+                nextRetryAt: 1_000_010,
+                since: 1_000_000,
+            })
+            FakeEventSource.instances[1].fail()
+            expect(client.status()).toEqual({
+                state: 'reconnecting',
+                attempt: 2,
+                nextRetryAt: 1_000_030,
+                since: 1_000_000,
+            })
+            await vi.advanceTimersByTimeAsync(20)
+            FakeEventSource.instances[2].emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+            await vi.advanceTimersByTimeAsync(0)
+            expect(client.status()).toEqual({ state: 'connected' })
+
+            client.disable()
+            expect(client.status()).toEqual({ state: 'disabled' })
+            client.enable()
+            expect(client.status()).toEqual({ state: 'connecting' })
+
+            expect(seen).toContain('connecting')
+            expect(seen).toContain('connected')
+            expect(seen).toContain('reconnecting')
+            expect(seen).toContain('disabled')
+        })
+
+        it('is disabled once the last topic is unsubscribed, and connecting after a reset', async () => {
+            const { client, connect } = setup()
+            const sub = client.subscribe('t1', () => undefined)
+            await flush()
+            connect('client-1')
+            const unsubscribe = await sub
+            client.reset()
+            expect(client.status()).toEqual({ state: 'connecting' })
+            connect('client-2')
+            await flush()
+            expect(client.status()).toEqual({ state: 'connected' })
+            await unsubscribe()
+            expect(client.status()).toEqual({ state: 'disabled' })
+        })
+
+        it('keeps since across a connect whose re-POST fails', async () => {
+            vi.useFakeTimers()
+            vi.setSystemTime(5_000)
+            FakeEventSource.instances = []
+            let failNext = false
+            const client = createRealtimeClient({
+                url: 'http://pb.test/api/realtime',
+                send: async () => {
+                    if (failNext) {
+                        failNext = false
+                        throw new Error('boom')
+                    }
+                },
+                eventSource: url => new FakeEventSource(url),
+                backoff: [10],
+            })
+            const sub = client.subscribe('t1', () => undefined)
+            await vi.advanceTimersByTimeAsync(0)
+            FakeEventSource.instances[0].emit('PB_CONNECT', { clientId: 'c1' }, 'c1')
+            await sub
+            FakeEventSource.instances[0].fail()
+            await vi.advanceTimersByTimeAsync(10)
+            failNext = true
+            FakeEventSource.instances[1].emit('PB_CONNECT', { clientId: 'c2' }, 'c2')
+            await vi.advanceTimersByTimeAsync(0)
+            expect(client.status()).toMatchObject({
+                state: 'reconnecting',
+                attempt: 2,
+                since: 5_000,
+            })
+        })
+    })
+
     it('reset never throws, even if reconnecting fails synchronously', async () => {
         FakeEventSource.instances = []
         let failNextConnect = false
