@@ -22,8 +22,8 @@ export type EventSourceLike = {
 }
 
 export interface RealtimeClientDeps {
-    /** Absolute URL of `/api/realtime`. */
-    url: string
+    /** Absolute URL of `/api/realtime`; read each time a connection opens. */
+    readonly url: string
     /** `POST /api/realtime` with the SDK's auth; rejects on a non-2xx response. */
     send: (body: { clientId: string; subscriptions: string[] }) => Promise<unknown>
     eventSource?: (url: string) => EventSourceLike
