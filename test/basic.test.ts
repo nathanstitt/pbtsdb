@@ -1,37 +1,25 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { createCollection } from '../src'
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
-    createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
 
 describe('Collection - Basic Operations', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
 
     afterAll(() => {
         clearAuth()
-    })
-
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
     })
 
     it('should fetch books with simple filter using pocketbase api', async () => {
@@ -42,7 +30,7 @@ describe('Collection - Basic Operations', () => {
     }, 10000)
 
     it('should fetch book by isbn using tanstack db collection', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         const { result, unmount } = renderHook(() =>
             useLiveQuery(q => q.from({ books: booksCollection }))
@@ -59,7 +47,7 @@ describe('Collection - Basic Operations', () => {
     })
 
     it('should fetch a single book using findOne with where clause', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         // First, get all books to find one we can query
         const { result: listResult, unmount: unmountList } = renderHook(() =>
@@ -95,7 +83,7 @@ describe('Collection - Basic Operations', () => {
     }, 15000)
 
     it('should return undefined when findOne matches no records', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         // Query for a book with an ISBN that doesn't exist
         const nonExistentIsbn = `nonexistent-${Date.now()}`
@@ -120,7 +108,7 @@ describe('Collection - Basic Operations', () => {
     }, 15000)
 
     it('passes collectionOptions.gcTime through to the underlying TanStack collection', async () => {
-        const authors = createCollection<Schema>(pb, queryClient)('authors', {
+        const authors = createCollection<Schema>(pb)('authors', {
             syncMode: 'on-demand',
             collectionOptions: { gcTime: 50 },
         })

@@ -1,4 +1,3 @@
-import { QueryClient } from '@tanstack/react-query'
 import { waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
 import { expect } from 'vitest'
@@ -67,20 +66,6 @@ export const pb = new PocketBase(process.env.TESTING_PB_ADDR)
 pb.autoCancellation(false)
 
 /**
- * Create a fresh QueryClient for testing with appropriate settings
- */
-export function createTestQueryClient(): QueryClient {
-    return new QueryClient({
-        defaultOptions: {
-            queries: {
-                retry: false,
-                gcTime: 30000,
-            },
-        },
-    })
-}
-
-/**
  * Authenticate with PocketBase using test credentials
  */
 export async function authenticateTestUser(): Promise<void> {
@@ -114,43 +99,38 @@ export function getCurrentOrg(): string | undefined {
 }
 
 /**
- * Create a books collection with the given query client
+ * Create a books collection
  */
-export function createBooksCollection(
-    queryClient: QueryClient,
-    options?: { syncMode?: 'eager' | 'on-demand' }
-) {
-    return createCollection<Schema>(pb, queryClient)('books', {
-        syncMode: options?.syncMode,
-    })
+export function createBooksCollection(options?: { syncMode?: 'eager' | 'on-demand' }) {
+    return createCollection<Schema>(pb)('books', { syncMode: options?.syncMode })
 }
 
 /**
- * Create an authors collection with the given query client
+ * Create an authors collection
  */
-export function createAuthorsCollection(queryClient: QueryClient) {
-    return createCollection<Schema>(pb, queryClient)('authors', {})
+export function createAuthorsCollection() {
+    return createCollection<Schema>(pb)('authors', {})
 }
 
 /**
- * Create a book_metadata collection with the given query client
+ * Create a book_metadata collection
  */
-export function createBookMetadataCollection(queryClient: QueryClient) {
-    return createCollection<Schema>(pb, queryClient)('book_metadata')
+export function createBookMetadataCollection() {
+    return createCollection<Schema>(pb)('book_metadata')
 }
 
 /**
- * Create a tags collection with the given query client
+ * Create a tags collection
  */
-export function createTagsCollection(queryClient: QueryClient) {
-    return createCollection<Schema>(pb, queryClient)('tags')
+export function createTagsCollection() {
+    return createCollection<Schema>(pb)('tags')
 }
 
 /**
- * Create a book_tags collection with the given query client
+ * Create a book_tags collection
  */
-export function createBookTagsCollection(queryClient: QueryClient) {
-    return createCollection<Schema>(pb, queryClient)('book_tags')
+export function createBookTagsCollection() {
+    return createCollection<Schema>(pb)('book_tags')
 }
 
 /**

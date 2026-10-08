@@ -7,24 +7,81 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-07
+
+### Breaking
+
+- pbtsdb now builds on `@tanstack/db`'s core sync API. `@tanstack/query-db-collection`
+  and `@tanstack/react-query` are no longer dependencies.
+- `createCollection(pb, queryClient, factoryOptions?)` is now `createCollection(pb, factoryOptions?)`.
+- `collection.utils.writeInsert/writeUpdate/writeUpsert/writeDelete/writeBatch` and
+  `collection.utils.refetch` are removed. Use `collection.accept(rows)` for rows the
+  server returned, `collection.evict(ids)` for rows the server deleted, and
+  `collection.reload()` to refetch every live subset. All three are also on
+  `collection.utils`.
+- `queryClient.invalidateQueries([collectionName])` no longer reaches pbtsdb. Call
+  `collection.reload()`.
+- The `ignoreAutoCancellation` option is removed. Every request carries its own key,
+  so the SDK's auto-cancellation never aborts a pbtsdb load.
+- `collectionOptions` no longer accepts `utils`, which pbtsdb manages.
+- Requires `@tanstack/db` >=0.12.1 and `@tanstack/react-db` >=0.5.5.
+
 ### Changed
 
-- Requires `@tanstack/db` >=0.12.1, `@tanstack/query-db-collection` >=1.4.0,
-  and `@tanstack/react-db` >=0.5.5.
+- Row membership is owned by pbtsdb's ledger (see `docs/internals.md`, "Ledger"). A
+  realtime event or a mutation write-back never refetches a query.
+- A realtime delete on a filtered subscription releases only that subscription's
+  rows, so a row that leaves one filter stays while another live query holds it.
 - pbtsdb writes realtime echoes, mutation write-backs, and filed relation rows
-  through the collection's sync session instead of query-db-collection's
-  direct writes. Since query-db-collection 1.3 a direct write to an
-  on-demand collection refetches every active query; pbtsdb's own writes
-  cause no request. Each written row is added to every cached query of the
-  collection, so those queries own it as before.
+  through the collection's sync session instead of direct writes to the cache.
 - The built-in insert and update handlers write the server response, and the
   built-in delete handler removes the row, before they return. TanStack DB
   0.12 drops the optimistic state when the handler settles; the settled row is
   now the server's row with no gap in which the previous row shows.
-- `refetchOnMutation: true` refetches with `collection.utils.refetch()` before
-  the handler settles. The built-in handlers always return
-  `{ refetch: false }`, so query-db-collection logs no deprecation warning.
-- `collectionOptions` no longer accepts `utils`, which pbtsdb manages.
+- `refetchOnMutation: true` calls `collection.reload()` before the handler settles.
+  The built-in handlers return `void`. Concurrent `reload()` calls share one
+  follow-up reload instead of each fetching every live subset.
+- An unloaded on-demand subset stays held for `subsetGcTime` (default 5 s). A query
+  with an equal request that mounts within the window reuses the rows with no
+  request, and realtime keeps them fresh meanwhile. After the window, or on
+  `reload()`, the rows leave unless another holder has them. The react-query cache
+  served a remount for its `gcTime` before; the window is now explicit and realtime
+  covered. Only a subset whose rows landed waits; an auth record change releases every
+  waiting subset at once.
+- Two live queries with equal requests send two requests. react-query deduplicated
+  them.
+- No refetch on window focus or on network reconnect; react-query did both by
+  default. Call `collection.reload()` for the same effect. A realtime reconnect the
+  server did not resume still reloads every live subset.
+- Rows a parent files into a relation target are tracked per parent row. A filed row
+  leaves the target when the last parent row filing it leaves the parent's store, when a
+  parent fetch or echo no longer expands it (lost access, changed relation), or when a
+  delete arrives on the hold's realtime topic. Hold filters follow the current filings,
+  so they no longer grow for the life of the parent.
+- A subset or eager load that fails is retried with backoff (`loadRetryDelays`, default
+  1, 2, 4, 8, 15 and then every 30 seconds) until it succeeds, so a live query stays
+  loading through an outage instead of entering an error state it cannot leave. A
+  `reload()` or realtime reconnect retries at once, also while another reload is running.
+  A 4xx other than 401, 408 or 429 is not retried; a 401 waits for the next auth change.
+  react-query retried three times and then errored.
+- An auth record change drops accepted rows, releases waiting subsets and reloads every
+  live subset at once, whether or not realtime is connected.
+- A realtime echo that changes a relation files the new related row before it lands
+  the parent, and releases the old one after, the same order a fetch uses. A join
+  never sees the parent without its relation, so a joined row is not unmounted and
+  remounted across the echo.
+- A mutation write-back or `accept()` adds the accepted holder only to a row nothing
+  holds yet. A row a query or topic already holds is refreshed in place, so a saved
+  row leaves with its query instead of staying for the session. When `subsetGcTime`
+  ends, the row is handed to every live query whose filter matches it and the
+  accepted holder is dropped, so a written row no live query covers leaves and a row
+  the user still sees stays even if no realtime echo came.
+- pbtsdb resets its realtime session itself when `pb.authStore` changes to another
+  auth record. `disconnectRealtime(pb)` closes the connection and keeps it closed
+  until `resetRealtime(pb)`.
+- In on-demand mode with `realtime: 'collection'`, a row that arrives as a realtime
+  echo stays in memory until `reload()` runs or the collection goes idle. Live
+  queries apply their own `where`, so this costs memory, not correctness.
 
 ### Fixed
 

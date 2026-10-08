@@ -34,7 +34,7 @@ only because of query-db-collection:
 | Delete echoes, case 1 | on-demand prune races the echo | Gone. Only pbtsdb deletes rows. |
 | Loaded-subset marks: observer-cache invalidation and the microtask | react-query serves a cached query without asking the marks | Gone. No observer cache. |
 | Authoritative writes, ownership claim (PR #23) | cache ownership of written rows | Gone. The ledger owns rows. |
-| `tanstack-internals.test.ts` | pinned undocumented behaviour | Deleted. |
+| `tanstack-internals.test.ts` | pinned undocumented behaviour | Replaced by `tanstack-assumptions.test.ts`, which pins the internals still used: `from()` → `subscribeChanges` for views, and `whenSyncAccepted` (`@internal` upstream). |
 
 What stays: write-back timing (a core TanStack rule), pending filings,
 sync-session refs and holds, realtime filter per chunk, PocketBase limits,
@@ -69,6 +69,12 @@ Rules pbtsdb must keep:
   must listen to one of them, not both.
 - `commit(signal)` returns `true` or a receipt that resolves when the
   writes are visible. A load must await its receipts.
+- `whenSyncAccepted(receipt)` (exported from `@tanstack/db`) resolves when
+  the transaction is accepted, at `commit()`. Core holds every sync
+  transaction while any transaction on the collection persists, so a
+  receipt from inside a mutation handler becomes visible only after that
+  handler settles. Every path a handler can reach awaits acceptance, not
+  visibility. Readiness also counts accepted rows.
 - Mutation handlers: 0.12 drops optimistic state when the handler settles.
   The confirmed row must be in the synced store before then.
 
@@ -82,9 +88,9 @@ holder is one of:
 | Holder | Created by | Released by |
 |---|---|---|
 | Subset | `loadSubset(options)` | `unloadSubset(options)`, or a reload of the same subset whose result omits the row |
-| Realtime topic | a create or update event delivered on that topic's filter | the topic's realtime entry closing |
-| Hold | a parent's `holdLive()` on a relation target, per filed row | `release()` on the hold |
-| Accepted | a write-back after persist, an insert echo for this client's own pending row, or `accept(rows)` from the application | the next subset reload or realtime event that covers the row, or `reload()` |
+| Realtime topic | a create or update event delivered on that topic's filter | the topic's realtime entry closing while the topic is no longer wanted (on-demand mode), or `reload()` for rows its results do not confirm |
+| Hold | a parent's `holdLive()` on a relation target, per filed row | `release()` on the hold; the last parent row filing the row leaving the parent's store; a parent fetch or echo whose requested expand no longer returns the row; a delete event on the hold's filter topic |
+| Accepted | a write-back after persist, an insert echo for this client's own pending row, or `accept(rows)` from the application | the next subset reload or realtime event that covers the row, a fresh load whose `where` matches the row and whose result omits it (rule 6 exception), realtime going idle (on-demand mode), or `reload()` |
 
 Rules:
 
@@ -99,7 +105,7 @@ Rules:
    `updated` is strictly newer, or equal. A strictly older row is dropped.
    This is the one staleness check, and it is the same rule for echoes,
    write-backs, filed rows and results (see `docs/internals.md`,
-   "Staleness").
+   "Ledger", rule 4).
 5. A delete event releases the delivering topic's ref, the refs of every
    subset whose base `where` is that topic, and the accepted ref. It does
    not touch other topics' refs. A real delete reaches every topic that
@@ -111,6 +117,18 @@ Rules:
 6. The ledger does not evaluate predicates. It never decides that a row
    matches a filter. The server decides, through a load result or a
    realtime topic.
+
+   Exception: `load` evaluates a demand's full `where` on the client
+   (`compileSingleRowExpression`) after a fresh, complete server result
+   (no `limit`, `cursor` or `offset`, not served from the store). A row
+   that `ACCEPTED` or one of the demand's filter topics held before the
+   fetch, that did not change during the fetch, that matches `where` and
+   that the result omits, loses its `ACCEPTED` and filter-topic holders.
+   The `'*'` topic is never released this way. Subset, parent
+   and `EAGER` holders stay. Without this, a row accepted after a move
+   and then deleted by another client stays on screen until `reload()`.
+   In on-demand mode, `ACCEPTED` is also released in full when realtime
+   goes idle, because no realtime coverage is left to correct its rows.
 
 Rule 6 is why a row can stay in the collection after it stops matching a
 filter, until the subset reloads or a holder releases it. This is the same
@@ -130,9 +148,8 @@ Core passes the same `options` object to `loadSubset` and `unloadSubset`.
 Today `build-collection.ts` keys retained realtime filters on that object
 in a `WeakMap`. The ledger keys subsets the same way, and keeps the
 `PbRequest` from `toRequest(options)` as the request to send. Two
-subscriptions with equal requests are two subsets with two ref sets; they
-share one network request only while one is in flight (see "Request
-coalescing").
+subscriptions with equal requests are two subsets with two ref sets, and
+each sends its own request (see "Request coalescing").
 
 ## Flows
 
@@ -151,7 +168,8 @@ coalescing").
    rows that reach zero refs.
 6. Await the commit receipt. Mark the subset loaded (existing
    `subsets.mark`) when the request was a complete keyed subset.
-7. `markReady()` after the first load settles, success or failure. In
+7. On-demand: `markReady()` when sync starts. Eager: `markReady()` when
+   the first full load is accepted; `markError(error)` if it fails. In
    eager mode the first load is the whole collection, as today.
 
 ### unloadSubset
@@ -189,6 +207,14 @@ and takes an accepted ref. `refetchOnMutation` calls `reload()` from the
 handler; the `{ refetch }` return value is deprecated upstream (#843) and
 is dropped.
 
+`reload()` and `accept()` resolve when their rows are accepted
+(`whenSyncAccepted(receipt)`), not when they are visible. Core holds every
+sync commit while a mutation on the collection persists, and a receipt
+from inside a handler becomes visible only when that handler's
+transaction settles. A handler that awaited visibility would wait for
+itself and never settle. The write-back itself does not await its
+receipt.
+
 ### Filed relation rows
 
 `writeFiled` writes through the channel and takes a hold ref for the
@@ -200,7 +226,8 @@ rows it filed, so the ledger can release them exactly.
 The `utils.writeInsert/Upsert/Delete/Batch` family is removed from the
 public API. A direct write lets the application put a row in the store
 with no holder and no staleness check, which is what the ledger exists to
-prevent. tinycld boards is the only consumer, and it has two needs:
+prevent. tinycld boards is the only consumer, and it has two needs; a
+custom delete handler adds a third:
 
 1. **A custom endpoint returned the server's row.** `useMoveCardToBoard`
    and `useSprintLifecycle` call `pb.send` on a server endpoint, then
@@ -225,19 +252,42 @@ prevent. tinycld boards is the only consumer, and it has two needs:
    confirm, so it is the recovery path after any lost echo. It replaces
    `utils.refetch()` and `queryClient.invalidateQueries([name])`.
 
-   Revocation is rare, so seven reloads at that moment is acceptable. If
-   it is not, add `collection.evict(ids)`: release every ref of the given
-   rows with no request. Not in the first version.
+   Revocation is rare, so seven reloads at that moment is acceptable.
 
-Both methods are on the collection, not on `utils`, and are typed on the
-collection's record type.
+3. **A custom delete handler removed rows.** Until the delete echo
+   arrives, the row would show again once the optimistic state drops.
+
+   New method: `collection.evict(ids)`. The server deleted these rows.
+   Release every ref of the given rows with no request, and tombstone the
+   ids for every fetch in flight. The built-in delete handler uses the
+   same path. A custom `onDelete` awaits it before it returns, as a
+   custom `onInsert` awaits `accept`.
+
+All three methods are on the collection and on `collection.utils` (typed
+`PbCollectionUtils<T>`), on the collection's record type. Every upstream
+adapter returns its functions in `utils`, which is where TanStack DB
+devtools and users look for them.
 
 ### Request coalescing
 
-react-query deduplicated two identical in-flight requests. pbtsdb keeps a
-map of in-flight `PbRequest` key to promise, so a second subscription for
-an equal request awaits the first and then takes its own refs from the
-result. The map entry is removed when the request settles.
+Not in the first version. react-query deduplicated two identical in-flight
+requests; under this design each demand sends its own request, so two
+equal demands from two live queries cost two requests. Core already shares
+one acquisition between the consumers of one live query, so the cost
+arises only for distinct live queries with equal requests.
+
+Upstream does not give pbtsdb a ready tool for this. query-db-collection
+dedupes equal demands by a ref count on the hashed query key
+(`query.ts:3022-3046`); powersync keys demands by the options object, as
+pbtsdb does. Core's `DeduplicatedLoadSubset` does not fit: it shares an
+in-flight request only when `options.signal` is absent, and core always
+sets a signal in on-demand mode (`subscription.ts:936-953`); and its
+completed set returns `true` for an equal demand until `reset()`, so after
+an unload released the rows a remount would get `true` with no rows held.
+
+Add coalescing after measuring: a map of in-flight `PbRequest` key to
+promise, where a second demand awaits the first and then takes its own
+refs from the result.
 
 ### Remount
 
@@ -426,12 +476,12 @@ Sizing (`apis/realtime.go`, fork at upstream 0.40.4):
 
 | Module | Change |
 |---|---|
-| `src/ledger.ts` | New. Refs per row per holder, diff on reload, zero-ref deletes, in-flight coalescing. |
+| `src/ledger.ts` | New. Refs per row per holder, diff on reload, zero-ref deletes. |
 | `src/synced-store.ts` (from PR #23) | Keep the channel attach/detach and `transact`. Remove `claim` and the query cache. |
 | `src/build-collection.ts` | Replace `queryCollectionOptions` with a `SyncConfig`. Keep view registry, realtime wiring, holds, mutation handlers. |
 | `src/fetch-records.ts` | Drop `queryClient` and `withRowsConfirmedMidFlight`. Return rows; the caller writes. |
 | `src/loaded-subsets.ts` | Drop `queryClient` and both invalidation paths. Marks only. |
-| `src/synced-write-guard.ts` | Drop `shouldDrop`, `trackFetch`, `withRowsConfirmedMidFlight`, `isOwnWrite`. Keep `isStaleServerRecord`, `markConfirmedPresent`, `writeBackAfterPersisted`. |
+| `src/synced-write-guard.ts` | Delete. Staleness is ledger rule 4; in-flight deletes are `noteDeleted` in `src/sync-adapter.ts`; the write-back is `membership.land(ACCEPTED, rows)`. |
 | `src/realtime-subscription.ts` | Pass the delivering entry with each event. Use `transport.subscribe`. |
 | `src/transport.ts` | New. REST on the SDK, realtime on pbtsdb's own SSE client. The one module that imports `pocketbase`. |
 | `src/request.ts` | Drop `queryKeyFor` / `requestFromQueryKey`; keep `toRequest`. |
@@ -472,7 +522,8 @@ New tests the ledger needs:
   (today's "confirmed mid-flight" case, now by ref).
 - `unloadSubset` twice is a no-op.
 - `cleanup` keeps held rows and clears subset refs.
-- Equal concurrent loads send one request.
+- Equal concurrent loads send one request (deferred with "Request
+  coalescing").
 - `reload()` releases accepted refs the results do not confirm.
 - `accept` of an older `updated` is dropped; `accept` of a new id inserts.
 - Stale echo (older `updated`) is dropped; equal `updated` lands.
@@ -481,8 +532,9 @@ New tests the ledger needs:
 
 1. Own realtime client, on main: `src/transport.ts` and the SSE client
    under `realtime-subscription.ts`. Same tests pass. Separate PR.
-2. Branch from PR #23 (`chore/tanstack-db-0.12`) rebased on that. It
-   already has the channel plumbing and the 0.12 test fixes.
+2. Branch from `main` after PR #23 (`chore/tanstack-db-0.12`) merges. It
+   has the channel plumbing, the 0.12 test fixes and the own realtime
+   client.
 3. Write `src/ledger.ts` with its unit tests, against a fake channel.
 4. Swap `build-collection.ts` to a `SyncConfig` behind the same
    `buildCollection` signature. Add `accept` and `reload`.

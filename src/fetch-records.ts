@@ -1,35 +1,59 @@
-import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import {
     type BackRelationHead,
     backRelationHeads,
     type ExpandFiler,
+    type FilingChange,
     stripFetchedRelations,
 } from './expand-filing'
 import type { RelationTargets } from './expand-paths'
+import { splitPaths } from './expand-paths'
 import { matchesSubset, type WhereSubset } from './keyed-where'
 import type { LoadedSubsets } from './loaded-subsets'
 import { subsetFilters } from './pocketbase-limits'
 import type { PbRequest } from './request'
-import type { SyncedWriteGuard } from './synced-write-guard'
 
 export interface FetchDeps<T extends object> {
     pb: PocketBase
     collectionName: string
-    queryClient: QueryClient
     relationTargets: RelationTargets | undefined
-    ignoreAutoCancellation: boolean
     /** The full expand string a request sends, alwaysFetchRelations included. */
     activeExpand: (request: PbRequest) => string | undefined
     syncedRow: (id: string) => T | undefined
     syncedRows: () => Iterable<T>
     subsets: Pick<LoadedSubsets, 'isLoaded'>
-    guard: Pick<SyncedWriteGuard<T>, 'trackFetch' | 'withRowsConfirmedMidFlight'>
     filer: ExpandFiler
 }
 
+export interface FetchResult<T> {
+    rows: T[]
+    /** True when the store answered and no request was sent. */
+    fromStore: boolean
+    /**
+     * The filings this result made. Commit it after the rows land; undo it
+     * when the result is discarded, so a discarded result changes nothing.
+     */
+    filings: FilingChange
+}
+
+export interface FetchOptions {
+    /**
+     * Abort sources. An abort cancels every request of this load and
+     * rejects with `FetchAbortedError`.
+     */
+    signals?: readonly AbortSignal[]
+    /** Revalidate: send the request even when the store could answer it. */
+    refetch?: boolean
+}
+
 export interface Fetcher<T extends object> {
-    fetchRecords: (request: PbRequest, queryKey: readonly unknown[]) => Promise<T[]>
+    /** Rows for `request`: relations filed into their targets, fetched expand stripped. */
+    fetchRecords: (request: PbRequest, options?: FetchOptions) => Promise<FetchResult<T>>
+    /**
+     * The rows the store answers `request` with, or undefined when it cannot.
+     * Synchronous: it does not wait for a parent's pending filing.
+     */
+    serveFromStore: (request: PbRequest) => T[] | undefined
     /**
      * A parent's fetch may file and mark `field` once `settles` resolves; a
      * fetch for a not-yet-loaded subset on that field waits for it first.
@@ -38,9 +62,23 @@ export interface Fetcher<T extends object> {
     expectFiling: (field: string, settles: Promise<void>) => () => void
 }
 
+const NO_FILINGS: FilingChange = { commit: () => undefined, undo: () => undefined }
+
+/** Thrown when `signal` aborted before the rows were installed. */
+export class FetchAbortedError extends Error {
+    constructor(collectionName: string) {
+        super(`${collectionName}: fetch aborted`)
+        this.name = 'AbortError'
+    }
+}
+
+/** One load's cancellation: its own signal and the request keys it sent. */
+type Cancel = { controller: AbortController; keys: string[] }
+
 export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> {
-    const { pb, collectionName, queryClient, relationTargets, guard, filer, subsets } = deps
+    const { pb, collectionName, relationTargets, filer, subsets } = deps
     const pendingFilings = new Map<string, Promise<void>[]>()
+    let requestSeq = 0
 
     function expectFiling(field: string, settles: Promise<void>): () => void {
         let pending = pendingFilings.get(field)
@@ -61,8 +99,6 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         if (pending && pending.length > 0) await Promise.all(pending)
     }
 
-    // Rows in the synced store are as fresh as realtime keeps them; an id-only
-    // request whose ids are all present needs no round trip.
     function rowsFromStore(ids: readonly string[]): T[] | undefined {
         const rows: T[] = []
         for (const id of ids) {
@@ -81,9 +117,9 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
 
     // Stored rows were filed with alwaysFetchRelations already; only a view's
     // extra `request.expand` forces a fetch. An empty subset selects nothing
-    // and must never become a request, which would fetch everything. A sorted
-    // and limited request must be sliced in that order, which the store's id
-    // order cannot provide, and a cursor is a boundary in that order too.
+    // and must never become a request. A sorted and limited request must be
+    // sliced in that order, which the store's id order cannot provide, and a
+    // cursor is a boundary in that order too.
     function servedFromStore(request: PbRequest): T[] | undefined {
         const { subset, sort, limit } = request
         if (!subset) return undefined
@@ -94,7 +130,6 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         return rows && limit ? rows.slice(0, limit) : rows
     }
 
-    // The cursor narrows every chunk: `(chunk) && (cursor)`.
     function withCursor(
         filter: string | undefined,
         cursor: string | undefined
@@ -103,25 +138,23 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         return filter ? `(${filter}) && (${cursor})` : cursor
     }
 
-    // Each chunk carries its own request key so the SDK's auto-cancellation
-    // does not abort sibling chunks. A limited request returns each chunk's
-    // first rows unsliced: the live query re-applies sort and limit. An offset
-    // without a cursor is a count of rows already acquired; PocketBase pages by
-    // page number, so an aligned offset becomes a page and any other offset is
-    // sliced from a request that starts at row one. `offset` is the one this
-    // chunk may skip: the caller passes 0 when the request splits into several
-    // chunks, since a row's position in the window is not its position in its
-    // chunk.
+    // Each load and each chunk carry their own request key, so the SDK's
+    // auto-cancellation never aborts a sibling chunk or a concurrent load. A
+    // limited request returns each chunk's first rows unsliced: the live
+    // query re-applies sort and limit. An offset without a cursor is a count
+    // of rows already acquired; PocketBase pages by page number, so an
+    // aligned offset becomes a page and any other offset is sliced from a
+    // request that starts at row one.
     async function fetchPage(
         request: PbRequest,
         expand: string | undefined,
         chunkFilter: string | undefined,
-        index: number,
-        offset: number
+        requestKey: string,
+        offset: number,
+        signal: AbortSignal
     ): Promise<T[]> {
         const { sort, limit } = request
         const filter = withCursor(chunkFilter, request.cursor)
-        const requestKey = `${collectionName}:${index}`
         if (limit) {
             if (offset % limit === 0) {
                 const result = await pb
@@ -132,26 +165,26 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
                         skipTotal: true,
                         expand,
                         requestKey,
+                        signal,
                     })
                 return result.items as unknown as T[]
             }
-            // PocketBase clamps perPage to 1000, so a deep unaligned offset is
-            // served short. TanStack sends offset 0 or a cursor; this branch
-            // is a fallback only.
-            const result = await pb
-                .collection(collectionName)
-                .getList(1, offset + limit, { filter, sort, skipTotal: true, expand, requestKey })
+            const result = await pb.collection(collectionName).getList(1, offset + limit, {
+                filter,
+                sort,
+                skipTotal: true,
+                expand,
+                requestKey,
+                signal,
+            })
             return (result.items as unknown as T[]).slice(offset)
         }
         const items = await pb
             .collection(collectionName)
-            .getFullList({ filter, sort, expand, requestKey })
+            .getFullList({ filter, sort, expand, requestKey, signal })
         return (items as unknown as T[]).slice(offset)
     }
 
-    // Several chunks cannot skip rows each: every chunk fetches the window's
-    // full prefix (`offset + limit`, or every row with no limit) unsliced, and
-    // the live query re-sorts and re-windows the union.
     function chunkRequest(
         request: PbRequest,
         chunks: number
@@ -164,43 +197,58 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
 
     async function fetchItems(
         request: PbRequest,
-        heads: readonly BackRelationHead[]
-    ): Promise<T[]> {
-        const served = servedFromStore(request)
-        if (served) return served
+        heads: readonly BackRelationHead[],
+        refetch: boolean,
+        cancel: Cancel
+    ): Promise<Omit<FetchResult<T>, 'filings'>> {
+        const served = refetch ? undefined : servedFromStore(request)
+        if (served) return { rows: served, fromStore: true }
         // Give a same-tick parent fetch the chance to file this subset first.
         // Invariant: a fetch that registers pending filings never waits on
         // them, or two mutually back-related collections deadlock.
-        if (request.subset && request.subset.field !== 'id' && heads.length === 0) {
+        if (!refetch && request.subset && request.subset.field !== 'id' && heads.length === 0) {
             await awaitPendingFiling(request.subset.field)
             const servedAfterFiling = servedFromStore(request)
-            if (servedAfterFiling) return servedAfterFiling
+            if (servedAfterFiling) return { rows: servedAfterFiling, fromStore: true }
         }
         const filters = request.subset ? subsetFilters(request.subset) : [request.filter]
         const expand = deps.activeExpand(request)
         const chunk = chunkRequest(request, filters.length)
+        const load = ++requestSeq
         const pages = await Promise.all(
-            filters.map((chunkFilter, index) =>
-                fetchPage(chunk.request, expand, chunkFilter, index, chunk.offset)
-            )
+            filters.map((chunkFilter, index) => {
+                const requestKey = `${collectionName}:${load}:${index}`
+                cancel.keys.push(requestKey)
+                return fetchPage(
+                    chunk.request,
+                    expand,
+                    chunkFilter,
+                    requestKey,
+                    chunk.offset,
+                    cancel.controller.signal
+                )
+            })
         )
         const items = pages.flat()
         filer.markEmptyBackRelations(items, heads)
-        return items
+        return { rows: items, fromStore: false }
     }
 
-    function isAutoCancelled(error: unknown): boolean {
-        return (
-            deps.ignoreAutoCancellation &&
-            error instanceof Error &&
-            error.message.includes('autocancelled')
-        )
-    }
-
-    async function fetchRecords(request: PbRequest, queryKey: readonly unknown[]): Promise<T[]> {
-        const tracked = guard.trackFetch()
-        // Registered before the request goes out, and settled on every path,
-        // so a waiting target fetch is never left hanging.
+    // The SDK replaces `signal` with its own per-`requestKey` controller
+    // while auto-cancellation is on, and sends `signal` as given while it is
+    // off. An abort does both, so the request is cancelled either way.
+    async function fetchRecords(
+        request: PbRequest,
+        options: FetchOptions = {}
+    ): Promise<FetchResult<T>> {
+        const { signals = [] } = options
+        const aborted = () => signals.some(signal => signal.aborted)
+        const cancel: Cancel = { controller: new AbortController(), keys: [] }
+        const onAbort = () => {
+            cancel.controller.abort()
+            for (const key of cancel.keys) pb.cancelRequest(key)
+        }
+        for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true })
         let settleFiling: () => void = () => undefined
         const filed = new Promise<void>(resolve => {
             settleFiling = resolve
@@ -208,30 +256,36 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
         const heads = backRelationHeads(deps.activeExpand(request), relationTargets)
         const unregister = heads.map(({ target, field }) => target.expectFiling(field, filed))
         try {
-            let items: T[]
-            try {
-                items = await fetchItems(request, heads)
-            } catch (error) {
-                if (!isAutoCancelled(error)) throw error
-                // Superseded by a newer request. Resolve to this subset's own
-                // cached rows so its reconcile is a no-op; the base key's
-                // snapshot would reconcile foreign rows into the subset.
-                return guard.withRowsConfirmedMidFlight(
-                    queryClient.getQueryData<T[]>(queryKey) ?? [],
-                    tracked.confirmed
-                )
-            }
-            await filer.upsertExpanded(items, relationTargets)
-            return guard.withRowsConfirmedMidFlight(
-                stripFetchedRelations(items, deps.activeExpand(request)),
-                tracked.confirmed
+            if (aborted()) throw new FetchAbortedError(collectionName)
+            const result = await fetchItems(request, heads, options.refetch === true, cancel).catch(
+                error => {
+                    if (aborted()) throw new FetchAbortedError(collectionName)
+                    throw error
+                }
             )
+            if (aborted()) throw new FetchAbortedError(collectionName)
+            const filings = result.fromStore
+                ? NO_FILINGS
+                : await filer.fileExpanded(
+                      result.rows,
+                      relationTargets,
+                      splitPaths(deps.activeExpand(request))
+                  )
+            if (aborted()) {
+                filings.undo()
+                throw new FetchAbortedError(collectionName)
+            }
+            return {
+                rows: stripFetchedRelations(result.rows, deps.activeExpand(request)),
+                fromStore: result.fromStore,
+                filings,
+            }
         } finally {
-            tracked.done()
+            for (const signal of signals) signal.removeEventListener('abort', onAbort)
             settleFiling()
             for (const fn of unregister) fn()
         }
     }
 
-    return { fetchRecords, expectFiling }
+    return { fetchRecords, serveFromStore: servedFromStore, expectFiling }
 }

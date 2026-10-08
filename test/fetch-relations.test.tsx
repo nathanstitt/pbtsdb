@@ -1,5 +1,4 @@
 import { and, eq, inArray, materialize, useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,7 +9,6 @@ import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -22,7 +20,6 @@ import {
 import type { Schema } from './schema'
 
 describe('Fetch relations', () => {
-    let queryClient: QueryClient
     const testLogger = createTestLogger()
 
     beforeAll(async () => {
@@ -36,18 +33,16 @@ describe('Fetch relations', () => {
     })
 
     beforeEach(() => {
-        queryClient = createTestQueryClient()
         testLogger.clear()
     })
 
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
     describe('rows never carry expand', () => {
         it('files the expanded record and strips it from the stored and live rows', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -63,17 +58,10 @@ describe('Fetch relations', () => {
             await waitFor(() => expect(authors.has(row.author)).toBe(true))
             const stored = books.base.get(row.id) as { expand?: unknown } | undefined
             expect(stored?.expand).toBeUndefined()
-            const cached = queryClient
-                .getQueryCache()
-                .findAll({ queryKey: ['books'] })
-                .flatMap(
-                    query => (query.state.data as Array<{ expand?: unknown }> | undefined) ?? []
-                )
-            expect(cached.every(item => item.expand === undefined)).toBe(true)
         }, 15000)
 
         it('strips nested paths and files every level', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
             const metadata = c('book_metadata', {
@@ -94,7 +82,7 @@ describe('Fetch relations', () => {
         }, 15000)
 
         it('strips a realtime echo after filing its expanded records', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -131,7 +119,7 @@ describe('Fetch relations', () => {
             await client
                 .collection('users')
                 .authWithPassword(process.env.TEST_USER_EMAIL ?? '', process.env.TEST_USER_PW ?? '')
-            const c = createCollection<Schema>(client, queryClient, {
+            const c = createCollection<Schema>(client, {
                 subscribeOptions: () => ({ expand: 'author' }),
             })
             const books = c('books', { syncMode: 'on-demand' })
@@ -162,7 +150,7 @@ describe('Fetch relations', () => {
 
     describe('alwaysFetchRelations', () => {
         it('rejects an undeclared path at creation', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {})
             expect(() =>
                 // @ts-expect-error runtime check of an undeclared path
@@ -175,7 +163,7 @@ describe('Fetch relations', () => {
         })
 
         it('expands nested paths and upserts each level into its target', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
             const metadata = c('book_metadata', {
@@ -199,7 +187,7 @@ describe('Fetch relations', () => {
         }, 15000)
 
         it('exposes relation targets for nested validation', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {})
             const books = c('books', { relations: { author: authors } })
             expect(books.relationTargets?.author).toBe(authors)
@@ -209,7 +197,8 @@ describe('Fetch relations', () => {
 
     describe('query keys', () => {
         it('keys on-demand subsets by the PocketBase request', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const getList = vi.spyOn(pb.collection('books'), 'getList')
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {})
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -228,20 +217,17 @@ describe('Fetch relations', () => {
             )
             await waitForLoadFinish(result, 10000)
 
-            const keys = queryClient
-                .getQueryCache()
-                .findAll({ queryKey: ['books'] })
-                .map(query => query.queryKey)
-            expect(keys).toContainEqual([
-                'books',
-                { subset: { field: 'genre', values: ['Fiction'] }, sort: 'title', limit: 2 },
-            ])
+            expect(getList).toHaveBeenCalledWith(
+                1,
+                2,
+                expect.objectContaining({ filter: 'genre = "Fiction"', sort: 'title' })
+            )
         }, 15000)
     })
 
     describe('views (on-demand)', () => {
         function make() {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const tags = c('tags', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
@@ -279,7 +265,7 @@ describe('Fetch relations', () => {
         })
 
         it('returns the base when nothing is added beyond alwaysFetchRelations', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {})
             const books = c('books', {
                 relations: { author: authors },
@@ -330,7 +316,7 @@ describe('Fetch relations', () => {
 
         it('expands a nested path through the target collection', async () => {
             const { authors, books } = make()
-            const metadata = createCollection<Schema>(pb, queryClient)('book_metadata', {
+            const metadata = createCollection<Schema>(pb)('book_metadata', {
                 syncMode: 'on-demand',
                 relations: { book: books },
             })
@@ -360,6 +346,7 @@ describe('Fetch relations', () => {
         })
 
         it('keys a view fetch by its expand string', async () => {
+            const getFullList = vi.spyOn(pb.collection('books'), 'getFullList')
             const { books } = make()
             const view = books.fetchRelations('author')
             const { result } = renderHook(() =>
@@ -368,14 +355,9 @@ describe('Fetch relations', () => {
                 )
             )
             await waitForLoadFinish(result, 10000)
-            const keys = queryClient
-                .getQueryCache()
-                .findAll({ queryKey: ['books'] })
-                .map(query => query.queryKey)
-            expect(keys).toContainEqual([
-                'books',
-                { subset: { field: 'title', values: ['Animal Farm'] }, expand: 'author' },
-            ])
+            expect(getFullList).toHaveBeenCalledWith(
+                expect.objectContaining({ filter: 'title = "Animal Farm"', expand: 'author' })
+            )
         }, 15000)
 
         it('a mutation through a view is visible through the base immediately', async () => {
@@ -388,7 +370,7 @@ describe('Fetch relations', () => {
                 })
                 return book.id as string
             }
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
             const authorId = (await pb.collection('authors').getFirstListItem('')).id
@@ -425,7 +407,7 @@ describe('Fetch relations', () => {
         }, 20000)
 
         it('serializes overlapping restarts so two views created back-to-back leave one live subscription with the unioned expand', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const tags = c('tags', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
@@ -510,7 +492,7 @@ describe('Fetch relations', () => {
     describe('indexes', () => {
         it('orders with a limit on a view without the missing-index warning', async () => {
             const warn = vi.spyOn(console, 'warn')
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -533,7 +515,7 @@ describe('Fetch relations', () => {
         }, 15000)
 
         it('lets collectionOptions turn auto-indexing off', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const books = c('books', { collectionOptions: { autoIndex: 'off' } })
             expect(books.config.autoIndex).toBe('off')
         })
@@ -548,7 +530,7 @@ describe('Fetch relations', () => {
         const internals = (c: unknown) => c as Internals
 
         it('holds the target subscription while a view is live and releases it after', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -574,7 +556,7 @@ describe('Fetch relations', () => {
         }, 20000)
 
         it('holds every collection along a nested path', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
             const metadata = c('book_metadata', {
@@ -603,7 +585,7 @@ describe('Fetch relations', () => {
         }, 20000)
 
         it('union growth through the restart path adds targets without bouncing existing ones', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const tags = c('tags', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
@@ -684,7 +666,7 @@ describe('Fetch relations', () => {
         }, 30000)
 
         it('releases held targets when a restart subscribe fails', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const tags = c('tags', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
@@ -754,7 +736,7 @@ describe('Fetch relations', () => {
         }, 30000)
 
         it('re-holds targets after a throwing unsubscribe', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -817,7 +799,7 @@ describe('Fetch relations', () => {
         }, 30000)
 
         it('twenty mount/unmount cycles leave nothing held and balanced PocketBase calls', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
 
@@ -869,7 +851,7 @@ describe('Fetch relations', () => {
         }, 120000)
 
         it('lets a released target garbage collect', async () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', {
                 syncMode: 'on-demand',
                 collectionOptions: { gcTime: 50 },
@@ -894,7 +876,7 @@ describe('Fetch relations', () => {
         }, 20000)
 
         it('creating views holds nothing until one subscribes', () => {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const tags = c('tags', { syncMode: 'on-demand' })
             const books = c('books', { syncMode: 'on-demand', relations: { author: authors } })
@@ -943,7 +925,7 @@ describe('Fetch relations', () => {
         }
 
         function make(always: boolean) {
-            const c = createCollection<Schema>(pb, queryClient)
+            const c = createCollection<Schema>(pb)
             const authors = c('authors', { syncMode: 'on-demand' })
             const books = c('books', {
                 syncMode: 'on-demand',
@@ -1146,7 +1128,7 @@ describe('Fetch relations', () => {
 
         describe('loaded subsets', () => {
             function makeBooks() {
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const bookTags = c('book_tags', { syncMode: 'on-demand' })
                 const metadata = c('book_metadata', { syncMode: 'on-demand' })
                 const books = c('books', {
@@ -1308,9 +1290,10 @@ describe('Fetch relations', () => {
                 await waitFor(() => expect(bookTags.has(tagIds[0])).toBe(true))
                 const all = renderHook(() => useLiveQuery(q => q.from({ bt: bookTags })))
                 await waitForLoadFinish(all.result, 10000)
+                // Ledger rule 2: a row leaves only when its last ref goes, so the
+                // parent's filing ref goes first and the reload drops the last one.
+                parent.unmount()
 
-                // query-db-collection prunes a row when a refetch of the only
-                // query owning it no longer returns it; the prune deletes by key.
                 const records = pb.collection('book_tags')
                 const realGetFullList = records.getFullList.bind(records)
                 const getFullList = vi
@@ -1319,7 +1302,7 @@ describe('Fetch relations', () => {
                         const items = await realGetFullList(...args)
                         return items.filter(item => item.id !== tagIds[0]) as typeof items
                     })
-                await bookTags.utils.refetch()
+                await bookTags.reload()
                 await waitFor(() => expect(bookTags.base.has(tagIds[0])).toBe(false))
                 getFullList.mockRestore()
 
@@ -1416,7 +1399,7 @@ describe('Fetch relations', () => {
                     .items[0] as unknown as {
                     tag: string
                 }
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const bookTags = c('book_tags', { syncMode: 'on-demand' })
                 const tags = c('tags', {
                     syncMode: 'on-demand',
@@ -1449,7 +1432,7 @@ describe('Fetch relations', () => {
 
             it('serves a nested via path: the junction subset and its tags without requests', async () => {
                 const { bookId, tagIds } = await seededBookWithTags()
-                const c = createCollection<Schema>(pb, queryClient)
+                const c = createCollection<Schema>(pb)
                 const tags = c('tags', { syncMode: 'on-demand' })
                 const bookTags = c('book_tags', { syncMode: 'on-demand', relations: { tag: tags } })
                 const books = c('books', {

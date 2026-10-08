@@ -1,16 +1,14 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
@@ -28,8 +26,6 @@ import type { Books, Schema } from './schema'
  * can make the settled row right.
  */
 describe('built-in handlers land the server row before they settle', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -38,12 +34,7 @@ describe('built-in handlers land the server row before they settle', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -72,7 +63,7 @@ describe('built-in handlers land the server row before they settle', () => {
         })
 
     async function mountBooks(isbn: string) {
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })

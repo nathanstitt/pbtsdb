@@ -31,6 +31,12 @@ Full-list fetches past the default page size, and `limit` against on-demand coll
 
 ---
 
+#### `relation-filings.test.ts`
+Filed relation rows follow their parent rows: a filed row leaves the target when the last parent row filing it leaves the store, when a parent echo no longer expands it, or when a delete arrives on the hold's realtime topic.
+
+#### `held-targets.test.ts`
+Per-parent-row filing bookkeeping: hold filters follow the current filings, a row is released when its last parent stops filing it, and a back-relation filter stays while the parent is filed.
+
 #### `relations.test.ts`
 Joins through the TanStack DB join API, `relations` and `alwaysFetchRelations`, and filtering on relation fields.
 
@@ -42,12 +48,12 @@ Subquery includes with `findOne()` and `toArray()`, and reading a filed relation
 ---
 
 #### `mutations.test.ts`
-Built-in insert, update, and delete handlers, `omitOnInsert`, batched insert and delete, the write-back after a realtime echo, and the `refetchOnMutation` default.
+Built-in insert, update, and delete handlers, `omitOnInsert`, an insert then a delete of one row, the write-back after a realtime echo, and the `refetchOnMutation` default.
 
 ---
 
 #### `subscriptions.test.ts`
-Realtime create, update, and delete events, `writeBatch` handling, and subscription lifecycle tied to live queries.
+Realtime create, update, and delete events, several creates in quick succession, and subscription lifecycle tied to live queries.
 
 ---
 
@@ -97,8 +103,8 @@ Fetching and filing relations, stripping, views, held targets, keyed loads from 
 **`loaded subsets`**: a back-relation subset (`book_tags_via_book`) served from
 the store once the parent has filed it, one request when nothing filed it, a
 plain base query does not mark the subset, a second child
-(`book_metadata_via_book`), invalidation when a child row is pruned
-(`writeDelete`), invalidation when the target's realtime subscription stops,
+(`book_metadata_via_book`), invalidation when a child row is pruned,
+invalidation when the target's realtime subscription stops,
 cleanup clearing every mark, a back-relation filed by a different parent
 (`book_tags_via_tag`, from the tags collection), and a nested via path
 (`book_tags_via_book.tag`, junction subset and its tags both served without
@@ -112,12 +118,15 @@ Recognizing any single top-level field in `where` (`eq`, `in`, or an `or` of tho
 ---
 
 #### `expand-helpers.test.ts`
-Path helpers, plus `parseViaKey`, `markFiledSubset`, and `registerMarkInvalidationEvents`.
+Path helpers, plus `parseViaKey` and `markFiledSubset`.
 
 ---
 
-#### `tanstack-internals.test.ts`
-Pins the undocumented TanStack DB behaviours pbtsdb relies on: two behind per-query expand, the accepted synced rows (`_state.getAcceptedSyncedRow`, `acceptedSyncedEntries`) behind the write guard, and the cache write behind the ownership claim. If this fails after an upgrade, read the assertion message before touching anything else.
+#### `core-sync-adapter.test.ts`
+The core sync adapter end to end: a handler that calls `reload()`, `accept()` or `evict()` settles, a closed topic releases the rows only it held, and `reload()` evicts a topic-echoed row the server no longer returns.
+
+#### `tanstack-assumptions.test.ts`
+Pins the TanStack DB internals pbtsdb relies on: the live query calls `subscribeChanges` on the object passed to `from()` and hands that subscription to `loadSubset` (views), and `whenSyncAccepted`, marked `@internal` upstream, reads the acceptance receipt `commit()` attaches (accept, evict, reload). If this fails after an upgrade, read the assertion message before touching anything else.
 
 ---
 
@@ -133,7 +142,6 @@ Shared test utilities and helper functions.
 
 **Exports:**
 - `pb` - Configured PocketBase instance
-- `createTestQueryClient()` - Factory for QueryClient instances
 - `authenticateTestUser()` - Test user authentication
 - `clearAuth()` - Clear authentication state
 - `getTestSlug(prefix)` - Generate unique test slugs

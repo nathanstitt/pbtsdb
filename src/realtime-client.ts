@@ -10,12 +10,15 @@ export interface RealtimeEvent {
 
 export type RealtimeListener = (event: RealtimeEvent) => void
 
-/** What the client needs from an EventSource; the global one or a React Native polyfill. */
+/**
+ * What the client needs from an EventSource: the global one or a React
+ * Native polyfill. Errors are observed through `addEventListener('error')`,
+ * which every implementation has; `react-native-sse` has no `onerror`.
+ */
 export type EventSourceLike = {
     addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
     close(): void
-    onerror: ((ev: Event) => void) | null
 }
 
 export interface RealtimeClientDeps {
@@ -58,6 +61,16 @@ export interface RealtimeClient {
     clientId: () => string | undefined
     disconnect: () => void
     /**
+     * Closes the connection, forgets the server-side session and keeps the
+     * client closed: no connect happens until `enable()`. Registrations and
+     * listeners are kept, so `enable()` resumes every topic.
+     */
+    disable: () => void
+    /** Lifts `disable()` and connects at once if any topic is registered. */
+    enable: () => void
+    /** False while `disable()` is in effect. */
+    isEnabled: () => boolean
+    /**
      * Forgets the server-side session (client id, confirmed topics) and
      * reconnects at once if any topic is registered, posting the full list
      * under whatever auth the caller's `send` carries now. Call this after
@@ -65,6 +78,8 @@ export interface RealtimeClient {
      * cannot otherwise see, so the server does not keep serving the old
      * user's subscriptions. Registrations and listeners are kept; pending
      * `subscribe` calls settle once the new connection's POST completes.
+     * While `disable()` is in effect the session is forgotten but no
+     * connection opens.
      */
     reset: () => void
     /** @internal Simulates the live connection dropping, the way `onerror` would; tests use it. */
@@ -96,6 +111,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let everConnected = false
     /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
     let session = 0
+    let disabled = false
 
     function topics(): string[] {
         return [...listeners.keys()]
@@ -150,6 +166,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
      * pass instead of settling now, and the POST's own outcome is moot.
      */
     function requeueStale(pending: Waiter[]): void {
+        if (disabled) {
+            settleWaiters(pending)
+            return
+        }
         waiters = [...pending, ...waiters]
         resubmit = true
     }
@@ -250,6 +270,29 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         }
     }
 
+    // Forgets the server-side session and connects again under the current
+    // auth, unless disabled. `everConnected` is kept: the connection after a
+    // reset or a re-enable is a reconnect, so every ready collection reloads.
+    function forgetSession(): void {
+        if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+        source?.close()
+        source = undefined
+        connected = false
+        confirmed = []
+        clientId = undefined
+        lastSeq = undefined
+        attempts = 0
+        session += 1
+        if (listeners.size > 0) {
+            try {
+                connect()
+            } catch (error) {
+                logger.error('Failed to reconnect after reset', { error })
+            }
+        }
+    }
+
     function scheduleReconnect(): void {
         const delay = backoff[Math.min(attempts, backoff.length - 1)] ?? 0
         attempts += 1
@@ -267,11 +310,11 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     }
 
     function connect(): void {
-        if (source) return
+        if (source || disabled) return
         const previousId = clientId
         const target = openSource(connectUrl())
         source = target
-        target.onerror = () => handleConnectionLost(target)
+        target.addEventListener('error', () => handleConnectionLost(target))
         target.addEventListener('PB_CONNECT', (ev: Event) => {
             if (source !== target) return
             const message = ev as MessageEvent
@@ -291,18 +334,19 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                 confirmed = []
             }
             attachAll(target)
+            // Set on connect, not after the POST: a reset() while the first
+            // POST is in flight replaces `source`, and the connection it opens
+            // must still count as a reconnect so the gap is reloaded.
             const isReconnect = everConnected
+            everConnected = true
             submit().then(
                 () => {
                     if (source !== target) return
                     attempts = 0
                     if (isReconnect) deps.onReconnect?.(resumed)
-                    everConnected = true
                 },
                 () => {
-                    if (source !== target) return
-                    everConnected = true
-                    if (!isReconnect) return
+                    if (source !== target || !isReconnect) return
                     close(false)
                     scheduleReconnect()
                 }
@@ -330,7 +374,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             }
             set.add(listener)
             if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
-            const ready = submit()
+            // While disabled nothing can confirm a topic; the registration
+            // goes out with the first POST after enable(). Resolving now lets
+            // the caller open and close entries, so idle cleanup still runs.
+            const ready = disabled ? Promise.resolve() : submit()
             const unsubscribe = async () => {
                 const current = listeners.get(topic)
                 if (!current?.delete(listener)) return
@@ -375,24 +422,22 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         simulateDisconnect() {
             if (source) handleConnectionLost(source)
         },
-        reset() {
-            if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
-            reconnectTimer = undefined
-            source?.close()
-            source = undefined
-            connected = false
-            confirmed = []
-            clientId = undefined
-            lastSeq = undefined
-            attempts = 0
-            session += 1
-            if (listeners.size > 0) {
-                try {
-                    connect()
-                } catch (error) {
-                    logger.error('Failed to reconnect after reset', { error })
-                }
-            }
+        reset: forgetSession,
+        // Pending subscribes settle: their topics are registered and go out
+        // with the first POST after enable(), the same as a subscribe made
+        // while disabled.
+        disable() {
+            disabled = true
+            forgetSession()
+            const pending = waiters
+            waiters = []
+            settleWaiters(pending)
         },
+        enable() {
+            if (!disabled) return
+            disabled = false
+            if (listeners.size > 0) connect()
+        },
+        isEnabled: () => !disabled,
     }
 }

@@ -6,9 +6,9 @@ import {
     RealtimeTopicTooLongError,
 } from '../src/realtime-client'
 
+// Like react-native-sse: errors reach listeners only, there is no `onerror`.
 class FakeEventSource implements EventSourceLike {
     static instances: FakeEventSource[] = []
-    onerror: ((ev: Event) => void) | null = null
     closed = false
     private listeners = new Map<string, Set<(ev: MessageEvent) => void>>()
 
@@ -41,7 +41,9 @@ class FakeEventSource implements EventSourceLike {
     }
 
     fail(): void {
-        this.onerror?.(new Event('error'))
+        for (const listener of this.listeners.get('error') ?? []) {
+            listener(new Event('error') as MessageEvent)
+        }
     }
 }
 
@@ -695,6 +697,115 @@ describe('realtime client', () => {
         await pending
         expect(pendingSettled).toBe(true)
         expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
+    })
+
+    it('reset while the first POST is in flight still reports a reload from the new connection', async () => {
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const reconnects: boolean[] = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                sent.push(body)
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const firstSource = FakeEventSource.instances.at(-1)
+        if (!firstSource) throw new Error('no EventSource opened')
+        firstSource.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        expect(sent).toHaveLength(1)
+
+        client.reset()
+        gate.shift()?.()
+        await flush()
+        expect(reconnects).toEqual([])
+
+        const second = FakeEventSource.instances.at(-1)
+        if (!second || second === firstSource) throw new Error('no second EventSource opened')
+        second.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await flush()
+        gate.shift()?.()
+        await sub
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+        expect(reconnects).toEqual([false])
+    })
+
+    it('disable closes the connection and blocks connects until enable, which resumes every topic as a reconnect', async () => {
+        const { client, sent, reconnects, connect } = setup()
+        const sub = client.subscribe('t1', () => undefined)
+        await flush()
+        const first = connect('client-1')
+        await sub
+        expect(sent).toHaveLength(1)
+
+        client.disable()
+        expect(first.closed).toBe(true)
+        expect(client.isConnected()).toBe(false)
+        expect(client.clientId()).toBeUndefined()
+        expect(client.topics()).toEqual(['t1'])
+
+        const pending = client.subscribe('t2', () => undefined)
+        client.reset()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(1)
+
+        client.enable()
+        await flush()
+        expect(FakeEventSource.instances).toHaveLength(2)
+        connect('client-2')
+        await flush()
+        await pending
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
+        expect(reconnects).toEqual([false])
+    })
+
+    it('a subscribe while disabled resolves at once and goes out with the first POST after enable', async () => {
+        const { client, sent, connect } = setup()
+        client.disable()
+        const unsubscribe = await client.subscribe('t1', () => undefined)
+        expect(FakeEventSource.instances).toHaveLength(0)
+        expect(sent).toEqual([])
+        await unsubscribe()
+        expect(client.topics()).toEqual([])
+
+        await client.subscribe('t2', () => undefined)
+        client.enable()
+        await flush()
+        connect('client-1')
+        await flush()
+        expect(sent.at(-1)).toEqual({ clientId: 'client-1', subscriptions: ['t2'] })
+    })
+
+    it('a subscribe whose POST is in flight when disable() runs settles when that POST returns', async () => {
+        FakeEventSource.instances = []
+        const gate: Array<() => void> = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => {
+                await new Promise<void>(resolve => gate.push(resolve))
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: [0],
+        })
+        const pending = client.subscribe('t1', () => undefined)
+        await flush()
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await flush()
+        client.disable()
+        gate.shift()?.()
+        await pending
+        expect(client.topics()).toEqual(['t1'])
+        expect(client.isConnected()).toBe(false)
     })
 
     it('reset with no topics registered opens no connection', async () => {

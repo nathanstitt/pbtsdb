@@ -1,120 +1,77 @@
-import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 import { createSyncedStore, type SyncChannel } from '../src/synced-store'
 
 type Row = { id: string; name: string }
-type Message = Parameters<SyncChannel<Row>['write']>[0]
 
-// A sync session that records each transaction against an in-memory store.
-function fakeSession(initial: Row[] = []) {
-    const rows = new Map(initial.map(row => [row.id, row]))
-    const committed: Message[][] = []
-    let open: Message[] | undefined
+function fakeChannel() {
+    const log: string[] = []
     const channel: SyncChannel<Row> = {
         begin: () => {
-            open = []
+            log.push('begin')
         },
         write: message => {
-            open?.push(message)
-            if ('key' in message) rows.delete(String(message.key))
-            else rows.set(message.value.id, message.value)
+            log.push(
+                'key' in message
+                    ? `delete:${String(message.key)}`
+                    : `${message.type}:${message.value.id}`
+            )
         },
         commit: signal => {
-            if (!signal?.aborted && open) committed.push(open)
-            open = undefined
+            log.push(signal?.aborted ? 'commit:aborted' : 'commit')
             return true
         },
     }
-    return { rows, committed, channel }
+    return { channel, log }
 }
 
-function storeFor(session: ReturnType<typeof fakeSession>, queryClient = new QueryClient()) {
-    const store = createSyncedStore<Row>({
-        collectionName: 'rows',
-        queryClient,
-        acceptedRow: id => session.rows.get(id),
-    })
-    store.attach(session.channel)
-    return store
-}
-
-describe('createSyncedStore', () => {
-    it('writes nothing without a sync session', () => {
-        const session = fakeSession()
-        const store = storeFor(session)
-        store.detach(session.channel)
-        expect(store.apply([{ id: 'a', name: 'A' }])).toBe(false)
-        expect(session.committed).toEqual([])
+describe('synced store', () => {
+    it('writes nothing and returns false with no session', () => {
+        const store = createSyncedStore<Row>('rows')
+        expect(store.transact([{ type: 'insert', value: { id: 'a', name: 'A' } }])).toBe(false)
+        expect(store.isAttached()).toBe(false)
     })
 
-    it('inserts an absent row and updates a present one in one transaction', () => {
-        const session = fakeSession([{ id: 'a', name: 'old' }])
-        const store = storeFor(session)
-        expect(
-            store.apply([
-                { id: 'a', name: 'new' },
-                { id: 'b', name: 'B' },
-            ])
-        ).toBe(true)
-        expect(session.committed).toHaveLength(1)
-        expect(session.committed[0].map(message => message.type)).toEqual(['update', 'insert'])
-    })
-
-    it('writes a copy of each row', () => {
-        const session = fakeSession()
-        const store = storeFor(session)
-        const row = { id: 'a', name: 'A' }
-        store.apply([row])
-        row.name = 'changed by the caller'
-        expect(session.rows.get('a')).toEqual({ id: 'a', name: 'A' })
-    })
-
-    it('skips a delete of an absent row but still removes it from cached results', () => {
-        const session = fakeSession([{ id: 'a', name: 'A' }])
-        const queryClient = new QueryClient()
-        queryClient.setQueryData(['rows', { filter: 'x' }], [{ id: 'gone', name: 'G' }])
-        const store = storeFor(session, queryClient)
-        expect(store.apply([], ['gone'])).toBe(true)
-        expect(session.committed).toEqual([])
-        expect(queryClient.getQueryData(['rows', { filter: 'x' }])).toEqual([])
-    })
-
-    it('claims written rows in every cached query of the collection', () => {
-        const session = fakeSession([{ id: 'a', name: 'A' }])
-        const queryClient = new QueryClient()
-        queryClient.setQueryData(['rows'], [{ id: 'a', name: 'A' }])
-        queryClient.setQueryData(['rows', { filter: 'y' }], [])
-        queryClient.setQueryData(['other'], [{ id: 'a', name: 'A' }])
-        const store = storeFor(session, queryClient)
-        store.apply(
-            [
-                { id: 'a', name: 'A2' },
-                { id: 'b', name: 'B' },
-            ],
-            []
-        )
-        expect(queryClient.getQueryData(['rows'])).toEqual([
-            { id: 'a', name: 'A2' },
-            { id: 'b', name: 'B' },
+    it('wraps the writes in one begin/commit', () => {
+        const store = createSyncedStore<Row>('rows')
+        const { channel, log } = fakeChannel()
+        store.attach(channel)
+        const receipt = store.transact([
+            { type: 'insert', value: { id: 'a', name: 'A' } },
+            { type: 'update', value: { id: 'b', name: 'B' } },
+            { type: 'delete', key: 'c' },
         ])
-        expect(queryClient.getQueryData(['rows', { filter: 'y' }])).toEqual([
-            { id: 'a', name: 'A2' },
-            { id: 'b', name: 'B' },
-        ])
-        expect(queryClient.getQueryData(['other'])).toEqual([{ id: 'a', name: 'A' }])
+        expect(receipt).toBe(true)
+        expect(log).toEqual(['begin', 'insert:a', 'update:b', 'delete:c', 'commit'])
     })
 
-    it('cancels the transaction when a write throws', () => {
-        const session = fakeSession()
-        const failing: SyncChannel<Row> = {
-            ...session.channel,
-            write: () => {
-                throw new Error('rejected')
-            },
+    it('skips the transaction for an empty write list', () => {
+        const store = createSyncedStore<Row>('rows')
+        const { channel, log } = fakeChannel()
+        store.attach(channel)
+        expect(store.transact([])).toBe(true)
+        expect(log).toEqual([])
+    })
+
+    it('aborts the transaction when a write throws, then rethrows', () => {
+        const store = createSyncedStore<Row>('rows')
+        const { channel, log } = fakeChannel()
+        channel.write = () => {
+            throw new Error('boom')
         }
-        const store = storeFor(session)
-        store.attach(failing)
-        expect(() => store.apply([{ id: 'a', name: 'A' }])).toThrow('rejected')
-        expect(session.committed).toEqual([])
+        store.attach(channel)
+        expect(() => store.transact([{ type: 'delete', key: 'x' }])).toThrow('sync write failed')
+        expect(log).toEqual(['begin', 'commit:aborted'])
+    })
+
+    it('detach forgets only the attached channel', () => {
+        const store = createSyncedStore<Row>('rows')
+        const first = fakeChannel()
+        const second = fakeChannel()
+        store.attach(first.channel)
+        store.attach(second.channel)
+        store.detach(first.channel)
+        expect(store.isAttached()).toBe(true)
+        store.detach(second.channel)
+        expect(store.isAttached()).toBe(false)
     })
 })

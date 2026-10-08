@@ -140,8 +140,8 @@ export type RelationAsCollection<T> =
 export interface RelationTarget {
     /** Relation targets of this collection, for nested expand paths. */
     readonly relationTargets: Record<string, RelationTarget> | undefined
-    /** Upsert filed rows into the store. False when the store cannot take them yet. */
-    writeFiled: (records: object[]) => Promise<boolean>
+    /** Upsert filed rows into the store for `holder`, a parent's token. False when the store cannot take them yet. */
+    writeFiled: (records: object[], holder: object) => Promise<boolean>
     /**
      * A parent's fetch may file and mark `field` once `settles` resolves; the
      * target's own fetch for that subset waits for it (see docs/internals.md,
@@ -150,11 +150,16 @@ export interface RelationTarget {
     expectFiling: (field: string, settles: Promise<void>) => () => void
     /** Record that every row with `field === value` is now in this collection's store. */
     markSubsetLoaded: (field: string, value: string) => void
+    /** Release rows `holder` filed that no parent row files any more. */
+    releaseFiled: (ids: readonly string[], holder: object) => void
+    /** Whether a `writeFiled` would land within the current task: the store is syncing and ready. */
+    isReady: () => boolean
     /**
-     * Hold this collection live for a parent, with the filters covering the
-     * rows the parent filed here (query mode only).
+     * Hold this collection live for a parent identified by `holder`, with the
+     * filters covering the rows the parent filed here (query mode only).
+     * Releasing the hold releases every row filed under `holder`.
      */
-    holdLive: () => HeldTarget
+    holdLive: (holder: object) => HeldTarget
 }
 
 /**
@@ -270,7 +275,7 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Allow inserting without created, updated (server-generated timestamps)
-     * const booksCollection = createCollection<Schema>(pb, queryClient)('books', {
+     * const booksCollection = createCollection<Schema>(pb)('books', {
      *     omitOnInsert: ['created', 'updated'] as const
      * });
      *
@@ -300,22 +305,21 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onInsert: async ({ transaction }) => {
      *         const created = await Promise.all(
      *             transaction.mutations.map(mutation => customInsertLogic(mutation.modified))
      *         );
      *         // Land the server rows before the optimistic state drops
-     *         await collection.utils.writeUpsert(created);
-     *         return { refetch: false };
+     *         await collection.accept(created);
      *     }
      * });
      *
      * // Disable inserts (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onInsert: false
      * });
      * ```
@@ -335,10 +339,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onUpdate: async ({ transaction }) => {
      *         const updated = await Promise.all(
      *             transaction.mutations.map(mutation =>
@@ -346,13 +350,12 @@ export interface CreateCollectionOptions<
      *             )
      *         );
      *         // Land the server rows before the optimistic state drops
-     *         await collection.utils.writeUpsert(updated);
-     *         return { refetch: false };
+     *         await collection.accept(updated);
      *     }
      * });
      *
      * // Disable updates (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onUpdate: false
      * });
      * ```
@@ -371,21 +374,20 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Use default automatic handler (recommended)
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // Custom handler
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: async ({ transaction }) => {
      *         const ids = transaction.mutations.map(mutation => mutation.original.id);
      *         await Promise.all(ids.map(id => customDeleteLogic(id)));
      *         // Remove the rows before the optimistic state drops
-     *         await collection.utils.writeDelete(ids);
-     *         return { refetch: false };
+     *         await collection.evict(ids);
      *     }
      * });
      *
      * // Disable deletes (read-only collection)
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     onDelete: false
      * });
      * ```
@@ -393,7 +395,7 @@ export interface CreateCollectionOptions<
     onDelete?: DeleteMutationFn<ExtractRecordType<Schema, CollectionName>> | false
 
     /**
-     * If true, the built-in handlers refetch the collection's active queries
+     * If true, the built-in handlers reload the collection's live subsets
      * after a successful insert, update, or delete, before the mutation
      * settles. Defaults to false: the built-in handlers write the server
      * response into the synced layer before they settle, and the realtime
@@ -401,15 +403,16 @@ export interface CreateCollectionOptions<
      * hook changes rows you must read right after the mutation.
      *
      * Only affects the built-in default handlers. A custom
-     * onInsert/onUpdate/onDelete should write the server response with
-     * `collection.utils.writeUpsert` before it returns and return
-     * `{ refetch: false }`; see the README, "Mutations and Refetch".
+     * onInsert/onUpdate should land the server response with
+     * `await collection.accept(rows)` before it returns, and a custom
+     * onDelete should `await collection.evict(ids)`. A custom handler that
+     * needs a refetch can call `await collection.reload()` instead.
      *
      * @default false
      *
      * @example
      * ```ts
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     refetchOnMutation: true,
      * });
      * ```
@@ -432,10 +435,10 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * // Default: eager mode - client-side filtering
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
+     * const collection = createCollection<Schema>(pb)('books');
      *
      * // On-demand mode - server-side filtering
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     syncMode: 'on-demand'
      * });
      * ```
@@ -457,7 +460,7 @@ export interface CreateCollectionOptions<
      *
      * @example
      * ```ts
-     * const books = createCollection<Schema>(pb, queryClient)('books', {
+     * const books = createCollection<Schema>(pb)('books', {
      *     syncMode: 'on-demand',
      *     realtime: 'query',
      * });
@@ -466,34 +469,39 @@ export interface CreateCollectionOptions<
     realtime?: RealtimeMode
 
     /**
-     * Whether to ignore PocketBase auto-cancellation errors.
+     * How long, in milliseconds, an on-demand subset stays loaded after its
+     * last live query unsubscribes. A query with an equal request that mounts
+     * within the window reuses the rows with no request; realtime keeps them
+     * fresh meanwhile. Rows a parent filed through a relation follow the
+     * same window, and so does the accepted holder a mutation write-back or
+     * `accept()` gives a row. `0` releases a subset as soon as it unloads
+     * and keeps an accepted row until a reload or idle. A `reload()`
+     * releases every waiting subset.
      *
-     * PocketBase automatically cancels pending requests when a new request is made
-     * to the same endpoint. This can throw ClientResponseError with a message
-     * containing "autocancelled". When this option is true, such errors are
-     * silently ignored and the existing cached data is returned for the cancelled request.
-     *
-     * @default true
-     *
-     * @example
-     * ```ts
-     * // Default: auto-cancellation errors are ignored
-     * const collection = createCollection<Schema>(pb, queryClient)('books');
-     *
-     * // Explicitly handle auto-cancellation errors
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
-     *     ignoreAutoCancellation: false
-     * });
-     * ```
+     * @default 5000
      */
-    ignoreAutoCancellation?: boolean
+    subsetGcTime?: number
+
+    /**
+     * Waits, in milliseconds, before each retry of a failed subset or eager
+     * load. The last delay repeats until the load succeeds, so a live query
+     * stays loading through an outage instead of entering an error state it
+     * cannot leave; a `reload()` or a realtime reconnect retries at once. A
+     * response the server gave on purpose (a 4xx other than 401, 408 or
+     * 429) is not retried and reports its error; a 401 waits for the next
+     * auth change. Each delay carries up to a quarter of jitter either way.
+     * `[]` disables retries.
+     *
+     * @default [1000, 2000, 4000, 8000, 15000, 30000]
+     */
+    loadRetryDelays?: readonly number[]
 
     /**
      * Additional options passed directly to the underlying TanStack DB collection.
      * Use this to configure indexing, garbage collection, comparison functions,
      * and any other TanStack DB collection options not explicitly exposed by pbtsdb.
      *
-     * Options set here are spread into the `queryCollectionOptions()` call.
+     * Options set here are spread into the TanStack DB `createCollection()` call.
      * Fields managed by pbtsdb (`getKey`, `syncMode`, `onInsert`, `onUpdate`,
      * `onDelete`, `schema`, `utils`) are excluded from the type.
      *
@@ -503,7 +511,7 @@ export interface CreateCollectionOptions<
      * @example
      * ```ts
      * import { BasicIndex } from 'pbtsdb'
-     * const collection = createCollection<Schema>(pb, queryClient)('books', {
+     * const collection = createCollection<Schema>(pb)('books', {
      *     collectionOptions: {
      *         autoIndex: 'off',
      *         gcTime: 60000,

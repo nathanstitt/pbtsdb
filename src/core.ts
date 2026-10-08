@@ -23,6 +23,7 @@ export {
     toArray,
 } from '@tanstack/db'
 export type { RecordSubscribeOptions } from 'pocketbase'
+export type { PbCollectionUtils } from './build-collection'
 export {
     type CreateCollectionFactoryOptions,
     createCollection,
@@ -31,7 +32,7 @@ export {
 } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
-export { resetRealtime } from './transport'
+export { disconnectRealtime, resetRealtime } from './transport'
 export type {
     CreateCollectionOptions,
     ExcludeUndefined,

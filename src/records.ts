@@ -6,6 +6,11 @@ export function idOf(value: unknown): string | undefined {
     return typeof value.id === 'string' ? value.id : undefined
 }
 
+/** The ids of `rows`, skipping rows without one. */
+export function idsOf(rows: readonly unknown[]): string[] {
+    return rows.map(idOf).filter((id): id is string => id !== undefined)
+}
+
 export function updatedAtOf(value: unknown): string | undefined {
     if (!value || typeof value !== 'object' || !('updated' in value)) return undefined
     return typeof value.updated === 'string' && value.updated !== '' ? value.updated : undefined

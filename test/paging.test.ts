@@ -6,15 +6,13 @@ import {
     materialize,
     useLiveQuery,
 } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import { realtimeClientFor } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
-    createTestQueryClient,
     getTestSlug,
     pb,
     topicFilter,
@@ -27,7 +25,6 @@ import type { Schema } from './schema'
 const COUNT = 25
 
 describe('paging', () => {
-    let queryClient: QueryClient
     let authorId = ''
     let authorName = ''
     const bookIds: string[] = []
@@ -66,17 +63,12 @@ describe('paging', () => {
         clearAuth()
     }, 60000)
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
     function make() {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
         const authors = c('authors', { syncMode: 'on-demand', realtime: 'query' })
         const books = c('books', {
             syncMode: 'on-demand',

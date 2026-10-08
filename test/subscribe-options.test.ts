@@ -1,17 +1,10 @@
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import PocketBase from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { createCollection } from '../src'
-import {
-    authenticateTestUser,
-    clearAuth,
-    createTestQueryClient,
-    pb,
-    waitForLoadFinish,
-} from './helpers'
+import { authenticateTestUser, clearAuth, pb, waitForLoadFinish } from './helpers'
 import type { Schema } from './schema'
 
 const TOKEN_HEADER = 'X-Test-Token'
@@ -37,7 +30,6 @@ async function createGatedRecord(title: string) {
 }
 
 describe('Collection - subscribe options', () => {
-    let queryClient: QueryClient
     const createdIds: string[] = []
 
     beforeAll(async () => {
@@ -55,17 +47,9 @@ describe('Collection - subscribe options', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('forwards subscribeOptions headers so a gated rule authorizes the subscription', async () => {
         const client = createAnonymousClient()
-        const collection = createCollection<Schema>(client, queryClient, {
+        const collection = createCollection<Schema>(client, {
             subscribeOptions: () => ({ headers: { [TOKEN_HEADER]: VALID_TOKEN } }),
         })('token_gated', { syncMode: 'eager' })
 
@@ -83,7 +67,7 @@ describe('Collection - subscribe options', () => {
 
     it('does not receive gated events when no subscribeOptions are supplied', async () => {
         const client = createAnonymousClient()
-        const collection = createCollection<Schema>(client, queryClient)('token_gated', {
+        const collection = createCollection<Schema>(client)('token_gated', {
             syncMode: 'eager',
         })
 
@@ -105,7 +89,7 @@ describe('Collection - subscribe options', () => {
         const tokens: string[] = []
         let currentToken = 'stale-token'
 
-        const collection = createCollection<Schema>(client, queryClient, {
+        const collection = createCollection<Schema>(client, {
             subscribeOptions: () => {
                 tokens.push(currentToken)
                 return { headers: { [TOKEN_HEADER]: currentToken } }
@@ -142,7 +126,7 @@ describe('Collection - subscribe options', () => {
 
     it('treats a subscribeOptions getter returning undefined as a no-op', async () => {
         let callCount = 0
-        const collection = createCollection<Schema>(pb, queryClient, {
+        const collection = createCollection<Schema>(pb, {
             subscribeOptions: () => {
                 callCount += 1
                 return undefined
@@ -159,7 +143,7 @@ describe('Collection - subscribe options', () => {
     }, 20000)
 
     it('subscribes normally when no factory options are given', async () => {
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'eager',
         })
 

@@ -1,13 +1,12 @@
 # pbtsdb: PocketBase TanStack Database Integration
 
-> Type-safe PocketBase integration with TanStack Query and TanStack DB
+> Type-safe PocketBase integration with TanStack DB
 
-A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.io) with [TanStack Query](https://tanstack.com/query) and [TanStack DB](https://tanstack.com/db), providing:
+A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.io) with [TanStack DB](https://tanstack.com/db), providing:
 
 - 🔥 **Real-time subscriptions** with automatic synchronization
 - 🎯 **Full TypeScript type safety** for queries and relations
 - ⚡ **Reactive collections** with TanStack DB
-- 🔄 **Automatic caching** via TanStack Query
 - ✨ **Optimistic mutations** with insert/update/delete support
 - 🎨 **React hooks** for easy component integration
 - 🔗 **Type-safe joins** and relation fetching into their own collections
@@ -32,15 +31,13 @@ A TypeScript library that seamlessly integrates [PocketBase](https://pocketbase.
 ## Installation
 
 ```bash
-npm install pbtsdb pocketbase @tanstack/db @tanstack/query-db-collection @tanstack/react-query @tanstack/react-db
+npm install pbtsdb pocketbase @tanstack/db @tanstack/react-db
 ```
 
 ### Peer Dependencies
 
 - `pocketbase` >= 0.22.0
 - `@tanstack/db` >= 0.12.1
-- `@tanstack/query-db-collection` >= 1.4.0
-- `@tanstack/react-query` >= 5.0.0
 - `@tanstack/react-db` >= 0.5.5 (optional; only for `createReactProvider`)
 - `react` and `react-dom` >= 18.0.0 (optional)
 
@@ -110,18 +107,12 @@ type BlogSchema = {
 ```typescript
 // app.tsx
 import PocketBase from 'pocketbase';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createCollection, createReactProvider } from 'pbtsdb';
 
 const pb = new PocketBase('http://localhost:8090');
-const queryClient = new QueryClient({
-    defaultOptions: {
-        queries: { staleTime: 60_000 } // Cache for 1 minute
-    }
-});
 
 // Create collections with automatic type inference
-const c = createCollection<BlogSchema>(pb, queryClient);
+const c = createCollection<BlogSchema>(pb);
 const users = c('users', {});
 export const { Provider, useStore } = createReactProvider({
     users,
@@ -139,11 +130,9 @@ export const { Provider, useStore } = createReactProvider({
 
 export function App() {
     return (
-        <QueryClientProvider client={queryClient}>
-            <Provider>
-                <BlogDashboard />
-            </Provider>
-        </QueryClientProvider>
+        <Provider>
+            <BlogDashboard />
+        </Provider>
     );
 }
 ```
@@ -253,14 +242,13 @@ Collections are reactive data stores that automatically sync with PocketBase:
 
 ```typescript
 // Create a collection using the curried API
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const booksCollection = c('books', {});
 
 // Collections automatically:
 // - Fetch data from PocketBase
 // - Subscribe to real-time updates
 // - Update React components when data changes
-// - Cache data via TanStack Query
 ```
 
 ### Real-time Subscriptions
@@ -269,7 +257,7 @@ Collections manage subscriptions **automatically** based on query lifecycle:
 
 ```typescript
 // Collections are lazy - no subscription until queried
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const booksCollection = c('books', {});
 
 // Subscription starts automatically when query becomes active
@@ -290,16 +278,26 @@ const { data } = useLiveQuery((q) =>
 
 pbtsdb runs its own realtime connection. When the connection drops, it reconnects with backoff and refetches every live query, because PocketBase does not replay events missed during the gap. A server that supports pbtsdb's resume extension (`?resume=<clientId>&after=<seq>` on the SSE URL, `resumed: true` in `PB_CONNECT`, `seq` on each event) replays the gap instead, and no refetch runs.
 
-Call `resetRealtime(pb)` after an auth change the connection cannot see on its own — login, logout, or switching users. pbtsdb's connection is independent of `pb.realtime`, so changing `pb`'s auth token does not by itself tell the server anything, and if the subscribed topics haven't changed, pbtsdb would otherwise send no POST at all and keep serving the previous user's data:
+pbtsdb's connection is independent of `pb.realtime`. When `pb.authStore` changes to another auth record (login, logout, switching users), pbtsdb forgets the connection's server-side session and reconnects at once, re-sending every subscribed topic under the new auth; every ready collection reloads once that POST succeeds, the same as a non-resumed reconnect. A token refresh for the same record changes nothing. PocketBase would otherwise answer the next subscriptions POST with a 403, or keep serving the previous user's data.
+
+Call `resetRealtime(pb)` yourself for a change the auth store cannot see, such as pointing `pb` at another server:
 
 ```typescript
-import { resetRealtime } from 'pbtsdb';
+import { disconnectRealtime, resetRealtime } from 'pbtsdb';
 
-await pb.collection('users').authWithPassword(email, password);
-resetRealtime(pb); // re-subscribes every open topic under the new auth
+resetRealtime(pb); // forget the session and re-subscribe every open topic now
+
+disconnectRealtime(pb); // close the connection and keep it closed
+resetRealtime(pb); // open it again; every ready collection reloads
 ```
 
-This forgets the connection's server-side session and reconnects at once, re-sending every currently subscribed topic under whatever auth `pb` carries now; every ready collection refetches once that POST succeeds, the same as a non-resumed reconnect.
+`disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
+
+### Subset Lifetime
+
+In on-demand mode a live query's subset is released when the last subscriber unmounts, after a grace window of `subsetGcTime` milliseconds (default 5000). A query with an equal request that mounts within the window reuses the rows with no request. Realtime keeps the parked rows fresh, and rows a parent filed through a relation stay for the same window, so a panel that mounts and unmounts quickly costs no refetch. `collection.reload()` releases every parked subset. An auth change releases every waiting subset and every accepted row at once and reloads every live subset under the new auth, whether or not realtime is connected, so a load right after a logout never reuses the previous user's rows and the order of `authStore.clear()` and `disconnectRealtime(pb)` does not matter. Set `subsetGcTime: 0` to release a subset as soon as it unloads; `0` also keeps accepted rows until a reload or idle instead of expiring them.
+
+A subset load that fails is retried with backoff (`loadRetryDelays`, default 1, 2, 4, 8, 15 and then every 30 seconds) until it succeeds, so a live query stays loading through an outage instead of entering an error state it cannot leave. A `collection.reload()` or a realtime reconnect retries at once, also while another reload is running. A response the server gave on purpose, a 4xx other than 401, 408 or 429, is not retried and reports its error. A 401 waits for the next auth change and then retries. Delays carry a little jitter so many queries do not retry in lockstep.
 
 ### Sync Modes
 
@@ -356,12 +354,23 @@ const collection = c('books', {
 });
 ```
 
-The option only affects the built-in default handlers. A custom `onInsert`, `onUpdate`, or `onDelete` controls refetch and write-back itself:
+The option only affects the built-in default handlers. A custom `onInsert`, `onUpdate`, or `onDelete` controls write-back itself:
 
-- TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back. To prevent that gap, `await collection.utils.writeUpsert(serverRows)` (or `writeDelete(ids)`) before you return.
-- Return `{ refetch: false }`. A handler that returns anything else makes `@tanstack/query-db-collection` refetch after it settles and log a deprecation warning; TanStack removes that automatic refetch in v1.0. To refetch, `await collection.utils.refetch()` in the handler.
+- TanStack DB drops the optimistic state when your handler returns. Until the realtime echo arrives, the row shows its previous server value: an updated row reverts, an inserted row disappears, and a deleted row comes back.
+- For an insert or an update, `await collection.accept(serverRows)` before you return. This closes the gap.
+- For a delete, `await collection.evict(ids)` before you return. Without it, the deleted row shows again until the delete echo arrives.
+- In on-demand mode, when realtime goes idle (no live query on the collection), rows held only by an accepted write-back are released. A row written back while nothing is mounted is fetched again on the next mount.
+- The handler returns `void`. Core no longer reads a `{ refetch }` result; call `collection.reload()` yourself if the handler needs a refetch.
 
-`collection.utils.writeInsert`, `writeUpdate`, `writeUpsert`, `writeDelete`, and `writeBatch` are TanStack's direct writes. They return a promise that rejects on a validation error (for example `writeDelete` of an absent key); they do not throw. In an `'on-demand'` collection, each direct write also refetches every active query of the collection. pbtsdb's own writes (realtime echoes, write-backs, and filed relation rows) do not use them, and cause no refetch.
+### Writing server rows yourself
+
+`collection.accept(rows)` lands rows the server returned, for example the response of a custom endpoint, as confirmed state. A row older than the stored one is ignored. Use it when the screen must update before the realtime echo arrives. It resolves when the rows are accepted, so a custom mutation handler can await it.
+
+`collection.evict(ids)` removes rows the server deleted, for example after a custom endpoint deleted them. The rows leave every holder, and a fetch in flight does not put them back. It resolves when the removal is accepted, so a custom delete handler can await it.
+
+`collection.reload()` refetches every live query's subset. Then it releases the realtime-topic and accepted holders of the rows the results do not confirm. A row that a parent filed through a relation stays. Use it when the server state changed with no realtime event, such as after a user loses access to rows.
+
+All three are also on `collection.utils`.
 
 ### Type Safety
 
@@ -387,7 +396,6 @@ The main function for creating type-safe collections. Uses a curried API for bet
 ```typescript
 const c = createCollection<Schema>(
     pb: PocketBase,
-    queryClient: QueryClient,
     factoryOptions?: CreateCollectionFactoryOptions
 );
 const collection = c(collectionName: string, options?: CreateCollectionOptions);
@@ -395,7 +403,6 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 
 **Parameters:**
 - `pb` - PocketBase instance
-- `queryClient` - TanStack Query QueryClient instance
 - `factoryOptions` - Optional configuration applied to every collection this factory builds (see [Subscription Options](#subscription-options))
 - `collectionName` - Name of the PocketBase collection
 - `options` - Optional configuration
@@ -410,7 +417,6 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable
 - `refetchOnMutation?: boolean` - Refetch the collection after a built-in insert/update/delete succeeds (default: `false`; see [Mutations and Refetch](#mutations-and-refetch))
-- `ignoreAutoCancellation?: boolean` - Ignore PocketBase auto-cancellation errors (default: `true`)
 - `collectionOptions?: object` - Additional TanStack DB collection options passed through directly (see [Collection Options Passthrough](#collection-options-passthrough))
 
 **Returns:** Fully-typed Collection instance with subscription capabilities
@@ -419,7 +425,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 
 Basic collection (lazy, subscribes automatically on first query):
 ```typescript
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const booksCollection = c('books', {});
 ```
 
@@ -430,7 +436,7 @@ collections. Rows never carry `expand`; read related records from the target
 collection.
 
 ```typescript
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const authors = c('authors', { syncMode: 'on-demand' });
 const tags = c('tags', { syncMode: 'on-demand' });
 const books = c('books', {
@@ -441,8 +447,8 @@ const books = c('books', {
 
 Every books request expands `author`; the expanded authors are filed into
 `authors` (an on-demand target has its sync started) and removed from the
-book rows. Read them through `materialize()` in a query, a join, or
-`authors.get(book.author)`:
+book rows. Read them through `materialize()` in a query or through a join,
+inside the `useLiveQuery` that needs them:
 
 ```typescript
 import { eq } from '@tanstack/db';
@@ -465,6 +471,14 @@ served from the synced store when every id is present, except when the query
 reads through a `fetchRelations()` view, whose fetch goes to PocketBase so its
 paths get filed; anything else is fetched in one batched request. An empty
 `inArray(id, [])` yields no rows and no request.
+
+Do not read a related row with `authors.get(book.author)` in a component. A
+`get()` is a one-time read: the component does not re-render when the author
+changes, and the row can leave the store while the component still shows it,
+because a filed row stays only as long as a live query holds the parent row
+that filed it. A `useLiveQuery` with `materialize()` or a join holds the rows
+it reads and re-renders when they change. `get()` is for code outside React
+that needs a value right now, such as a mutation handler or a test.
 
 Fetch a relation for one query only with `fetchRelations()`; the view shares the
 collection's store, realtime subscription, and mutations, and only its fetches
@@ -510,7 +524,7 @@ never treated as complete.
 Pass any [TanStack DB `BaseCollectionConfig`](https://tanstack.com/db/latest/docs/overview) option directly via `collectionOptions`. This is useful for configuring indexing, garbage collection, and other collection-level settings:
 
 ```typescript
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const booksCollection = c('books', {
     collectionOptions: {
         gcTime: 60000,       // 1 minute GC
@@ -547,7 +561,7 @@ const { Provider, useStore } = createReactProvider(collections: CollectionsMap);
 ```typescript
 import { createCollection, createReactProvider } from 'pbtsdb';
 
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const collections = {
     authors: c('authors', {}),
     books: c('books', {
@@ -705,7 +719,7 @@ options — `headers`, `filter`, `expand`, `fields` — to every real-time
 subscription the factory creates.
 
 ```typescript
-const c = createCollection<Schema>(pb, queryClient, {
+const c = createCollection<Schema>(pb, {
     subscribeOptions: () => {
         const token = getShareToken();
         return token ? { headers: { 'X-Share-Token': token } } : undefined;
@@ -1163,7 +1177,7 @@ Always create collections with proper type parameters:
 
 ```typescript
 // ✅ Good - full type safety
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const books = c('books', {
     omitOnInsert: ['created', 'updated'] as const
 });
@@ -1184,7 +1198,7 @@ Define all collections once at app initialization:
 
 ```typescript
 // ✅ Do this - centralized, type-safe
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 
 export const { Provider, useStore } = createReactProvider({
     posts: c('posts', { omitOnInsert: ['created', 'updated'] as const }),
@@ -1199,7 +1213,7 @@ When declaring `relations`, create the target collection first:
 
 ```typescript
 // ✅ Good - authors exists before books references it
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const authors = c('authors', {});
 const books = c('books', {
     relations: { author: authors },  // authors is already created
@@ -1250,7 +1264,7 @@ return <PostsList posts={data} />;
 per parent row, on every fetch of the parent:
 
 ```typescript
-const c = createCollection<MySchema>(pb, queryClient);
+const c = createCollection<MySchema>(pb);
 const authors = c('authors', {});
 const posts = c('posts', {
     relations: { author: authors },
@@ -1265,20 +1279,6 @@ A join or a `materialize()` include costs one batched request per query
 it) and, once the rows are filed, subsequent queries make no request at all.
 Prefer `alwaysFetchRelations` when the parent is the only path by which those
 rows enter an on-demand collection; otherwise let the query load them.
-
-### 6. Configure QueryClient Defaults
-
-```typescript
-const queryClient = new QueryClient({
-    defaultOptions: {
-        queries: {
-            staleTime: 60_000,      // 1 minute
-            gcTime: 300_000,        // 5 minutes
-            refetchOnWindowFocus: false
-        }
-    }
-});
-```
 
 ## Configuration
 
@@ -1401,6 +1401,5 @@ npm run typecheck   # TypeScript only
 
 **Built with:**
 - [PocketBase](https://pocketbase.io) - Backend-as-a-Service
-- [TanStack Query](https://tanstack.com/query) - Powerful data fetching
 - [TanStack DB](https://tanstack.com/db) - Reactive database
 - [TypeScript](https://www.typescriptlang.org) - Type safety

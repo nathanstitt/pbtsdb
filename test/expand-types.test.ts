@@ -1,10 +1,10 @@
 import type { WithoutVirtualProps } from '@tanstack/db'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { createCollection, materialize } from '../src'
-import { createTestQueryClient, pb } from './helpers'
+import { pb } from './helpers'
 import type { Books, Schema } from './schema'
 
-const c = createCollection<Schema>(pb, createTestQueryClient())
+const c = createCollection<Schema>(pb)
 
 describe('fetch relations types', () => {
     it('never puts expand on a row', () => {

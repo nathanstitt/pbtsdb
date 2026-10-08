@@ -1,23 +1,19 @@
 import { and, eq, gt, gte, lt, lte, or } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createCollection } from '../src'
 
 import {
     authenticateTestUser,
     clearAuth,
     createBooksCollection,
-    createTestQueryClient,
     pb,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
 
 describe('Collection - Query Operators', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -26,16 +22,8 @@ describe('Collection - Query Operators', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
-    afterEach(() => {
-        queryClient.clear()
-    })
-
     it('should filter books using eq operator', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // First get all books to find a valid genre
         const allBooks = await pb.collection('books').getList(1, 10)
@@ -58,7 +46,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using gt operator with dates', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Use a date in the past to ensure we get some results
         const pastDate = new Date('2020-01-01')
@@ -81,7 +69,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using gte operator', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Get a job's created date to use as threshold
         const allBooks = await pb.collection('books').getList(1, 1, { sort: '-created' })
@@ -113,7 +101,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using lt operator', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         // Use a future date to ensure we get some results
         const futureDate = new Date('2030-01-01')
@@ -136,7 +124,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using lte operator', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         const futureDate = new Date('2030-01-01')
 
@@ -158,7 +146,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using and operator', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         // Get test data
         const allBooks = await pb.collection('books').getList(1, 10)
@@ -186,7 +174,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should filter books using or operator', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         // Get two different genres
         const allBooks = await pb.collection('books').getList(1, 20)
@@ -215,7 +203,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should sort books by created date descending', async () => {
-        const booksCollection = createBooksCollection(queryClient, { syncMode: 'eager' })
+        const booksCollection = createBooksCollection({ syncMode: 'eager' })
 
         const { result } = renderHook(() =>
             useLiveQuery(q =>
@@ -236,7 +224,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should support complex nested queries with and/or', async () => {
-        const booksCollection = createBooksCollection(queryClient)
+        const booksCollection = createBooksCollection()
 
         const allBooks = await pb.collection('books').getList(1, 20)
         expect(allBooks.items.length).toBeGreaterThan(0)
@@ -273,7 +261,7 @@ describe('Collection - Query Operators', () => {
     })
 
     it('should throw error for unsupported operators', async () => {
-        const c = createCollection<Schema>(pb, queryClient)
+        const c = createCollection<Schema>(pb)
 
         // This test verifies that unsupported operators are rejected
         // by the query compilation, not by our converter

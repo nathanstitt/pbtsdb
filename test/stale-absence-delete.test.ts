@@ -1,16 +1,14 @@
 import { eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { RecordSubscription } from 'pocketbase'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import { realtimeClientFor } from '../src/transport'
 
 import {
     authenticateTestUser,
     clearAuth,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     newRecordId,
@@ -37,8 +35,6 @@ import type { Books, Schema } from './schema'
  * disappearing when added right after opening a card.
  */
 describe('stale-absence reconcile delete (on-demand)', () => {
-    let queryClient: QueryClient
-
     beforeAll(async () => {
         await authenticateTestUser()
     })
@@ -47,12 +43,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         clearAuth()
     })
 
-    beforeEach(() => {
-        queryClient = createTestQueryClient()
-    })
-
     afterEach(() => {
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -74,7 +65,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
 
     it('keeps a row confirmed while the subset fetch was in flight', async () => {
         const slug = getTestSlug('absent')
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -144,7 +135,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         // last confirmed write, its result speaks authoritatively — an absence
         // must still prune, or moved/deleted rows would be retained forever.
         const slug = getTestSlug('prune')
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
             omitOnInsert: ['created', 'updated'] as const,
         })
@@ -195,7 +186,7 @@ describe('stale-absence reconcile delete (on-demand)', () => {
         // A refetch issued now — after the write — returns empty (as if another
         // client deleted the row). The prune must apply.
         control.serveEmpty = true
-        await collection.utils.refetch()
+        await collection.reload()
         await waitFor(() => expect(collection.base.get(newBook.id)).toBeUndefined(), {
             timeout: 5000,
         })

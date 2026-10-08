@@ -4,11 +4,10 @@ import {
     createCollection as createTanStackCollection,
     type DeleteMutationFn,
     type InsertMutationFn,
-    type LoadSubsetOptions,
     type UpdateMutationFn,
+    type UtilsRecord,
+    whenSyncAccepted,
 } from '@tanstack/db'
-import { type QueryCollectionUtils, queryCollectionOptions } from '@tanstack/query-db-collection'
-import type { QueryClient } from '@tanstack/react-query'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import {
@@ -26,20 +25,15 @@ import {
 } from './expand-paths'
 import { createFetcher } from './fetch-records'
 import { createHeldTargets } from './held-targets'
+import { ACCEPTED, createLedger } from './ledger'
 import { createLoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
+import { createMembership } from './membership'
 import { createRealtimeSubscription } from './realtime-subscription'
-import { realtimeWhereFor } from './realtime-where'
-import { idOf } from './records'
-import {
-    type PbRequest,
-    queryKeyFor,
-    realtimeFiltersFor,
-    requestFromQueryKey,
-    toRequest,
-} from './request'
-import { createSyncedStore, type SyncChannel } from './synced-store'
-import { createSyncedWriteGuard, type SyncedWrite } from './synced-write-guard'
+import { idOf, updatedAtOf } from './records'
+import type { PbRequest } from './request'
+import { createSyncAdapter, type SyncAdapterDeps } from './sync-adapter'
+import { createSyncedStore } from './synced-store'
 import { transportFor } from './transport'
 import type {
     CreateCollectionOptions,
@@ -51,33 +45,6 @@ import type {
 import { createViewRegistry, createViews, type ViewTag } from './views'
 
 const REALTIME_MODES: readonly RealtimeMode[] = ['collection', 'query']
-
-/**
- * Minimal shape of the two collection events that invalidate every loaded-subset
- * mark: `status:change` (cleared on reaching `cleaned-up`) and `truncate`
- * (cleared unconditionally). Extracted so the wiring itself is unit-testable
- * against a fake emitter, independent of a real `Collection` instance.
- * @internal
- */
-export type MarkInvalidatingCollection = {
-    onStatusChange: (callback: (event: { status: string }) => void) => () => void
-    onTruncate: (callback: () => void) => () => void
-}
-
-/**
- * Without a live subscription, back-relation children can appear server-side
- * unseen, so every mark is stale once the collection cleans up or truncates.
- * @internal
- */
-export function registerMarkInvalidationEvents(
-    collection: MarkInvalidatingCollection,
-    clearMarks: () => void
-): void {
-    collection.onStatusChange(event => {
-        if (event.status === 'cleaned-up') clearMarks()
-    })
-    collection.onTruncate(() => clearMarks())
-}
 
 /**
  * Options applied to every collection built by a {@link createCollection} factory.
@@ -98,30 +65,93 @@ export interface CreateCollectionFactoryOptions {
 }
 
 /**
- * Subscription helpers added to collection instances.
+ * pbtsdb's utilities on `collection.utils`. The same functions are also
+ * assigned on the collection itself.
+ */
+export interface PbCollectionUtils<T extends object> extends UtilsRecord {
+    /**
+     * Land rows the server returned as confirmed state, for example a custom
+     * endpoint's response. A row older than the stored one is ignored.
+     * Resolves when the rows are accepted; they become visible with the
+     * settlement of any persisting mutation, so a mutation handler can await it.
+     * Throws on an eager collection that is idle: it does not start a full load.
+     */
+    accept: (rows: readonly T[]) => Promise<void>
+    /**
+     * Refetch every live query's subset (the whole collection in eager mode)
+     * and release the realtime-topic and accepted holders of rows the results
+     * do not confirm; rows a subset or a parent holds stay. Resolves when the
+     * rows are accepted; they become visible with the settlement of any
+     * persisting mutation.
+     */
+    reload: () => Promise<void>
+    /**
+     * Remove rows the server deleted, for example after a custom endpoint
+     * deleted them. The rows leave every holder, and a fetch in flight does
+     * not put them back. Resolves when the removal is accepted, so a custom
+     * delete handler can await it. A no-op while the collection is not
+     * syncing.
+     */
+    evict: (ids: readonly string[]) => Promise<void>
+}
+
+/**
+ * Helpers added to collection instances.
  * @internal
  */
-export interface CollectionSubscriptionHelpers {
+export interface CollectionSubscriptionHelpers<T extends object> {
     /** The PocketBase collection name */
     collectionName: string
     /** Wait for subscription to be established (useful in tests) */
     waitForSubscription: (timeout?: number) => Promise<void>
     /** Check if collection has an active subscription */
     isSubscribed: () => boolean
-    /** Relation targets declared through `relations` */
+    /**
+     * Relation targets declared through `relations`. Relation plumbing, not public API.
+     * @internal
+     */
     relationTargets: RelationTargets | undefined
-    /** Number of relation targets currently held live */
+    /**
+     * Number of relation targets currently held live. Relation plumbing, not public API.
+     * @internal
+     */
     heldRelationTargetCount: () => number
-    /** Record that every row with `field === value` is now in this collection's store */
+    /**
+     * Record that every row with `field === value` is now in this collection's store. Relation plumbing, not public API.
+     * @internal
+     */
     markSubsetLoaded: (field: string, value: string) => void
-    /** Number of field/value pairs currently marked loaded */
+    /**
+     * Number of field/value pairs currently marked loaded. Relation plumbing, not public API.
+     * @internal
+     */
     loadedSubsetCount: () => number
-    /** Hold this collection live as a relation target; see RelationTarget.holdLive */
-    holdLive: () => HeldTarget
-    /** Receive rows a parent expanded into this collection; see RelationTarget.writeFiled */
-    writeFiled: (records: object[]) => Promise<boolean>
-    /** A parent's fetch may file a subset here; see RelationTarget.expectFiling */
+    /**
+     * Hold this collection live as a relation target; see RelationTarget.holdLive. Relation plumbing, not public API.
+     * @internal
+     */
+    holdLive: (holder: object) => HeldTarget
+    /**
+     * Receive rows a parent expanded into this collection; see RelationTarget.writeFiled. Relation plumbing, not public API.
+     * @internal
+     */
+    writeFiled: (records: object[], holder: object) => Promise<boolean>
+    /**
+     * Release rows a parent stopped filing here; see RelationTarget.releaseFiled. Relation plumbing, not public API.
+     * @internal
+     */
+    releaseFiled: (ids: readonly string[], holder: object) => void
+    /**
+     * A parent's fetch may file a subset here; see RelationTarget.expectFiling. Relation plumbing, not public API.
+     * @internal
+     */
     expectFiling: (field: string, settles: Promise<void>) => () => void
+    /** See {@link PbCollectionUtils.accept}. */
+    accept: PbCollectionUtils<T>['accept']
+    /** See {@link PbCollectionUtils.reload}. */
+    reload: PbCollectionUtils<T>['reload']
+    /** See {@link PbCollectionUtils.evict}. */
+    evict: PbCollectionUtils<T>['evict']
 }
 
 /**
@@ -131,11 +161,11 @@ export interface CollectionSubscriptionHelpers {
 export type BuiltCollection<T extends object> = Collection<
     T,
     string | number,
-    QueryCollectionUtils<T, string | number, T>,
+    PbCollectionUtils<T>,
     never,
     T
 > &
-    CollectionSubscriptionHelpers & {
+    CollectionSubscriptionHelpers<T> & {
         fetchRelations: (...paths: string[]) => BuiltCollection<T>
         withRealtime: (mode: RealtimeMode) => BuiltCollection<T>
     }
@@ -146,7 +176,6 @@ export interface BuildCollectionInput<
     C extends keyof Schema & string,
 > {
     pb: PocketBase
-    queryClient: QueryClient
     factoryOptions: CreateCollectionFactoryOptions | undefined
     collectionName: C
     options: CreateCollectionOptions<Schema, C> | undefined
@@ -156,7 +185,7 @@ export interface BuildCollectionInput<
 export function buildCollection<Schema extends SchemaDeclaration, C extends keyof Schema & string>(
     input: BuildCollectionInput<Schema, C>
 ): BuiltCollection<ExtractRecordType<Schema, C>> {
-    const { pb, queryClient, factoryOptions, collectionName, options } = input
+    const { pb, factoryOptions, collectionName, options } = input
     type RecordType = ExtractRecordType<Schema, C>
 
     const relationTargets = options?.relations as RelationTargets | undefined
@@ -175,8 +204,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     for (const path of alwaysFetch) validateExpandPath(collectionName, relationTargets, path)
     const syncMode = options?.syncMode ?? 'eager'
     const realtimeMode: RealtimeMode = options?.realtime ?? 'collection'
-    const ignoreAutoCancellation = options?.ignoreAutoCancellation ?? true
     const refetchOnMutation = options?.refetchOnMutation ?? false
+    const subsetGcTime = options?.subsetGcTime ?? 5000
+    const loadRetryDelays = options?.loadRetryDelays ?? [1000, 2000, 4000, 8000, 15000, 30000]
 
     function assertRealtimeMode(mode: RealtimeMode): void {
         if (!REALTIME_MODES.includes(mode)) {
@@ -217,61 +247,103 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         return expand ? { ...base, expand } : base
     }
 
-    // Every held target and every subset mark exists to serve rows realtime
-    // keeps fresh; with nothing live and nothing wanted, release them all.
+    // Every held target, every subset mark and, in on-demand mode, every
+    // accepted row exists to serve rows realtime keeps fresh; with nothing
+    // live and nothing wanted, release them all.
     function releaseAll(): void {
         held.releaseAll()
-        subsets.invalidateAll()
         subsets.clear()
+        if (syncMode === 'on-demand') membership.drop([ACCEPTED])
     }
 
-    // Store accessors close over `collection`, created below; every caller
-    // runs after construction. Accepted rows include sync transactions held
-    // behind a persisting mutation, which `collection.base` omits. They have
-    // no public accessor; `_state.getAcceptedSyncedRow` and
-    // `acceptedSyncedEntries` are what @tanstack/query-db-collection itself
-    // reads, and test/tanstack-internals.test.ts pins them.
-    const acceptedRow = (id: string) => collection._state.getAcceptedSyncedRow(id)
-    function* acceptedRows() {
-        for (const [, row] of collection._state.acceptedSyncedEntries()) yield row
+    // In eager mode the whole collection stays loaded after the last
+    // subscriber leaves, until GC, so a topic's rows keep their holder until
+    // reload() or cleanup. In on-demand mode they leave with the topic.
+    function releaseTopic(topic: string): void {
+        if (syncMode === 'eager') return
+        if (membership.drop([topic]) === false) {
+            logger.debug('Ignoring topic release while sync is not running', {
+                collectionName,
+                topic,
+            })
+        }
     }
-    const store = createSyncedStore<RecordType>({ collectionName, queryClient, acceptedRow })
-    const subsets = createLoadedSubsets(collectionName, queryClient)
-    const held = createHeldTargets(collectionName)
-    const filer = createExpandFiler(collectionName, held.recordFiled)
-    const guard = createSyncedWriteGuard<RecordType>(collectionName, {
-        acceptedRow,
-        // A visible row reports its own overlay; an invisible row with a
-        // synced copy is under an optimistic delete.
-        hasPendingMutation: id => {
-            const visible = collection.get(id)
-            return visible ? visible.$hasPendingWrites : acceptedRow(id) !== undefined
+
+    // This collection's identity as a parent: the holder its filed rows and
+    // holds carry in every relation target.
+    const parentHolder = { parent: collectionName }
+
+    const ledger = createLedger<RecordType>()
+    const store = createSyncedStore<RecordType>(collectionName)
+    const subsets = createLoadedSubsets()
+    const membership = createMembership<RecordType>({
+        collectionName,
+        ledger,
+        store,
+        onRemoved: rows => {
+            for (const row of rows) {
+                subsets.forgetRow(row)
+                const id = idOf(row)
+                if (id !== undefined) held.forgetParentRow(id)
+            }
         },
-        applyRows: records => store.apply(records),
+    })
+    const held = createHeldTargets(collectionName, parentHolder)
+    // A result row older than the stored row, or deleted while its fetch
+    // was in flight, must not re-file its relations over newer state.
+    const filer = createExpandFiler({
+        collectionName,
+        setFiled: held.setFiled,
+        holder: parentHolder,
+        isStale: record => {
+            const id = idOf(record)
+            if (id === undefined) return true
+            if (adapter.isDeleted(id)) return true
+            const incoming = updatedAtOf(record)
+            const stored = updatedAtOf(ledger.row(id))
+            return incoming !== undefined && stored !== undefined && incoming < stored
+        },
     })
     const fetcher = createFetcher<RecordType>({
         pb,
         collectionName,
-        queryClient,
         relationTargets,
-        ignoreAutoCancellation,
         activeExpand,
-        syncedRow: acceptedRow,
-        syncedRows: acceptedRows,
+        syncedRow: ledger.row,
+        syncedRows: ledger.rows,
         subsets,
-        guard,
         filer,
     })
     const transport = transportFor(pb)
     const realtime = createRealtimeSubscription<RecordType>({
         transport,
         collectionName,
-        handleEvent: event => handleRealtimeEvent(event),
+        handleEvent: (event, topic, expand) => handleRealtimeEvent(event, topic, expand),
         pendingExpand: pendingSubscribeExpand,
         subscribeOptions: realtimeSubscribeOptions,
         onEntryOpened: () =>
             held.sync(targetsAlong(splitPaths(pendingSubscribeExpand()), relationTargets)),
+        onEntryClosed: releaseTopic,
         onIdle: releaseAll,
+    })
+    const adapter = createSyncAdapter<RecordType>({
+        collectionName,
+        syncMode,
+        realtimeMode,
+        subsetGcTime,
+        loadRetryDelays,
+        ledger,
+        store,
+        membership,
+        fetcher,
+        subsets,
+        realtime,
+        registry: (): ReturnType<SyncAdapterDeps<RecordType>['registry']> => registry,
+        onCleanup: () => {
+            held.clearFiled()
+            for (const timer of acceptedTimers) clearTimeout(timer)
+            acceptedTimers.clear()
+        },
     })
 
     // `false` disables the mutation; `undefined` selects the built-in handler.
@@ -281,12 +353,47 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // A handler lands the server's rows before it returns: TanStack DB drops
     // the optimistic state when the handler settles, and rows written while
-    // it runs publish together with that drop. `{ refetch: false }` opts out
-    // of query-db-collection's deprecated automatic refetch; pbtsdb refetches
-    // explicitly when asked to.
-    async function settleHandler(): Promise<{ refetch: false }> {
-        if (refetchOnMutation) await collection.utils.refetch()
-        return { refetch: false }
+    // it runs publish together with that drop. The receipt is not awaited:
+    // core holds this transaction until the handler's own transaction
+    // settles, which is after the handler returns.
+    function landServerRows(rows: RecordType[]): void {
+        const result = membership.accept(rows)
+        if (result === false) {
+            logger.debug('Dropping write-back while sync is not running', { collectionName })
+            return
+        }
+        expireAccepted(rows)
+    }
+
+    // ACCEPTED is a bridge until the echo gives the row a topic or a load a
+    // subset. When the window ends the row is handed to every live query
+    // whose filter matches it, so a missing echo (realtime down, event
+    // lost) never removes a row the user still sees; a row no live query
+    // matches leaves. A row another holder took meanwhile keeps it.
+    const acceptedTimers = new Set<ReturnType<typeof setTimeout>>()
+    function settleAccepted(ids: readonly string[]): void {
+        for (const id of ids) {
+            const row = ledger.row(id)
+            if (!row) continue
+            const holders = adapter.holdersFor(row)
+            if (holders.length > 0) membership.hold(holders, [id])
+        }
+        membership.drop([ACCEPTED], ids)
+    }
+    function expireAccepted(rows: readonly RecordType[]): void {
+        if (subsetGcTime <= 0) return
+        const ids = rows.map(idOf).filter((id): id is string => id !== undefined)
+        const timer = setTimeout(() => {
+            acceptedTimers.delete(timer)
+            settleAccepted(ids)
+        }, subsetGcTime)
+        acceptedTimers.add(timer)
+    }
+
+    // reload() resolves on acceptance, so awaiting it here cannot wait for
+    // this handler's own transaction.
+    async function settleHandler(): Promise<void> {
+        if (refetchOnMutation) await adapter.reload()
     }
 
     const defaultInsert: InsertMutationFn<RecordType> = async ({ transaction }) => {
@@ -299,21 +406,31 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     collectionName: _collectionName,
                     ...data
                 } = mutation.modified as unknown as Record<string, unknown>
-                return pb.collection(collectionName).create(data)
+                return pb.collection(collectionName).create<RecordType>(data)
             })
         )
-        guard.landServerRows(created)
-        return settleHandler()
+        landServerRows(created)
+        await settleHandler()
     }
 
     const defaultUpdate: UpdateMutationFn<RecordType> = async ({ transaction }) => {
         const updated = await Promise.all(
-            transaction.mutations.map(async mutation => {
-                return pb.collection(collectionName).update(mutation.original.id, mutation.changes)
-            })
+            transaction.mutations.map(mutation =>
+                pb
+                    .collection(collectionName)
+                    .update<RecordType>(mutation.original.id, mutation.changes)
+            )
         )
-        guard.landServerRows(updated)
-        return settleHandler()
+        landServerRows(updated)
+        await settleHandler()
+    }
+
+    // The server deleted `ids`: no fetch in flight may put them back, and
+    // they leave every holder. Acceptance is at commit, so awaiting it from
+    // inside a handler cannot wait for that handler's own transaction.
+    async function evict(ids: readonly string[]): Promise<void> {
+        for (const id of ids) adapter.noteDeleted(id, '*')
+        await whenAccepted(membership.dropAll(ids))
     }
 
     const defaultDelete: DeleteMutationFn<RecordType> = async ({ transaction }) => {
@@ -323,23 +440,26 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 return mutation.original.id
             })
         )
-        store.apply([], ids)
-        return settleHandler()
+        await evict(ids)
+        await settleHandler()
     }
 
     // TanStack DB 0.6 turned auto-indexing off by default; without an index an
     // orderBy+limit query loads the whole subset instead of paging lazily and
     // warns on every compile. Restore the earlier default; callers can override
-    // both settings through collectionOptions.
-    const queryCollectionConfig = queryCollectionOptions({
+    // both settings through collectionOptions, and `gcTime` reaches core
+    // through the same spread. rowUpdateMode 'full' makes core store the
+    // object the ledger writes, so the ledger row and the stored row match.
+    const collection = createTanStackCollection<
+        RecordType,
+        string | number,
+        PbCollectionUtils<RecordType>
+    >({
         autoIndex: 'eager',
         defaultIndexType: BTreeIndex,
         ...options?.collectionOptions,
-        queryClient,
-        queryKey: (opts?: LoadSubsetOptions) => queryKeyFor(collectionName, opts),
+        id: collectionName,
         syncMode,
-        queryFn: (ctx): Promise<RecordType[]> =>
-            fetcher.fetchRecords(requestFromQueryKey(ctx.queryKey) ?? {}, ctx.queryKey),
         getKey: (item: RecordType) => {
             const id = idOf(item)
             if (id === undefined) {
@@ -349,116 +469,60 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             }
             return id
         },
+        sync: { sync: adapter.sync, rowUpdateMode: 'full' },
         onInsert: resolveHandler(options?.onInsert, defaultInsert),
         onUpdate: resolveHandler(options?.onUpdate, defaultUpdate),
         onDelete: resolveHandler(options?.onDelete, defaultDelete),
+        utils: { accept, reload: adapter.reload, evict },
     })
 
-    // queryCollectionOptions keeps `gcTime` for its react-query observer and
-    // does not forward it to the collection's own lifecycle GC.
-    const collectionOptions =
-        options?.collectionOptions?.gcTime === undefined
-            ? queryCollectionConfig
-            : { ...queryCollectionConfig, gcTime: options.collectionOptions.gcTime }
-
-    // What each loadSubset retained, keyed by the options object TanStack
-    // passes again to unloadSubset: the view tag in effect can differ between
-    // the two calls. Replaced on sync cleanup, so a stale unload cannot drop a
-    // newer ref.
-    let retainedFilters = new WeakMap<LoadSubsetOptions, { filters: string[] | undefined }[]>()
-
-    function retainQueryFilters(opts: LoadSubsetOptions): void {
-        if ((registry.tagFor(opts)?.realtime ?? realtimeMode) !== 'query') return
-        const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
-        const records = retainedFilters.get(opts) ?? []
-        records.push({ filters })
-        retainedFilters.set(opts, records)
-        realtime.retainQueryFilters(filters)
-    }
-
-    function releaseQueryFilters(opts: LoadSubsetOptions): void {
-        const records = retainedFilters.get(opts)
-        const retained = records?.shift()
-        if (!retained) return
-        if (records?.length === 0) retainedFilters.delete(opts)
-        realtime.releaseQueryFilters(retained.filters)
-    }
-
-    // Wrap the sync factory so every synced `write` flows through the guard and
-    // every loadSubset/unloadSubset call carries its view's expand paths.
-    const innerSync = collectionOptions.sync.sync
-    collectionOptions.sync = {
-        ...collectionOptions.sync,
-        sync: (params: Parameters<typeof innerSync>[0]) => {
-            // Only query-db-collection's writes pass through here; pbtsdb's
-            // own go straight to `params` through `store`. A prune deletes by
-            // key alone, so the row it removes is read before the write.
-            const guardedWrite: typeof params.write = message => {
-                const op = message as SyncedWrite
-                if (op.type === 'delete') {
-                    subsets.forgetRow(op.value ?? acceptedRow(String(op.key)))
-                }
-                if (guard.shouldDrop(op)) return
-                return params.write(message)
-            }
-            const channel: SyncChannel<RecordType> = params
-            store.attach(channel)
-            const res = innerSync({ ...params, write: guardedWrite })
-            const parts = typeof res === 'function' ? { cleanup: res } : (res ?? {})
-            const { cleanup, loadSubset, unloadSubset } = parts
-            return {
-                ...parts,
-                // TanStack drops a discarded sync session's demands without
-                // unloadSubset and reloads them on the next session.
-                cleanup: () => {
-                    store.detach(channel)
-                    retainedFilters = new WeakMap()
-                    realtime.resetQueryFilters()
-                    return cleanup?.()
-                },
-                loadSubset: loadSubset
-                    ? (opts: LoadSubsetOptions) => {
-                          retainQueryFilters(opts)
-                          try {
-                              return loadSubset(registry.withViewExpand(opts))
-                          } catch (error) {
-                              releaseQueryFilters(opts)
-                              throw error
-                          }
-                      }
-                    : undefined,
-                unloadSubset: unloadSubset
-                    ? (opts: LoadSubsetOptions) => {
-                          releaseQueryFilters(opts)
-                          return unloadSubset(registry.withViewExpand(opts))
-                      }
-                    : undefined,
-            }
-        },
-    }
-
-    const collection = createTanStackCollection(collectionOptions)
-
     // A reconnect the server did not resume lost every event of the gap.
-    // Refetch what is live; a resumed connection replayed it already.
+    // Reload what is live; a resumed connection replayed it already.
     // Registered only while the collection is syncing: it is removed on
     // `cleaned-up` so a long-lived `pb` does not accumulate one listener per
     // `buildCollection` call. A restart after cleanup registers again.
-    let removeReconnectListener: (() => void) | undefined
+    // Cleanup also clears marks a parent set before sync ever started; the
+    // adapter's own cleanup runs only for a started sync.
+    // An auth change clears what the previous user left behind at once:
+    // parked subsets, accepted rows and their timers. It reloads every
+    // live demand under the new auth as well, whether or not realtime is
+    // connected, so the order of logout calls does not matter. A reconnect
+    // that follows reloads once more, coalesced with this one.
+    function reloadFor(reason: string): void {
+        void adapter
+            .reload()
+            .catch(error =>
+                logger.error(`Failed to reload after ${reason}`, { collectionName, error })
+            )
+    }
+    let removeTransportListeners: (() => void) | undefined
     collection.on('status:change', event => {
-        if (!removeReconnectListener && (event.status === 'loading' || event.status === 'ready')) {
-            removeReconnectListener = transport.onReconnect(resumed => {
-                if (resumed || !realtime.isOpen() || !collection.isReady()) return
-                void collection.utils.refetch().catch(error =>
-                    logger.error('Failed to refetch after realtime reconnect', {
-                        collectionName,
-                        error,
-                    })
-                )
+        if (event.status === 'cleaned-up') subsets.clear()
+        if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
+            const removeReconnect = transport.onReconnect(resumed => {
+                if (resumed || !realtime.isOpen()) return
+                // A collection still loading has no live demands to reload,
+                // but its first load may be waiting out a retry.
+                if (!collection.isReady()) {
+                    adapter.wakeRetries()
+                    return
+                }
+                reloadFor('realtime reconnect')
             })
-        } else if (removeReconnectListener && event.status === 'cleaned-up') {
-            removeReconnectListener()
-            removeReconnectListener = undefined
+            const removeAuth = transport.onAuthChange(() => {
+                adapter.expireParked()
+                for (const timer of acceptedTimers) clearTimeout(timer)
+                acceptedTimers.clear()
+                membership.drop([ACCEPTED])
+                if (store.isAttached()) reloadFor('auth change')
+            })
+            removeTransportListeners = () => {
+                removeReconnect()
+                removeAuth()
+            }
+        } else if (removeTransportListeners && event.status === 'cleaned-up') {
+            removeTransportListeners()
+            removeTransportListeners = undefined
         }
     })
 
@@ -518,44 +582,80 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         subscribeChangesFor,
     })
 
-    // PocketBase can redeliver or reorder echoes; a strictly older
-    // create/update would revert the row. Deletes are terminal.
-    function isStaleEcho(event: RecordSubscription<RecordType>): boolean {
-        if (event.action !== 'create' && event.action !== 'update') return false
-        if (!guard.isStaleServerRecord(event.record)) return false
-        logger.debug('Ignoring stale realtime echo', { collectionName, id: idOf(event.record) })
-        return true
-    }
-
-    // A delete for a key already gone writes nothing: a prune or an earlier
-    // echo removed it, and the row is in its end state either way.
-    function applyRealtimeDelete(id: string): void {
-        if (!acceptedRow(id)) {
-            logger.debug('Ignoring delete echo for already-removed record', { collectionName, id })
-        }
-        store.apply([], [id])
-    }
-
-    function handleRealtimeEvent(event: RecordSubscription<RecordType>): void {
-        // Before the stale filter: even a stale create/update echo proves the
-        // server holds the row. Delete echoes need no marking.
-        if (event.action !== 'delete') guard.markConfirmedPresent([event.record])
-        if (isStaleEcho(event)) return
-
+    // PocketBase can redeliver or reorder echoes; the ledger drops a strictly
+    // older create/update. A delete on a filter topic releases that topic,
+    // its subsets, the parents whose hold covers it and the accepted
+    // holder; a delete on '*' removes the row. A delete is also recorded
+    // against every fetch in flight, whose result may predate it.
+    function handleRealtimeEvent(
+        event: RecordSubscription<RecordType>,
+        topic: string,
+        expand: string | undefined
+    ): void {
+        const id = idOf(event.record)
+        if (!id) return
         if (event.action === 'delete') {
-            const id = idOf(event.record)
-            if (id) applyRealtimeDelete(id)
+            adapter.noteDeleted(id, topic)
+            const applied =
+                topic === '*'
+                    ? membership.dropAll([id])
+                    : membership.drop(
+                          [
+                              topic,
+                              ...adapter.subsetsFor(topic),
+                              ...(holdersByFilter.get(topic) ?? []),
+                              ACCEPTED,
+                          ],
+                          [id]
+                      )
+            if (applied === false) {
+                logger.debug('Ignoring delete echo while sync is not running', {
+                    collectionName,
+                    id,
+                })
+            }
             return
         }
         const [stored] = stripFetchedRelations([event.record], pendingSubscribeExpand())
-        if (!store.apply([stored])) {
-            logger.debug('Ignoring realtime echo while sync is not running', {
-                collectionName,
-                id: idOf(event.record),
-            })
+        const land = () => {
+            const applied = membership.land(topic, [stored])
+            if (applied !== false) membership.drop([ACCEPTED], [id])
+            return applied !== false
+        }
+        const paths = splitPaths(expand)
+        // The same order as a fetch: relations first, then the parent, then
+        // the release of relations the parent stopped referencing, so a
+        // reader never sees the parent without its relation. With nothing
+        // to file the parent lands at once; a target that is not syncing
+        // yet would hold the parent back for a load, so the parent lands
+        // first in that case too.
+        if (filer.canFileFirst([event.record], relationTargets)) {
+            filer
+                .fileExpanded([event.record], relationTargets, paths)
+                .then(change => {
+                    if (land()) {
+                        change.commit()
+                        return
+                    }
+                    change.undo()
+                    logger.debug('Ignoring realtime echo while sync is not running', {
+                        collectionName,
+                        id,
+                    })
+                })
+                .catch(error =>
+                    logger.error('Failed to file expanded records from realtime echo', {
+                        collectionName,
+                        error,
+                    })
+                )
             return
         }
-        filer.upsertExpanded([event.record], relationTargets).catch(error =>
+        if (!land()) {
+            logger.debug('Ignoring realtime echo while sync is not running', { collectionName, id })
+            return
+        }
+        filer.upsertExpanded([event.record], relationTargets, paths).catch(error =>
             logger.error('Failed to upsert expanded records from realtime echo', {
                 collectionName,
                 error,
@@ -563,30 +663,85 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         )
     }
 
+    // preload() on an on-demand collection logs a warning; startSyncImmediate()
+    // does not. On-demand marks ready synchronously, so the wait ends at once.
+    async function ensureSyncing(): Promise<boolean> {
+        if (collection.isReady()) return true
+        if (collection.status === 'error') return false
+        const idle = collection.status === 'idle' || collection.status === 'cleaned-up'
+        if (syncMode === 'eager') {
+            // Filing must not start a full eager load; a load already
+            // running (a hold started it) is worth waiting for.
+            if (idle) return false
+            await collection.preload()
+            return true
+        }
+        if (idle) collection.startSyncImmediate()
+        if (!collection.isReady()) {
+            await new Promise<void>(resolve => {
+                collection.onFirstReady(resolve)
+            })
+        }
+        return true
+    }
+
     // Receives rows a parent expanded through a relation to this collection.
     // Returns whether the write happened: a caller marks a subset complete
     // only after a real filing.
-    async function writeFiled(records: object[]): Promise<boolean> {
-        if (!collection.isReady()) {
-            const idle = collection.status === 'idle' || collection.status === 'cleaned-up'
-            if (syncMode === 'eager' && idle) {
-                // Filing must not start a full eager load; a load already
-                // running (a hold started it) is worth waiting for.
-                logger.warn(
-                    `not syncing filed rows into ${collectionName} because store is not yet ready`
-                )
-                return false
-            }
-            await collection.preload()
+    async function writeFiled(records: object[], holder: object): Promise<boolean> {
+        if (!(await ensureSyncing())) {
+            logger.warn(
+                `not syncing filed rows into ${collectionName} because store is not yet ready`
+            )
+            return false
         }
-        return store.apply(withoutExpand(records) as RecordType[])
+        return membership.land(holder, withoutExpand(records) as RecordType[]) !== false
+    }
+
+    // Awaits acceptance, not visibility: a custom mutation handler that calls
+    // accept() or evict() would otherwise wait for its own transaction.
+    async function whenAccepted(applied: ReturnType<typeof membership.land>): Promise<void> {
+        if (applied === true || applied === false) return
+        const accepted = whenSyncAccepted(applied)
+        if (accepted !== true) await accepted
+    }
+
+    async function accept(rows: readonly RecordType[]): Promise<void> {
+        if (!(await ensureSyncing())) {
+            throw new Error(`Collection '${collectionName}' is not syncing; accept() has no store`)
+        }
+        const applied = membership.accept(rows)
+        if (applied !== false) expireAccepted(rows)
+        await whenAccepted(applied)
+    }
+
+    // Parents whose hold covers each realtime filter, so a delete on that
+    // topic releases their filings of the row.
+    const holdersByFilter = new Map<string, Set<object>>()
+
+    function swapHolderFilters(holder: object, previous: string[], next: string[]): void {
+        for (const filter of previous) {
+            const holders = holdersByFilter.get(filter)
+            holders?.delete(holder)
+            if (holders?.size === 0) holdersByFilter.delete(filter)
+        }
+        for (const filter of next) {
+            let holders = holdersByFilter.get(filter)
+            if (!holders) {
+                holders = new Set()
+                holdersByFilter.set(filter, holders)
+            }
+            holders.add(holder)
+        }
+        realtime.swapHoldFilters(previous, next)
     }
 
     // A parent's hold on this collection as a relation target. Keeps sync
     // alive and GC blocked like any subscriber. In collection mode the hold
     // counts toward '*'; in query mode it is uncounted and the parent
-    // supplies the filters covering the rows it filed here.
-    function holdLive(): HeldTarget {
+    // supplies the filters covering the rows it filed here. Releasing it
+    // releases every row the parent filed under `holder`.
+    function holdLive(holder: object): HeldTarget {
         const subscribe = () => originalSubscribeChanges(() => {}, { includeInitialState: false })
         const subscription =
             realtimeMode === 'collection' ? subscribeCounted(subscribe) : subscribe()
@@ -597,22 +752,33 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             setFilters: filters => {
                 if (released) return
                 const next = [...new Set(filters)]
-                realtime.swapHoldFilters(current, next)
+                swapHolderFilters(holder, current, next)
                 current = next
             },
             release: () => {
                 if (released) return
                 released = true
-                realtime.swapHoldFilters(current, [])
+                swapHolderFilters(holder, current, [])
                 current = []
+                membership.drop([holder])
                 subscription.unsubscribe()
             },
         }
     }
 
+    // A parent row stopped filing these rows here (its expand no longer
+    // returns them, or it left the parent's store).
+    function releaseFiled(ids: readonly string[], holder: object): void {
+        if (membership.drop([holder], ids) === false) {
+            logger.debug('Ignoring filed-row release while sync is not running', {
+                collectionName,
+            })
+        }
+    }
+
     // Record which expand paths a view has subscribed with at least once.
     // Eager collections cannot request per-subset options, so a wider union
-    // needs a refetch; a live realtime subscription needs a restart.
+    // needs a reload; a live realtime subscription needs a restart.
     function noteViewSubscribed(paths: string[]): void {
         let grew = false
         for (const path of paths) {
@@ -626,8 +792,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             collection.status !== 'idle' &&
             collection.status !== 'cleaned-up'
         ) {
-            void collection.utils.refetch().catch(error =>
-                logger.error('Failed to refetch after widening expand', {
+            void adapter.reload().catch(error =>
+                logger.error('Failed to reload after widening expand', {
                     collectionName,
                     error,
                 })
@@ -635,17 +801,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
         realtime.restart()
     }
-
-    registerMarkInvalidationEvents(
-        {
-            onStatusChange: callback => collection.on('status:change', callback),
-            onTruncate: callback => collection.on('truncate', callback),
-        },
-        () => {
-            subsets.clear()
-            held.clearFiled()
-        }
-    )
 
     Object.assign(collection, {
         collectionName,
@@ -657,7 +812,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         loadedSubsetCount: subsets.count,
         holdLive,
         writeFiled,
+        releaseFiled,
         expectFiling: fetcher.expectFiling,
+        accept,
+        reload: adapter.reload,
+        evict,
         fetchRelations: views.fetchRelations,
         withRealtime: views.withRealtime,
     })

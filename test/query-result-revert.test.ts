@@ -1,6 +1,5 @@
 import { and, eq } from '@tanstack/db'
 import { useLiveQuery } from '@tanstack/react-db'
-import type { QueryClient } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
@@ -9,7 +8,6 @@ import {
     authenticateTestUser,
     clearAuth,
     createTestLogger,
-    createTestQueryClient,
     getTestAuthorId,
     getTestSlug,
     pb,
@@ -21,32 +19,19 @@ import {
 import type { Books, Schema } from './schema'
 
 /**
- * Regression coverage for the residual optimistic-move "snap back" reported in 0.6.1:
- * a concurrent on-demand QUERY result reverts a freshly-committed optimistic move.
+ * Regression coverage for an optimistic move that a concurrent on-demand query
+ * result reverts. `genre` stands in for a file's folder, as in
+ * refetch-on-mutation-revert.test.ts. A `where(id = X && isbn = Y)` live query is
+ * the "resolve selected item" resolver that serves the stale read. It mixes in
+ * `isbn` because an id-only `where` is served from the synced store (see
+ * src/keyed-where.ts) and would never reach the mocked fetch.
  *
- * PR #6 guarded the realtime-echo and mutation-response write paths. It did not cover
- * the query-result path: @tanstack/query-db-collection's applySuccessfulResult
- * reconciles every query result into the synced store via the sync `write` primitive
- * with no recency/optimistic check. Under contention a single-row/subset read can
- * resolve with a pre-move row and land here after the move already committed, reverting
- * it. pbtsdb now guards that path (drop synced insert/update for an optimistically
- * pending key, or one strictly older than the synced row).
- *
- * `genre` stands in for a file's parent folder, exactly as in
- * refetch-on-mutation-revert.test.ts: a `genre = SOURCE` live query is the "current
- * folder" and update(id, d => d.genre = DEST) is the move. A `where(id = X && isbn = Y)`
- * live query is the app's "resolve selected item" resolver — the query that, in the
- * report, served the stale read. It mixes in `isbn` so the predicate isn't id-only:
- * an id-only `where` is now served straight from the synced store (see
- * src/keyed-where.ts), which would never reach this test's mocked server fetch at all.
- *
- * The race is made deterministic by stubbing the id= resolver's server fetch to return
- * the pre-move row, then refetching it after the move has committed. The id= query must
- * already OWN the row (be mounted, hydrated) before the stale refetch, because
- * applySuccessfulResult only reconciles rows a query already owns against its baseline.
+ * Every result row goes through ledger rule 4: a strictly older `updated` is
+ * dropped, an equal or newer one lands. A pending optimistic mutation keeps its
+ * overlay until it settles. The race is made deterministic by stubbing the
+ * resolver's fetch and calling reload().
  */
 describe('optimistic move snap-back via stale query result (on-demand)', () => {
-    let queryClient: QueryClient
     let testLogger: TestLogger
 
     const SOURCE_GENRE = 'Fiction' as const
@@ -63,12 +48,10 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
     beforeEach(() => {
         testLogger = createTestLogger()
         setLogger(testLogger)
-        queryClient = createTestQueryClient()
     })
 
     afterEach(() => {
         resetLogger()
-        queryClient.clear()
         vi.restoreAllMocks()
     })
 
@@ -115,7 +98,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
      */
     const moveWithIdResolverMounted = async (staleRow: Books) => {
         const seed = staleRow
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -173,17 +156,15 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
         // A stale read lands for the already-owning id= query: its refetch returns the
         // pre-move row (genre = SOURCE), strictly older than the just-committed synced
-        // value. applySuccessfulResult would write it into the synced store; the guard drops it.
+        // value. Ledger rule 4 drops it.
         control.serveStale = true
-        await collection.utils.refetch()
+        await collection.reload()
         await new Promise(r => setTimeout(r, 400))
 
         expect(control.served).toBeGreaterThan(0)
         expect(syncedGet(collection, seed.id)?.genre).toBe(DEST_GENRE)
         expect(folderResult.current.data.find(b => b.id === seed.id)).toBeUndefined()
-        expect(
-            testLogger.messages.debug.some(m => m.msg.includes('Dropping stale synced write'))
-        ).toBe(true)
+        // Ledger rule 4 drops a strictly older row without a log; the synced genre proves it.
 
         await pb
             .collection('books')
@@ -200,7 +181,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         const seed = await seedBook(SOURCE_GENRE)
         const staleRow: Books = { ...seed } // genre = SOURCE, identical `updated`
 
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
@@ -263,7 +244,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         // the PATCH commits (when synced flips to DEST but the overlay lingers). The
         // visible value must never flip back to the SOURCE folder at any point.
         control.serveStale = true
-        await collection.utils.refetch()
+        await collection.reload()
         await new Promise(r => setTimeout(r, 100))
 
         const reverted: string[] = []
@@ -278,7 +259,7 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         // the settle, covering the overlay-present-but-synced-fresh window.
         releasePatch()
         for (let i = 0; i < 4; i++) {
-            await collection.utils.refetch().catch(() => {})
+            await collection.reload().catch(() => {})
             await new Promise(r => setTimeout(r, 50))
         }
         await tx.when('settled')
@@ -299,13 +280,12 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
 
     it('still applies a genuinely newer query result for an owned row', async () => {
         const seed = await seedBook(SOURCE_GENRE)
-        const collection = createCollection<Schema>(pb, queryClient)('books', {
+        const collection = createCollection<Schema>(pb)('books', {
             syncMode: 'on-demand',
         })
 
         // The id= resolver returns a NEWER row (renamed, later `updated`) — a real
-        // concurrent update from another client. The staleness guard must NOT drop it,
-        // and with no pending optimistic mutation the optimistic arm does not apply.
+        // concurrent update from another client. Ledger rule 4 lands it.
         const newTitle = `Renamed ${Date.now().toString().slice(-8)}`
         const newerRow: Books = { ...seed, title: newTitle, updated: offsetUpdated(seed, 60000) }
         const realGetFullList = pb.collection('books').getFullList.bind(pb.collection('books'))
@@ -339,12 +319,11 @@ describe('optimistic move snap-back via stale query result (on-demand)', () => {
         expect(syncedGet(collection, seed.id)?.title).toBe(seed.title)
 
         control.serveNewer = true
-        await collection.utils.refetch()
+        await collection.reload()
 
         await waitFor(() => expect(syncedGet(collection, seed.id)?.title).toBe(newTitle), {
             timeout: 5000,
         })
-        expect(testLogger.messages.debug.some(m => m.msg.includes('Dropping'))).toBe(false)
         expect(control.served).toBeGreaterThan(0)
 
         await pb
