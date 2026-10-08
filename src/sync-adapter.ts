@@ -62,6 +62,8 @@ export interface SyncAdapter<T extends object> {
     isDeleted: (id: string) => boolean
     /** Release every parked subset now, for example because the auth changed. */
     expireParked: () => void
+    /** End every retry wait now, so a waiting load tries again at once. */
+    wakeRetries: () => void
     /**
      * The holders a server-confirmed row belongs to by its values: `EAGER`
      * in eager mode, else every live, landed demand whose `where` the row
@@ -263,29 +265,47 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return isStopped(run, opts) || run.demands.get(opts) !== demand || demand.seq !== seq
     }
 
+    function statusOf(error: unknown): number | undefined {
+        const status = (error as { status?: unknown } | null)?.status
+        return typeof status === 'number' ? status : undefined
+    }
+
     // A response the server gave on purpose is not retried: the request is
     // wrong or forbidden and would fail again. Everything else (no response,
-    // a server error, a timeout, a rate limit) may pass next time.
+    // a server error, a timeout, a rate limit) may pass next time. A 401 is
+    // retried only once the auth changes.
     function isRetryable(error: unknown): boolean {
-        const status = (error as { status?: unknown } | null)?.status
-        if (typeof status !== 'number' || status < 400 || status >= 500) return true
-        return status === 408 || status === 429
+        const status = statusOf(error)
+        if (status === undefined || status < 400 || status >= 500) return true
+        return status === 401 || status === 408 || status === 429
     }
 
-    /** The wait before retry number `attempt`; the last delay repeats. Undefined with no delays. */
-    function retryDelay(attempt: number): number | undefined {
-        return loadRetryDelays[Math.min(attempt, loadRetryDelays.length - 1)]
+    /**
+     * The wait before retry number `attempt`: the configured delay with up to
+     * a quarter of jitter either way, so retries do not fire in lockstep; the
+     * last delay repeats. Undefined with no delays, or with a 401, which
+     * waits for a wake alone.
+     */
+    function retryDelay(attempt: number, error: unknown): number | undefined {
+        if (statusOf(error) === 401) return undefined
+        const base = loadRetryDelays[Math.min(attempt, loadRetryDelays.length - 1)]
+        return base === undefined ? undefined : Math.round(base * (0.75 + Math.random() * 0.5))
     }
 
-    /** Sleeps `ms` unless woken through `onWake` first. */
-    function sleep(ms: number, onWake: (wake: () => void) => void): Promise<void> {
+    /** Sleeps `ms` unless woken through `onWake` first; with no `ms`, until woken. */
+    function sleep(ms: number | undefined, onWake: (wake: () => void) => void): Promise<void> {
         return new Promise<void>(resolve => {
-            const timer = setTimeout(resolve, ms)
+            const timer = ms === undefined ? undefined : setTimeout(resolve, ms)
             onWake(() => {
-                clearTimeout(timer)
+                if (timer !== undefined) clearTimeout(timer)
                 resolve()
             })
         })
+    }
+
+    function wakeRetries(run: Run): void {
+        run.eagerWake?.()
+        for (const demand of run.demands.values()) demand.wake?.()
     }
 
     /**
@@ -303,9 +323,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         error: unknown
     ): Promise<boolean> {
         if (superseded(run, opts, demand, seq)) return false
-        const delay = retryDelay(attempt)
-        if (delay === undefined || !isRetryable(error)) throw error
-        logger.warn('Subset load failed; retrying', { collectionName, attempt, error })
+        if (loadRetryDelays.length === 0 || !isRetryable(error)) throw error
+        const delay = retryDelay(attempt, error)
+        logger.warn('Subset load failed; retrying', { collectionName, attempt, delay, error })
         await sleep(delay, wake => {
             demand.wake = wake
         })
@@ -477,9 +497,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             }
             const applied = startHeld(run, opts, demand, parkedOpts)
             if (applied !== false) return applied
-            // A load that fails after its retries keeps its demand: core
-            // reports the error, and the next reload() or reconnect loads
-            // the demand again. An unload releases it as usual.
+            // A load that fails keeps retrying and keeps its demand, so the
+            // live query stays loading rather than erroring; a reload() or
+            // reconnect wakes it. An unload releases it as usual.
             return load(run, opts, demand, 'visible', opts.refetch === true).then(() => undefined)
         }
     }
@@ -491,10 +511,15 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             try {
                 return await fetchRows(run, {}, undefined, false, undefined)
             } catch (error) {
-                const delay = retryDelay(attempt)
                 const stale = () => run.abort.signal.aborted || run.eagerSeq !== seq
-                if (delay === undefined || !isRetryable(error) || stale()) throw error
-                logger.warn('Eager load failed; retrying', { collectionName, attempt, error })
+                if (loadRetryDelays.length === 0 || !isRetryable(error) || stale()) throw error
+                const delay = retryDelay(attempt, error)
+                logger.warn('Eager load failed; retrying', {
+                    collectionName,
+                    attempt,
+                    delay,
+                    error,
+                })
                 await sleep(delay, wake => {
                     run.eagerWake = wake
                 })
@@ -598,7 +623,11 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     // went out still gets a fresh fetch, and no request is sent per caller.
     let reloading: Promise<void> | undefined
     let queued: Promise<void> | undefined
+    // Every call wakes the retries at once, also when it only queues behind
+    // a reload in flight: the waiting loads try again now, under the current
+    // auth, instead of sleeping out their delay.
     function reload(): Promise<void> {
+        if (current) wakeRetries(current)
         if (!reloading) {
             reloading = reloadNow().finally(() => {
                 reloading = undefined
@@ -668,6 +697,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         isDeleted: id => [...tombstones.keys()].some(deleted => deleted.has(id)),
         expireParked: () => {
             if (current) expireParked(current)
+        },
+        wakeRetries: () => {
+            if (current) wakeRetries(current)
         },
         holdersFor: row => {
             if (!current) return []

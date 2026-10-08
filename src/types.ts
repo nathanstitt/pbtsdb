@@ -487,8 +487,10 @@ export interface CreateCollectionOptions<
      * load. The last delay repeats until the load succeeds, so a live query
      * stays loading through an outage instead of entering an error state it
      * cannot leave; a `reload()` or a realtime reconnect retries at once. A
-     * response the server gave on purpose (a 4xx other than 408 or 429) is
-     * not retried and reports its error. `[]` disables retries.
+     * response the server gave on purpose (a 4xx other than 401, 408 or
+     * 429) is not retried and reports its error; a 401 waits for the next
+     * auth change. Each delay carries up to a quarter of jitter either way.
+     * `[]` disables retries.
      *
      * @default [1000, 2000, 4000, 8000, 15000, 30000]
      */

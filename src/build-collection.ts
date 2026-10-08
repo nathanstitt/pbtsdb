@@ -500,7 +500,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (event.status === 'cleaned-up') subsets.clear()
         if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
             const removeReconnect = transport.onReconnect(resumed => {
-                if (resumed || !realtime.isOpen() || !collection.isReady()) return
+                if (resumed || !realtime.isOpen()) return
+                // A collection still loading has no live demands to reload,
+                // but its first load may be waiting out a retry.
+                if (!collection.isReady()) {
+                    adapter.wakeRetries()
+                    return
+                }
                 reloadFor('realtime reconnect')
             })
             const removeAuth = transport.onAuthChange(() => {

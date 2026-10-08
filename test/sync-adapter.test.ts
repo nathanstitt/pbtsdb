@@ -660,6 +660,57 @@ describe('sync adapter', () => {
             expect(t.calls).toHaveLength(1)
         })
 
+        it('a 401 waits with no timer until a reload wakes it', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [0] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].reject(Object.assign(new Error('unauthorized'), { status: 401 }))
+            await flush()
+            await flush()
+            expect(t.calls).toHaveLength(1)
+
+            const reload = t.adapter.reload()
+            expect(t.calls).toHaveLength(2)
+            t.calls[1].resolve([row('a', 'x')])
+            await Promise.all([load, reload])
+            expect(t.ledger.idsOf(opts)).toEqual(['a'])
+        })
+
+        it('a reload() queued behind another wakes a waiting retry at once', async () => {
+            const t = setup('on-demand', 0, { loadRetryDelays: [100000] })
+            const opts = named('x')
+            const load = t.loadSubset(opts)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            const first = t.adapter.reload()
+            expect(t.calls).toHaveLength(2)
+            t.calls[1].reject(new Error('down'))
+            await flush()
+            await flush()
+            expect(t.calls).toHaveLength(2)
+
+            const second = t.adapter.reload()
+            await until(() => t.calls.length === 3)
+            t.calls[2].resolve([row('b', 'x')])
+            await first
+            // The queued reload still runs once the first settles.
+            await until(() => t.calls.length === 4)
+            t.calls[3].resolve([row('b', 'x')])
+            await second
+            expect(t.ledger.idsOf(opts)).toEqual(['b'])
+        })
+
+        it('wakeRetries ends an eager retry wait', async () => {
+            const t = setup('eager', 0, { loadRetryDelays: [100000] })
+            t.calls[0].reject(new Error('down'))
+            await flush()
+            expect(t.calls).toHaveLength(1)
+            t.adapter.wakeRetries()
+            await until(() => t.calls.length === 2)
+            t.calls[1].resolve([row('a')])
+            await until(() => t.markReady.mock.calls.length === 1)
+        })
+
         it('retries a server error and a rate limit', async () => {
             const t = setup('on-demand', 0, { loadRetryDelays: [0] })
             const opts = named('x')
