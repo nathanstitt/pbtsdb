@@ -183,6 +183,9 @@ describe('core sync adapter', () => {
     }, 20000)
 
     it('a live query stays loading through failed loads and shows the rows once one succeeds', async () => {
+        // Realtime off: the seed's own create echo could otherwise land the
+        // row through a books topic another collection still holds.
+        disconnectRealtime(pb)
         const seed = await pb.collection('books').create<Books>(await newBook('Fiction', 'retry'))
         const service = pb.collection('books')
         const realGetFullList = service.getFullList.bind(service)
@@ -211,6 +214,7 @@ describe('core sync adapter', () => {
             expect(result.current.isError).toBe(false)
         } finally {
             getFullList.mockRestore()
+            resetRealtime(pb)
             await removeBook(seed.id)
             await books.cleanup()
         }
