@@ -344,9 +344,8 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
             for (const timer of acceptedTimers) clearTimeout(timer)
             acceptedTimers.clear()
         },
-        onLoadStatusChange: () => loadStatusChanged(),
+        onLoadStatusChange: transport.loadStatusChanged,
     })
-    const loadStatusChanged = transport.addLoadSource(adapter.loadStatus)
 
     // `false` disables the mutation; `undefined` selects the built-in handler.
     function resolveHandler<H>(option: H | false | undefined, fallback: H): H | undefined {
@@ -497,10 +496,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 logger.error(`Failed to reload after ${reason}`, { collectionName, error })
             )
     }
+    // Registered for the life of a sync, like the listeners: a cleaned-up
+    // collection reports no loads, and collections recreated for one `pb`
+    // must not accumulate in its status.
     let removeTransportListeners: (() => void) | undefined
     collection.on('status:change', event => {
         if (event.status === 'cleaned-up') subsets.clear()
         if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
+            const removeLoadSource = transport.addLoadSource(adapter.loadStatus)
             const removeReconnect = transport.onReconnect(resumed => {
                 if (resumed || !realtime.isOpen()) return
                 // A collection still loading has no live demands to reload,
@@ -519,6 +522,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 if (store.isAttached()) reloadFor('auth change')
             })
             removeTransportListeners = () => {
+                removeLoadSource()
                 removeReconnect()
                 removeAuth()
             }

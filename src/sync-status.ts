@@ -33,7 +33,11 @@ export type SyncStatusListener = (status: SyncStatus) => void
 export interface SyncStatusStore {
     get: () => SyncStatus
     subscribe: (listener: SyncStatusListener) => () => void
-    /** Reads every source again and notifies when a value changed. */
+    /**
+     * Marks the sources changed. Listeners hear about it in a microtask,
+     * once for any number of calls, so a change made while React renders
+     * a live query never updates another component mid-render.
+     */
     refresh: () => void
 }
 
@@ -63,7 +67,8 @@ export function mergeLoads(sources: Iterable<LoadStatus>): LoadStatus {
 /**
  * Snapshots are stable: `get()` returns the same object, with the same
  * nested objects, until a value changes, so `useSyncExternalStore` does
- * not re-render on every refresh.
+ * not re-render on every refresh. `get()` always reads the sources, so it
+ * is current before the listeners are told.
  */
 export function createSyncStatusStore(deps: {
     realtime: () => RealtimeStatus
@@ -84,8 +89,25 @@ export function createSyncStatusStore(deps: {
         }
     }
 
+    let notified = snapshot
+    let scheduled = false
+
+    function get(): SyncStatus {
+        const changed = next()
+        if (changed) snapshot = changed
+        return snapshot
+    }
+
+    function notify(): void {
+        scheduled = false
+        const current = get()
+        if (current === notified) return
+        notified = current
+        for (const listener of listeners) listener(current)
+    }
+
     return {
-        get: () => snapshot,
+        get,
         subscribe(listener) {
             listeners.add(listener)
             return () => {
@@ -93,10 +115,9 @@ export function createSyncStatusStore(deps: {
             }
         },
         refresh() {
-            const changed = next()
-            if (!changed) return
-            snapshot = changed
-            for (const listener of listeners) listener(snapshot)
+            if (scheduled) return
+            scheduled = true
+            queueMicrotask(notify)
         },
     }
 }

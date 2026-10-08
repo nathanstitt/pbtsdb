@@ -4,8 +4,10 @@ import PocketBase from 'pocketbase'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCollection, getSyncStatus, subscribeSyncStatus, useSyncStatus } from '../src'
 import { createSyncStatusStore, type LoadStatus, type RealtimeStatus } from '../src/sync-status'
-import { realtimeClientFor } from '../src/transport'
+import { realtimeClientFor, transportFor } from '../src/transport'
 import type { Schema } from './schema'
+
+const microtasks = () => new Promise<void>(resolve => queueMicrotask(resolve))
 
 class IdleEventSource {
     addEventListener() {}
@@ -30,10 +32,11 @@ describe('sync status store', () => {
         }
     }
 
-    it('returns the same snapshot until a value changes', () => {
+    it('returns the same snapshot until a value changes', async () => {
         const t = setup()
         const first = t.store.get()
         t.store.refresh()
+        await microtasks()
         expect(t.store.get()).toBe(first)
         expect(t.seen).toEqual([])
 
@@ -42,14 +45,40 @@ describe('sync status store', () => {
         const second = t.store.get()
         expect(second).not.toBe(first)
         expect(second.loads).toBe(first.loads)
+        await microtasks()
         expect(t.seen).toEqual([second])
 
         t.setRealtime({ state: 'connecting' })
         t.store.refresh()
+        await microtasks()
         expect(t.store.get()).toBe(second)
+        expect(t.seen).toEqual([second])
     })
 
-    it('keeps the realtime object while only loads change, and compares reconnecting by value', () => {
+    it('notifies once per microtask, after the last change, and never synchronously', async () => {
+        const t = setup()
+        t.setRealtime({ state: 'connecting' })
+        t.store.refresh()
+        t.setRealtime({ state: 'connected' })
+        t.store.refresh()
+        t.loads.push({ retrying: 1, failed: 0 })
+        t.store.refresh()
+        expect(t.seen).toEqual([])
+        await microtasks()
+        expect(t.seen).toEqual([
+            { realtime: { state: 'connected' }, loads: { retrying: 1, failed: 0 } },
+        ])
+        expect(t.seen[0]).toBe(t.store.get())
+
+        t.setRealtime({ state: 'disabled' })
+        t.store.refresh()
+        t.setRealtime({ state: 'connected' })
+        t.store.refresh()
+        await microtasks()
+        expect(t.seen).toHaveLength(1)
+    })
+
+    it('keeps the realtime object while only loads change, and compares reconnecting by value', async () => {
         const t = setup()
         t.setRealtime({ state: 'reconnecting', attempt: 1, nextRetryAt: 10, since: 5 })
         t.store.refresh()
@@ -57,7 +86,9 @@ describe('sync status store', () => {
         t.setRealtime({ state: 'reconnecting', attempt: 1, nextRetryAt: 10, since: 5 })
         t.loads.push({ retrying: 1, failed: 0, failingSince: 7 })
         t.store.refresh()
+        await microtasks()
         expect(t.store.get().realtime).toBe(realtime)
+        expect(t.seen.at(-1)).toBe(t.store.get())
         expect(t.store.get().loads).toEqual({ retrying: 1, failed: 0, failingSince: 7 })
         t.setRealtime({ state: 'reconnecting', attempt: 2, nextRetryAt: 30, since: 5 })
         t.store.refresh()
@@ -123,7 +154,7 @@ describe('getSyncStatus', () => {
         try {
             await waitFor(() => expect(getSyncStatus(pb).loads.retrying).toBe(1))
             expect(getSyncStatus(pb).loads.failingSince).toBeTypeOf('number')
-            expect(seen.at(-1)).toBe(getSyncStatus(pb))
+            await waitFor(() => expect(seen.at(-1)).toBe(getSyncStatus(pb)))
             expect(result.current.isLoading).toBe(true)
 
             failing = false
@@ -134,6 +165,31 @@ describe('getSyncStatus', () => {
             stop()
             unmount()
             await books.cleanup()
+        }
+    })
+
+    it('counts a collection only while it syncs, so recreated collections do not accumulate', async () => {
+        const { pb, collection } = fresh()
+        const transport = transportFor(pb)
+        expect(transport.loadSourceCount()).toBe(0)
+        vi.spyOn(pb.collection('books'), 'getFullList').mockRejectedValue(
+            Object.assign(new Error('forbidden'), { status: 403 })
+        )
+        for (let round = 0; round < 3; round++) {
+            const books = collection('books', {
+                syncMode: 'on-demand',
+                collectionOptions: { gcTime: 60_000 },
+            })
+            const { result, unmount } = renderHook(() =>
+                useLiveQuery(q => q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction')))
+            )
+            await waitFor(() => expect(result.current.isError).toBe(true))
+            expect(getSyncStatus(pb).loads.failed).toBe(1)
+            expect(transport.loadSourceCount()).toBe(1)
+            unmount()
+            await books.cleanup()
+            expect(getSyncStatus(pb).loads.failed).toBe(0)
+            expect(transport.loadSourceCount()).toBe(0)
         }
     })
 
@@ -158,7 +214,7 @@ describe('useSyncStatus', () => {
         vi.unstubAllGlobals()
     })
 
-    it('re-renders only when the status changes', () => {
+    it('re-renders only when the status changes', async () => {
         vi.stubGlobal('EventSource', IdleEventSource)
         const pb = new PocketBase('http://hook.test')
         createCollection<Schema>(pb)('books', { syncMode: 'on-demand' })
@@ -169,14 +225,41 @@ describe('useSyncStatus', () => {
         })
         expect(result.current.realtime).toEqual({ state: 'disabled' })
         const before = renders
-        act(() => {
+        await act(async () => {
             void realtimeClientFor(pb).subscribe('books', () => undefined)
+            await microtasks()
         })
         expect(result.current.realtime).toEqual({ state: 'connecting' })
         expect(renders).toBe(before + 1)
-        act(() => {
+        await act(async () => {
             realtimeClientFor(pb).disable()
+            await microtasks()
         })
         expect(result.current.realtime).toEqual({ state: 'disabled' })
+    })
+
+    it('reports a live query retrying from the same tree', async () => {
+        vi.stubGlobal('EventSource', IdleEventSource)
+        const pb = new PocketBase('http://tree.test')
+        const books = createCollection<Schema>(pb)('books', {
+            syncMode: 'on-demand',
+            loadRetryDelays: [100_000],
+            collectionOptions: { gcTime: 60_000 },
+        })
+        vi.spyOn(pb.collection('books'), 'getFullList').mockRejectedValue(new Error('offline'))
+        const { result, unmount } = renderHook(() => {
+            const status = useSyncStatus(pb)
+            const query = useLiveQuery(q =>
+                q.from({ b: books }).where(({ b }) => eq(b.genre, 'Fiction'))
+            )
+            return { status, query }
+        })
+        try {
+            await waitFor(() => expect(result.current.status.loads.retrying).toBe(1))
+            expect(result.current.query.isLoading).toBe(true)
+        } finally {
+            unmount()
+            await books.cleanup()
+        }
     })
 })

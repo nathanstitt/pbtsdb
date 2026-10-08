@@ -26,11 +26,12 @@ export interface Transport {
     onAuthChange: (listener: () => void) => () => void
     /** @internal Number of listeners registered through `onReconnect`; tests assert on it. */
     reconnectListenerCount: () => number
-    /**
-     * Counts `source` into the client's `SyncStatus.loads`. Returns the
-     * function to call after anything `source` reports may have changed.
-     */
+    /** Counts `source` into the client's `SyncStatus.loads` until the returned function is called. */
     addLoadSource: (source: () => LoadStatus) => () => void
+    /** Call after anything a load source reports may have changed. */
+    loadStatusChanged: () => void
+    /** @internal Number of load sources registered; tests assert on it. */
+    loadSourceCount: () => number
 }
 
 type Entry = {
@@ -159,7 +160,12 @@ export function transportFor(pb: PocketBase): Transport {
         reconnectListenerCount: () => entry.reconnectListeners.size,
         addLoadSource(source) {
             entry.loadSources.add(source)
-            return entry.status.refresh
+            return () => {
+                entry.loadSources.delete(source)
+                entry.status.refresh()
+            }
         },
+        loadStatusChanged: entry.status.refresh,
+        loadSourceCount: () => entry.loadSources.size,
     }
 }
