@@ -11,14 +11,25 @@ export interface RealtimeEvent {
 
 export type RealtimeListener = (event: RealtimeEvent) => void
 
+/** The fields of an SSE event that pbtsdb reads. */
+export type EventSourceMessage = { data?: unknown; lastEventId?: string | null }
+
+export type EventSourceListener = (event: EventSourceMessage) => void
+
 /**
- * What the client needs from an EventSource: the global one or a React
- * Native polyfill. Errors are observed through `addEventListener('error')`,
- * which every implementation has; `react-native-sse` has no `onerror`.
+ * What the client needs from an EventSource: the global one, or any
+ * implementation an app supplies. It must:
+ * - dispatch each SSE event to the listeners added for its `event` name,
+ *   with `data` and `lastEventId` set;
+ * - dispatch `error` through `addEventListener` (pbtsdb does not read
+ *   `onerror`) when the stream ends for any reason, including a clean
+ *   close by the server;
+ * - not reconnect itself: pbtsdb calls `close()` on the first `error`, and
+ *   opens a new connection through the factory.
  */
 export type EventSourceLike = {
-    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
-    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
+    addEventListener(type: string, listener: EventSourceListener): void
+    removeEventListener(type: string, listener: EventSourceListener): void
     close(): void
 }
 
@@ -102,7 +113,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     const backoff = deps.backoff ?? REALTIME_BACKOFF_MS
 
     const listeners = new Map<string, Set<RealtimeListener>>()
-    const dispatchers = new Map<string, EventListener>()
+    const dispatchers = new Map<string, EventSourceListener>()
     let source: EventSourceLike | undefined
     let connected = false
     let clientId: string | undefined
@@ -140,11 +151,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         deps.onStatusChange?.()
     }
 
-    function dispatcherFor(topic: string): EventListener {
+    function dispatcherFor(topic: string): EventSourceListener {
         let dispatch = dispatchers.get(topic)
         if (!dispatch) {
-            dispatch = (ev: Event) => {
-                const message = ev as MessageEvent
+            dispatch = message => {
                 let event: RealtimeEvent
                 try {
                     event = JSON.parse(String(message.data)) as RealtimeEvent
@@ -348,9 +358,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         source = target
         statusChanged()
         target.addEventListener('error', () => handleConnectionLost(target))
-        target.addEventListener('PB_CONNECT', (ev: Event) => {
+        target.addEventListener('PB_CONNECT', message => {
             if (source !== target) return
-            const message = ev as MessageEvent
             let data: { clientId?: string; resumed?: boolean } = {}
             try {
                 data = JSON.parse(String(message.data)) as typeof data

@@ -3,6 +3,7 @@ import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { realtimeTopic } from './pocketbase-limits'
 import {
     createRealtimeClient,
+    type EventSourceLike,
     type RealtimeClient,
     type RealtimeEventSourceFactory,
 } from './realtime-client'
@@ -132,14 +133,23 @@ export function disconnectRealtime(pb: PocketBase): void {
  * send headers the browser `EventSource` cannot, such as `Authorization`.
  * The factory is called on each connect, so read `pb.authStore.token`
  * inside it: a refreshed token is then sent on the next reconnect. Send no
- * `Authorization` header when there is no token. The next connection uses
- * the factory; an open connection is kept. `undefined` restores the default.
+ * `Authorization` header when there is no token. The source it returns must
+ * follow the rules on {@link EventSourceLike}: dispatch `error` when the
+ * stream ends for any reason, and never reconnect itself. The next
+ * connection uses the factory; an open connection is kept. `undefined`
+ * restores the default.
  *
  * @example
- * // RNEventSource from react-native-sse
  * setRealtimeEventSource(pb, url =>
- *     new RNEventSource(url, {
- *         headers: pb.authStore.token ? { Authorization: pb.authStore.token } : {},
+ *     new EventSource(url, {
+ *         fetch: (input, init) =>
+ *             fetch(input, {
+ *                 ...init,
+ *                 headers: {
+ *                     ...init.headers,
+ *                     ...(pb.authStore.token ? { Authorization: pb.authStore.token } : {}),
+ *                 },
+ *             }),
  *     })
  * )
  */

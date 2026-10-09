@@ -32,7 +32,12 @@ export {
 } from './collection'
 export { type Logger, resetLogger, setLogger } from './logger'
 export { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
-export type { EventSourceLike, RealtimeEventSourceFactory } from './realtime-client'
+export type {
+    EventSourceLike,
+    EventSourceListener,
+    EventSourceMessage,
+    RealtimeEventSourceFactory,
+} from './realtime-client'
 export type { LoadStatus, RealtimeStatus, SyncStatus, SyncStatusListener } from './sync-status'
 export {
     disconnectRealtime,

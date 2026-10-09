@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     createRealtimeClient,
     type EventSourceLike,
+    type EventSourceListener,
     RealtimeDisconnectedError,
     RealtimeTopicTooLongError,
 } from '../src/realtime-client'
@@ -10,25 +11,23 @@ import {
 class FakeEventSource implements EventSourceLike {
     static instances: FakeEventSource[] = []
     closed = false
-    private listeners = new Map<string, Set<(ev: MessageEvent) => void>>()
+    private listeners = new Map<string, Set<EventSourceListener>>()
 
     constructor(readonly url: string) {
         FakeEventSource.instances.push(this)
     }
 
-    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
-        if (!listener || typeof listener !== 'function') return
+    addEventListener(type: string, listener: EventSourceListener): void {
         let set = this.listeners.get(type)
         if (!set) {
             set = new Set()
             this.listeners.set(type, set)
         }
-        set.add(listener as (ev: MessageEvent) => void)
+        set.add(listener)
     }
 
-    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
-        if (!listener || typeof listener !== 'function') return
-        this.listeners.get(type)?.delete(listener as (ev: MessageEvent) => void)
+    removeEventListener(type: string, listener: EventSourceListener): void {
+        this.listeners.get(type)?.delete(listener)
     }
 
     close(): void {
@@ -36,14 +35,13 @@ class FakeEventSource implements EventSourceLike {
     }
 
     emit(type: string, data: unknown, lastEventId = ''): void {
-        const event = { data: JSON.stringify(data), lastEventId } as MessageEvent
-        for (const listener of this.listeners.get(type) ?? []) listener(event)
+        for (const listener of this.listeners.get(type) ?? []) {
+            listener({ data: JSON.stringify(data), lastEventId })
+        }
     }
 
     fail(): void {
-        for (const listener of this.listeners.get('error') ?? []) {
-            listener(new Event('error') as MessageEvent)
-        }
+        for (const listener of this.listeners.get('error') ?? []) listener({})
     }
 }
 
