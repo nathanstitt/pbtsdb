@@ -294,6 +294,42 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 `disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
 
+### Custom EventSource
+
+By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. pbtsdb calls the factory on each connect, so read the token inside it; a refreshed token is then sent on the next reconnect. Call it before the first collection subscribes.
+
+```typescript
+import { setRealtimeEventSource } from 'pbtsdb';
+import RNEventSource from 'react-native-sse';
+
+setRealtimeEventSource(pb, (url) =>
+    new RNEventSource(url, {
+        headers: pb.authStore.token ? { Authorization: pb.authStore.token } : {},
+    })
+);
+```
+
+On the web or in Node, any implementation that can set headers works, for example the `eventsource` package:
+
+```typescript
+import { EventSource } from 'eventsource';
+
+setRealtimeEventSource(pb, (url) =>
+    new EventSource(url, {
+        fetch: (input, init) =>
+            fetch(input, {
+                ...init,
+                headers: {
+                    ...init.headers,
+                    ...(pb.authStore.token ? { Authorization: pb.authStore.token } : {}),
+                },
+            }),
+    })
+);
+```
+
+The factory must return an object with `addEventListener`, `removeEventListener` and `close` (`EventSourceLike`). pbtsdb listens for `error` through `addEventListener`, and reconnects itself; it calls `close()` and then the factory again.
+
 ### Sync Status
 
 Two problems are visible only to pbtsdb: the realtime stream dropping while REST still works, so lists look fine but stop updating; and a query sleeping in its load retry backoff, so a list sits in "loading" with no reason shown. `getSyncStatus(pb)` reports both, for every collection of one client:
