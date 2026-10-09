@@ -1047,4 +1047,35 @@ describe('realtime client', () => {
         expect(() => client.reset()).not.toThrow()
         expect(client.topics()).toEqual(['t1'])
     })
+
+    it('reads the event source factory on each connect', async () => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        const opened: string[] = []
+        let factory = (url: string) => {
+            opened.push('first')
+            return new FakeEventSource(url)
+        }
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async () => undefined,
+            get eventSource() {
+                return factory
+            },
+            backoff: [0],
+        })
+        const sub = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        FakeEventSource.instances[0].emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await sub
+
+        factory = url => {
+            opened.push('second')
+            return new FakeEventSource(url)
+        }
+        client.simulateDisconnect()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(opened).toEqual(['first', 'second'])
+        expect(FakeEventSource.instances[1].url).toContain('resume=client-1')
+    })
 })

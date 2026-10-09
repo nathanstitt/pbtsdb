@@ -22,12 +22,16 @@ export type EventSourceLike = {
     close(): void
 }
 
+/** Opens the SSE connection to `url`; called again on each connect. */
+export type RealtimeEventSourceFactory = (url: string) => EventSourceLike
+
 export interface RealtimeClientDeps {
     /** Absolute URL of `/api/realtime`; read each time a connection opens. */
     readonly url: string
     /** `POST /api/realtime` with the SDK's auth; rejects on a non-2xx response. */
     send: (body: { clientId: string; subscriptions: string[] }) => Promise<unknown>
-    eventSource?: (url: string) => EventSourceLike
+    /** Read each time a connection opens; the global `EventSource` when unset. */
+    readonly eventSource?: RealtimeEventSourceFactory
     /** After a reconnect. `resumed` is true when the server replayed the gap. */
     onReconnect?: (resumed: boolean) => void
     /** After any transition `status()` may report; may fire with no change. */
@@ -96,7 +100,6 @@ type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     const backoff = deps.backoff ?? REALTIME_BACKOFF_MS
-    const openSource = deps.eventSource ?? ((url: string) => new EventSource(url))
 
     const listeners = new Map<string, Set<RealtimeListener>>()
     const dispatchers = new Map<string, EventListener>()
@@ -340,6 +343,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     function connect(): void {
         if (source || disabled) return
         const previousId = clientId
+        const openSource = deps.eventSource ?? ((url: string) => new EventSource(url))
         const target = openSource(connectUrl())
         source = target
         statusChanged()
