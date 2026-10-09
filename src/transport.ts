@@ -1,7 +1,12 @@
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { realtimeTopic } from './pocketbase-limits'
-import { createRealtimeClient, type RealtimeClient } from './realtime-client'
+import {
+    createRealtimeClient,
+    type EventSourceLike,
+    type RealtimeClient,
+    type RealtimeEventSourceFactory,
+} from './realtime-client'
 import {
     createSyncStatusStore,
     type LoadStatus,
@@ -40,6 +45,7 @@ type Entry = {
     authListeners: Set<() => void>
     status: SyncStatusStore
     loadSources: Set<() => LoadStatus>
+    eventSource?: RealtimeEventSourceFactory
 }
 
 const entries = new WeakMap<PocketBase, Entry>()
@@ -64,9 +70,13 @@ function entryFor(pb: PocketBase): Entry {
         const reconnectListeners = new Set<(resumed: boolean) => void>()
         const loadSources = new Set<() => LoadStatus>()
         let status: SyncStatusStore | undefined
+        let created: Entry | undefined
         const client = createRealtimeClient({
             get url() {
                 return pb.buildURL('/api/realtime')
+            },
+            get eventSource() {
+                return created?.eventSource
             },
             send: body => pb.send('/api/realtime', { method: 'POST', body, requestKey: null }),
             onReconnect: resumed => {
@@ -79,6 +89,7 @@ function entryFor(pb: PocketBase): Entry {
             loads: () => [...loadSources].map(source => source()),
         })
         entry = { client, reconnectListeners, authListeners: new Set(), status, loadSources }
+        created = entry
         watchAuth(pb, entry)
         entries.set(pb, entry)
     }
@@ -114,6 +125,39 @@ export function resetRealtime(pb: PocketBase): void {
  */
 export function disconnectRealtime(pb: PocketBase): void {
     entryFor(pb).client.disable()
+}
+
+/**
+ * Sets how pbtsdb opens its realtime connection for `pb`, in place of the
+ * global `EventSource`. Use it where no global exists (React Native), or to
+ * send headers the browser `EventSource` cannot, such as `Authorization`.
+ * The factory is called on each connect, so read `pb.authStore.token`
+ * inside it: a refreshed token is then sent on the next reconnect. Send no
+ * `Authorization` header when there is no token. The source it returns must
+ * follow the rules on {@link EventSourceLike}: dispatch `error` when the
+ * stream ends for any reason, and never reconnect itself. The next
+ * connection uses the factory; an open connection is kept. `undefined`
+ * restores the default.
+ *
+ * @example
+ * setRealtimeEventSource(pb, url =>
+ *     new EventSource(url, {
+ *         fetch: (input, init) =>
+ *             fetch(input, {
+ *                 ...init,
+ *                 headers: {
+ *                     ...init.headers,
+ *                     ...(pb.authStore.token ? { Authorization: pb.authStore.token } : {}),
+ *                 },
+ *             }),
+ *     })
+ * )
+ */
+export function setRealtimeEventSource(
+    pb: PocketBase,
+    factory: RealtimeEventSourceFactory | undefined
+): void {
+    entryFor(pb).eventSource = factory
 }
 
 /**

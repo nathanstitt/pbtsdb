@@ -1,7 +1,7 @@
 import PocketBase from 'pocketbase'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
-import { realtimeClientFor } from '../src/transport'
+import { realtimeClientFor, setRealtimeEventSource } from '../src/transport'
 import type { Schema } from './schema'
 
 class IdleEventSource {
@@ -16,6 +16,7 @@ class IdleEventSource {
 
 describe('transport', () => {
     afterEach(() => {
+        vi.useRealTimers()
         vi.unstubAllGlobals()
         IdleEventSource.urls = []
     })
@@ -35,5 +36,49 @@ describe('transport', () => {
         resolved = true
         void realtimeClientFor(pb).subscribe('books', () => {})
         expect(IdleEventSource.urls).toEqual(['http://resolved.test/api/realtime'])
+    })
+
+    it('opens the connection with the factory from setRealtimeEventSource', () => {
+        vi.stubGlobal('EventSource', IdleEventSource)
+        const pb = new PocketBase('http://pb.test')
+        const urls: string[] = []
+        setRealtimeEventSource(pb, url => {
+            urls.push(url)
+            return new IdleEventSource(url)
+        })
+
+        void realtimeClientFor(pb).subscribe('books', () => {})
+        expect(urls).toEqual(['http://pb.test/api/realtime'])
+    })
+
+    it('lets the factory send the token current at each connect', async () => {
+        vi.useFakeTimers()
+        const pb = new PocketBase('http://pb.test')
+        const record = { id: 'user00000000000', collectionId: 'users', collectionName: 'users' }
+        pb.authStore.save('token-1', record)
+        const headers: Record<string, string>[] = []
+        setRealtimeEventSource(pb, url => {
+            headers.push(pb.authStore.token ? { Authorization: pb.authStore.token } : {})
+            return new IdleEventSource(url)
+        })
+
+        const client = realtimeClientFor(pb)
+        void client.subscribe('books', () => {})
+        pb.authStore.save('token-2', record)
+        client.simulateDisconnect()
+        await vi.runOnlyPendingTimersAsync()
+        expect(headers).toEqual([{ Authorization: 'token-1' }, { Authorization: 'token-2' }])
+    })
+
+    it('uses the global EventSource after the factory is cleared', () => {
+        vi.stubGlobal('EventSource', IdleEventSource)
+        const pb = new PocketBase('http://pb.test')
+        const factory = vi.fn((url: string) => new IdleEventSource(url))
+        setRealtimeEventSource(pb, factory)
+        setRealtimeEventSource(pb, undefined)
+
+        void realtimeClientFor(pb).subscribe('books', () => {})
+        expect(factory).not.toHaveBeenCalled()
+        expect(IdleEventSource.urls).toEqual(['http://pb.test/api/realtime'])
     })
 })

@@ -294,6 +294,62 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 `disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
 
+### Custom EventSource
+
+By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. Call it before the first collection subscribes.
+
+pbtsdb calls the factory on each connect, so read the token inside it; a refreshed token is then sent on the next reconnect. The object the factory returns (`EventSourceLike`) must:
+
+- dispatch each SSE event to the listeners added with `addEventListener(eventName, …)`, with `data` and `lastEventId` set;
+- dispatch `error` through `addEventListener` when the stream ends for any reason, including a clean close by the server;
+- not reconnect itself. pbtsdb calls `close()` on the first `error`, and opens a new connection through the factory.
+
+The `eventsource` package meets these rules. It dispatches `error` when the stream ends, and `close()` cancels its own retry:
+
+```typescript
+import { setRealtimeEventSource } from 'pbtsdb';
+import { EventSource } from 'eventsource';
+
+setRealtimeEventSource(pb, (url) =>
+    new EventSource(url, {
+        fetch: (input, init) =>
+            fetch(input, {
+                ...init,
+                headers: {
+                    ...init.headers,
+                    ...(pb.authStore.token ? { Authorization: pb.authStore.token } : {}),
+                },
+            }),
+    })
+);
+```
+
+`react-native-sse` (1.2) does not meet them. When the server ends the stream cleanly, it dispatches nothing, and after `pollingInterval` it opens a new connection itself, with the old URL and headers. Its re-poll calls `open()`, so a subclass can change that re-poll into an `error`:
+
+```typescript
+import RNEventSource from 'react-native-sse';
+
+class PbEventSource extends RNEventSource<string> {
+    private opened = false;
+
+    open() {
+        if (this.opened) {
+            this.dispatch('error', { type: 'error', message: 'stream ended', xhrState: 4, xhrStatus: 0 });
+            return;
+        }
+        this.opened = true;
+        super.open();
+    }
+}
+
+setRealtimeEventSource(pb, (url) =>
+    new PbEventSource(url, {
+        headers: pb.authStore.token ? { Authorization: pb.authStore.token } : {},
+        pollingInterval: 1,
+    })
+);
+```
+
 ### Sync Status
 
 Two problems are visible only to pbtsdb: the realtime stream dropping while REST still works, so lists look fine but stop updating; and a query sleeping in its load retry backoff, so a list sits in "loading" with no reason shown. `getSyncStatus(pb)` reports both, for every collection of one client:

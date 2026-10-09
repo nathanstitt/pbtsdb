@@ -11,23 +11,38 @@ export interface RealtimeEvent {
 
 export type RealtimeListener = (event: RealtimeEvent) => void
 
+/** The fields of an SSE event that pbtsdb reads. */
+export type EventSourceMessage = { data?: unknown; lastEventId?: string | null }
+
+export type EventSourceListener = (event: EventSourceMessage) => void
+
 /**
- * What the client needs from an EventSource: the global one or a React
- * Native polyfill. Errors are observed through `addEventListener('error')`,
- * which every implementation has; `react-native-sse` has no `onerror`.
+ * What the client needs from an EventSource: the global one, or any
+ * implementation an app supplies. It must:
+ * - dispatch each SSE event to the listeners added for its `event` name,
+ *   with `data` and `lastEventId` set;
+ * - dispatch `error` through `addEventListener` (pbtsdb does not read
+ *   `onerror`) when the stream ends for any reason, including a clean
+ *   close by the server;
+ * - not reconnect itself: pbtsdb calls `close()` on the first `error`, and
+ *   opens a new connection through the factory.
  */
 export type EventSourceLike = {
-    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
-    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void
+    addEventListener(type: string, listener: EventSourceListener): void
+    removeEventListener(type: string, listener: EventSourceListener): void
     close(): void
 }
+
+/** Opens the SSE connection to `url`; called again on each connect. */
+export type RealtimeEventSourceFactory = (url: string) => EventSourceLike
 
 export interface RealtimeClientDeps {
     /** Absolute URL of `/api/realtime`; read each time a connection opens. */
     readonly url: string
     /** `POST /api/realtime` with the SDK's auth; rejects on a non-2xx response. */
     send: (body: { clientId: string; subscriptions: string[] }) => Promise<unknown>
-    eventSource?: (url: string) => EventSourceLike
+    /** Read each time a connection opens; the global `EventSource` when unset. */
+    readonly eventSource?: RealtimeEventSourceFactory
     /** After a reconnect. `resumed` is true when the server replayed the gap. */
     onReconnect?: (resumed: boolean) => void
     /** After any transition `status()` may report; may fire with no change. */
@@ -96,10 +111,9 @@ type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     const backoff = deps.backoff ?? REALTIME_BACKOFF_MS
-    const openSource = deps.eventSource ?? ((url: string) => new EventSource(url))
 
     const listeners = new Map<string, Set<RealtimeListener>>()
-    const dispatchers = new Map<string, EventListener>()
+    const dispatchers = new Map<string, EventSourceListener>()
     let source: EventSourceLike | undefined
     let connected = false
     let clientId: string | undefined
@@ -137,11 +151,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         deps.onStatusChange?.()
     }
 
-    function dispatcherFor(topic: string): EventListener {
+    function dispatcherFor(topic: string): EventSourceListener {
         let dispatch = dispatchers.get(topic)
         if (!dispatch) {
-            dispatch = (ev: Event) => {
-                const message = ev as MessageEvent
+            dispatch = message => {
                 let event: RealtimeEvent
                 try {
                     event = JSON.parse(String(message.data)) as RealtimeEvent
@@ -340,13 +353,13 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     function connect(): void {
         if (source || disabled) return
         const previousId = clientId
+        const openSource = deps.eventSource ?? ((url: string) => new EventSource(url))
         const target = openSource(connectUrl())
         source = target
         statusChanged()
         target.addEventListener('error', () => handleConnectionLost(target))
-        target.addEventListener('PB_CONNECT', (ev: Event) => {
+        target.addEventListener('PB_CONNECT', message => {
             if (source !== target) return
-            const message = ev as MessageEvent
             let data: { clientId?: string; resumed?: boolean } = {}
             try {
                 data = JSON.parse(String(message.data)) as typeof data

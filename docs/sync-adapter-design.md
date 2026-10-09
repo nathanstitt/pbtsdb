@@ -419,7 +419,8 @@ Server:
    overflowed: re-attach, send `PB_CONNECT` with the same id and
    `resumed: true`, replay the queue after `seq`. No topic re-POST.
 4. **Fallback.** Otherwise send a fresh id with `resumed: false`.
-5. Every event carries `id: <seq>`, per client, monotonic.
+5. Every event carries a top-level `"seq": <number>` in its JSON data,
+   per client, monotonic. `id:` stays the client id.
 
 Client (pbtsdb's own realtime client):
 
@@ -437,10 +438,12 @@ more work.
 
 Limits:
 
-- Query parameters, not headers: the browser `EventSource` cannot set
-  headers.
+- Resume state goes in query parameters, not headers: the browser
+  `EventSource` cannot set headers.
 - Bind resume to the auth record, not only the id, so a leaked id cannot
-  drain another user's queue.
+  drain another user's queue. The GET carries `Authorization` only when the
+  app supplies a factory with `setRealtimeEventSource(pb, …)` that sends
+  it; with no auth on the GET, the server must not resume.
 - PocketBase is one process per org (tinycld runs a tenant process per
   org, evicted when idle), so an in-memory queue is enough, and a tenant
   eviction loses every detached client, which is the `resumed: false`
