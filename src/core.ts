@@ -36,13 +36,16 @@ export type {
     EventSourceLike,
     EventSourceListener,
     EventSourceMessage,
+    RealtimeBackoff,
     RealtimeEventSourceFactory,
 } from './realtime-client'
 export type { LoadStatus, RealtimeStatus, SyncStatus, SyncStatusListener } from './sync-status'
 export {
     disconnectRealtime,
     getSyncStatus,
+    reconnectRealtime,
     resetRealtime,
+    setRealtimeBackoff,
     setRealtimeEventSource,
     subscribeSyncStatus,
 } from './transport'
