@@ -36,6 +36,13 @@ export type EventSourceLike = {
 /** Opens the SSE connection to `url`; called again on each connect. */
 export type RealtimeEventSourceFactory = (url: string) => EventSourceLike
 
+/**
+ * Returns the delay in milliseconds before the next reconnect. `attempt`
+ * is 0 for the first retry after the connection drops and grows by one
+ * for each retry that fails; it returns to 0 once a connection succeeds.
+ */
+export type RealtimeBackoff = (attempt: number) => number
+
 export interface RealtimeClientDeps {
     /** Absolute URL of `/api/realtime`; read each time a connection opens. */
     readonly url: string
@@ -47,7 +54,8 @@ export interface RealtimeClientDeps {
     onReconnect?: (resumed: boolean) => void
     /** After any transition `status()` may report; may fire with no change. */
     onStatusChange?: () => void
-    backoff?: readonly number[]
+    /** Read each time a reconnect is scheduled; {@link defaultRealtimeBackoff} when unset. */
+    readonly backoff?: RealtimeBackoff
 }
 
 export class RealtimeTopicTooLongError extends Error {
@@ -101,17 +109,31 @@ export interface RealtimeClient {
      * connection opens.
      */
     reset: () => void
+    /**
+     * Runs a scheduled reconnect at once and restarts the backoff, keeping
+     * the client id and last `seq` so the server can resume. A no-op unless
+     * a retry is waiting.
+     */
+    retryNow: () => void
     /** @internal Simulates the live connection dropping, the way `onerror` would; tests use it. */
     simulateDisconnect: () => void
 }
 
-export const REALTIME_BACKOFF_MS: readonly number[] = [200, 300, 500, 1000, 1200, 1500, 2000]
+export const REALTIME_BACKOFF_MAX_MS = 30_000
+
+/**
+ * Doubles from 250 ms up to {@link REALTIME_BACKOFF_MAX_MS}. Each delay
+ * is between half and all of that value, picked at random, so clients that
+ * lost the server together do not retry together.
+ */
+export const defaultRealtimeBackoff: RealtimeBackoff = attempt => {
+    const ceiling = Math.min(REALTIME_BACKOFF_MAX_MS, 250 * 2 ** attempt)
+    return ceiling / 2 + Math.random() * (ceiling / 2)
+}
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
-    const backoff = deps.backoff ?? REALTIME_BACKOFF_MS
-
     const listeners = new Map<string, Set<RealtimeListener>>()
     const dispatchers = new Map<string, EventSourceListener>()
     let source: EventSourceLike | undefined
@@ -332,7 +354,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     }
 
     function scheduleReconnect(): void {
-        const delay = backoff[Math.min(attempts, backoff.length - 1)] ?? 0
+        const delay = (deps.backoff ?? defaultRealtimeBackoff)(attempts)
         attempts += 1
         lostAt ??= Date.now()
         nextRetryAt = Date.now() + delay
@@ -471,6 +493,18 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             if (source) handleConnectionLost(source)
         },
         reset: forgetSession,
+        retryNow() {
+            if (reconnectTimer === undefined) return
+            clearTimeout(reconnectTimer)
+            reconnectTimer = undefined
+            attempts = 0
+            if (listeners.size === 0) return
+            try {
+                connect()
+            } catch (error) {
+                logger.error('Failed to reconnect', { error })
+            }
+        },
         // Pending subscribes settle: their topics are registered and go out
         // with the first POST after enable(), the same as a subscribe made
         // while disabled.

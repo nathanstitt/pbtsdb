@@ -4,6 +4,7 @@ import { realtimeTopic } from './pocketbase-limits'
 import {
     createRealtimeClient,
     type EventSourceLike,
+    type RealtimeBackoff,
     type RealtimeClient,
     type RealtimeEventSourceFactory,
 } from './realtime-client'
@@ -46,6 +47,7 @@ type Entry = {
     status: SyncStatusStore
     loadSources: Set<() => LoadStatus>
     eventSource?: RealtimeEventSourceFactory
+    backoff?: RealtimeBackoff
 }
 
 const entries = new WeakMap<PocketBase, Entry>()
@@ -77,6 +79,9 @@ function entryFor(pb: PocketBase): Entry {
             },
             get eventSource() {
                 return created?.eventSource
+            },
+            get backoff() {
+                return created?.backoff
             },
             send: body => pb.send('/api/realtime', { method: 'POST', body, requestKey: null }),
             onReconnect: resumed => {
@@ -114,6 +119,31 @@ export function resetRealtime(pb: PocketBase): void {
     if (!client) return
     client.reset()
     client.enable()
+}
+
+/**
+ * Retries the realtime connection for `pb` now instead of waiting for the
+ * scheduled retry, and restarts the backoff. The client id and last event
+ * `seq` are kept, so a server with resume support replays the gap. Call it
+ * when the app knows the network is back, such as on a connectivity change
+ * or when it returns to the foreground. A no-op unless a retry is waiting.
+ */
+export function reconnectRealtime(pb: PocketBase): void {
+    entries.get(pb)?.client.retryNow()
+}
+
+/**
+ * Sets the delay before each realtime reconnect for `pb`. `backoff` gets
+ * the retry number, 0 for the first retry after a drop, and returns the
+ * delay in milliseconds. It is read each time a retry is scheduled.
+ * `undefined` restores the default: doubling from 250 ms up to 30 s, with
+ * random jitter.
+ *
+ * @example
+ * setRealtimeBackoff(pb, attempt => Math.min(60_000, 1000 * 2 ** attempt))
+ */
+export function setRealtimeBackoff(pb: PocketBase, backoff: RealtimeBackoff | undefined): void {
+    entryFor(pb).backoff = backoff
 }
 
 /**

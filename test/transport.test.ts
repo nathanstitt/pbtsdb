@@ -1,7 +1,12 @@
 import PocketBase from 'pocketbase'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
-import { realtimeClientFor, setRealtimeEventSource } from '../src/transport'
+import {
+    realtimeClientFor,
+    reconnectRealtime,
+    setRealtimeBackoff,
+    setRealtimeEventSource,
+} from '../src/transport'
 import type { Schema } from './schema'
 
 class IdleEventSource {
@@ -80,5 +85,30 @@ describe('transport', () => {
         void realtimeClientFor(pb).subscribe('books', () => {})
         expect(factory).not.toHaveBeenCalled()
         expect(IdleEventSource.urls).toEqual(['http://pb.test/api/realtime'])
+    })
+
+    it('waits the delay from setRealtimeBackoff, and reconnectRealtime skips it', async () => {
+        vi.useFakeTimers()
+        vi.stubGlobal('EventSource', IdleEventSource)
+        const pb = new PocketBase('http://pb.test')
+        const attempts: number[] = []
+        setRealtimeBackoff(pb, attempt => {
+            attempts.push(attempt)
+            return 60_000
+        })
+
+        const client = realtimeClientFor(pb)
+        void client.subscribe('books', () => {})
+        client.simulateDisconnect()
+        expect(attempts).toEqual([0])
+        await vi.advanceTimersByTimeAsync(59_999)
+        expect(IdleEventSource.urls).toHaveLength(1)
+
+        reconnectRealtime(pb)
+        expect(IdleEventSource.urls).toHaveLength(2)
+    })
+
+    it('reconnectRealtime is a no-op for a client with no realtime connection', () => {
+        expect(() => reconnectRealtime(new PocketBase('http://pb.test'))).not.toThrow()
     })
 })

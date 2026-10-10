@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     createRealtimeClient,
+    defaultRealtimeBackoff,
     type EventSourceLike,
     type EventSourceListener,
+    REALTIME_BACKOFF_MAX_MS,
     RealtimeDisconnectedError,
     RealtimeTopicTooLongError,
 } from '../src/realtime-client'
@@ -58,7 +60,7 @@ function setup(options: { resumed?: boolean } = {}) {
         },
         eventSource: url => new FakeEventSource(url),
         onReconnect: resumed => reconnects.push(resumed),
-        backoff: [0],
+        backoff: () => 0,
     })
     const connect = (id = 'client-1') => {
         const source = FakeEventSource.instances.at(-1)
@@ -191,7 +193,7 @@ describe('realtime client', () => {
                 sent.push(body)
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         let settled = false
         const sub = client
@@ -222,7 +224,7 @@ describe('realtime client', () => {
                 await new Promise<void>(resolve => gate.push(resolve))
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const first = client.subscribe('t1', () => undefined)
         await flush()
@@ -287,7 +289,7 @@ describe('realtime client', () => {
                 sent.push(body)
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await flush()
@@ -323,7 +325,7 @@ describe('realtime client', () => {
                 )
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const first = client.subscribe('t1', () => undefined)
         await flush()
@@ -374,7 +376,7 @@ describe('realtime client', () => {
                 await new Promise<void>(resolve => gate.push(resolve))
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const a = client.subscribe('A', () => undefined)
         const b = client.subscribe('B', () => undefined)
@@ -429,7 +431,7 @@ describe('realtime client', () => {
             },
             eventSource: url => new FakeEventSource(url),
             onReconnect: resumed => order.push(`reconnect:${resumed}`),
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await vi.advanceTimersByTimeAsync(0)
@@ -468,7 +470,7 @@ describe('realtime client', () => {
             },
             eventSource: url => new FakeEventSource(url),
             onReconnect: resumed => reconnects.push(resumed),
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await vi.advanceTimersByTimeAsync(0)
@@ -495,7 +497,7 @@ describe('realtime client', () => {
         expect(reconnects).toEqual([false])
     })
 
-    it('walks the backoff table while a re-POST keeps failing after reconnect', async () => {
+    it('walks the backoff while a re-POST keeps failing after reconnect', async () => {
         vi.useFakeTimers()
         FakeEventSource.instances = []
         let failNext = false
@@ -510,7 +512,7 @@ describe('realtime client', () => {
             },
             eventSource: url => new FakeEventSource(url),
             onReconnect: resumed => reconnects.push(resumed),
-            backoff: [10, 20, 40],
+            backoff: attempt => 10 * 2 ** attempt,
         })
         const sub = client.subscribe('t1', () => undefined)
         await vi.advanceTimersByTimeAsync(0)
@@ -519,7 +521,7 @@ describe('realtime client', () => {
         first.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
         await sub
 
-        // First failure after the initial connect: backoff[0] = 10ms.
+        // First failure after the initial connect: attempt 0 = 10ms.
         first.fail()
         failNext = true
         await vi.advanceTimersByTimeAsync(9)
@@ -533,7 +535,7 @@ describe('realtime client', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(reconnects).toEqual([])
 
-        // That re-POST failed too: backoff walks to index 1 = 20ms, not back to 10ms.
+        // That re-POST failed too: attempt 1 = 20ms, not back to 10ms.
         await vi.advanceTimersByTimeAsync(19)
         expect(FakeEventSource.instances).toHaveLength(2)
         await vi.advanceTimersByTimeAsync(1)
@@ -545,7 +547,7 @@ describe('realtime client', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(reconnects).toEqual([])
 
-        // And again to index 2 = 40ms.
+        // And again to attempt 2 = 40ms.
         await vi.advanceTimersByTimeAsync(39)
         expect(FakeEventSource.instances).toHaveLength(3)
         await vi.advanceTimersByTimeAsync(1)
@@ -662,7 +664,7 @@ describe('realtime client', () => {
                 await new Promise<void>(resolve => gate.push(resolve))
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const first = client.subscribe('t1', () => undefined)
         await flush()
@@ -710,7 +712,7 @@ describe('realtime client', () => {
             },
             eventSource: url => new FakeEventSource(url),
             onReconnect: resumed => reconnects.push(resumed),
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await flush()
@@ -791,7 +793,7 @@ describe('realtime client', () => {
                 await new Promise<void>(resolve => gate.push(resolve))
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const pending = client.subscribe('t1', () => undefined)
         await flush()
@@ -832,7 +834,7 @@ describe('realtime client', () => {
             },
             eventSource: url => new FakeEventSource(url),
             onReconnect: resumed => reconnects.push(resumed),
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await flush()
@@ -885,7 +887,7 @@ describe('realtime client', () => {
                 await new Promise<void>((resolve, reject) => gate.push({ resolve, reject }))
             },
             eventSource: url => new FakeEventSource(url),
-            backoff: [0],
+            backoff: () => 0,
         })
         const first = client.subscribe('t1', () => undefined)
         await flush()
@@ -923,7 +925,7 @@ describe('realtime client', () => {
                 send: async () => undefined,
                 eventSource: url => new FakeEventSource(url),
                 onStatusChange: () => seen.push(client.status().state),
-                backoff: [10, 20],
+                backoff: attempt => 10 * 2 ** attempt,
             })
             expect(client.status()).toEqual({ state: 'disabled' })
 
@@ -1003,7 +1005,7 @@ describe('realtime client', () => {
                     }
                 },
                 eventSource: url => new FakeEventSource(url),
-                backoff: [10],
+                backoff: () => 10,
             })
             const sub = client.subscribe('t1', () => undefined)
             await vi.advanceTimersByTimeAsync(0)
@@ -1032,7 +1034,7 @@ describe('realtime client', () => {
                 if (failNextConnect) throw new Error('no EventSource available')
                 return new FakeEventSource(url)
             },
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await flush()
@@ -1060,7 +1062,7 @@ describe('realtime client', () => {
             get eventSource() {
                 return factory
             },
-            backoff: [0],
+            backoff: () => 0,
         })
         const sub = client.subscribe('t1', () => undefined)
         await vi.advanceTimersByTimeAsync(0)
@@ -1075,5 +1077,117 @@ describe('realtime client', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(opened).toEqual(['first', 'second'])
         expect(FakeEventSource.instances[1].url).toContain('resume=client-1')
+    })
+
+    describe('backoff', () => {
+        it('doubles from 250 ms to the cap, with each delay between half and all of the step', () => {
+            const random = vi.spyOn(Math, 'random')
+            random.mockReturnValue(0)
+            expect([0, 1, 2, 3].map(defaultRealtimeBackoff)).toEqual([125, 250, 500, 1000])
+            expect(defaultRealtimeBackoff(20)).toBe(REALTIME_BACKOFF_MAX_MS / 2)
+            random.mockReturnValue(1)
+            expect(defaultRealtimeBackoff(0)).toBe(250)
+            expect(defaultRealtimeBackoff(2000)).toBe(REALTIME_BACKOFF_MAX_MS)
+            random.mockRestore()
+        })
+
+        it('reads the backoff each time a retry is scheduled, with the retry number', async () => {
+            vi.useFakeTimers()
+            FakeEventSource.instances = []
+            const attempts: number[] = []
+            let backoff = (attempt: number) => {
+                attempts.push(attempt)
+                return 10
+            }
+            const client = createRealtimeClient({
+                url: 'http://pb.test/api/realtime',
+                send: async () => undefined,
+                eventSource: url => new FakeEventSource(url),
+                get backoff() {
+                    return backoff
+                },
+            })
+            const sub = client.subscribe('t1', () => undefined)
+            await vi.advanceTimersByTimeAsync(0)
+            FakeEventSource.instances[0].emit('PB_CONNECT', { clientId: 'c1' }, 'c1')
+            await sub
+
+            FakeEventSource.instances[0].fail()
+            await vi.advanceTimersByTimeAsync(10)
+            backoff = attempt => {
+                attempts.push(attempt)
+                return 50
+            }
+            FakeEventSource.instances[1].fail()
+            await vi.advanceTimersByTimeAsync(49)
+            expect(FakeEventSource.instances).toHaveLength(2)
+            await vi.advanceTimersByTimeAsync(1)
+            expect(FakeEventSource.instances).toHaveLength(3)
+            expect(attempts).toEqual([0, 1])
+        })
+    })
+
+    describe('retryNow', () => {
+        it('runs a waiting retry at once with resume parameters and restarts the backoff', async () => {
+            vi.useFakeTimers()
+            FakeEventSource.instances = []
+            const attempts: number[] = []
+            const client = createRealtimeClient({
+                url: 'http://pb.test/api/realtime',
+                send: async () => undefined,
+                eventSource: url => new FakeEventSource(url),
+                backoff: attempt => {
+                    attempts.push(attempt)
+                    return 60_000
+                },
+            })
+            const sub = client.subscribe('t1', () => undefined)
+            await vi.advanceTimersByTimeAsync(0)
+            const first = FakeEventSource.instances[0]
+            first.emit('PB_CONNECT', { clientId: 'c1' }, 'c1')
+            await sub
+            first.emit('t1', { action: 'create', record: {}, seq: 7 })
+
+            first.fail()
+            await vi.advanceTimersByTimeAsync(60_000)
+            FakeEventSource.instances[1].fail()
+            expect(attempts).toEqual([0, 1])
+
+            client.retryNow()
+            expect(FakeEventSource.instances).toHaveLength(3)
+            expect(FakeEventSource.instances[2].url).toBe(
+                'http://pb.test/api/realtime?resume=c1&after=7'
+            )
+            FakeEventSource.instances[2].fail()
+            expect(attempts).toEqual([0, 1, 0])
+
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(FakeEventSource.instances).toHaveLength(4)
+        })
+
+        it('does nothing while connected or while no retry is waiting', async () => {
+            const { client, connect } = setup()
+            client.retryNow()
+            expect(FakeEventSource.instances).toHaveLength(0)
+            const sub = client.subscribe('t1', () => undefined)
+            await flush()
+            connect('client-1')
+            await sub
+            client.retryNow()
+            expect(FakeEventSource.instances).toHaveLength(1)
+            expect(client.status()).toEqual({ state: 'connected' })
+        })
+
+        it('does nothing while disabled', async () => {
+            const { client, connect } = setup()
+            const sub = client.subscribe('t1', () => undefined)
+            await flush()
+            connect('client-1')
+            await sub
+            client.disable()
+            client.retryNow()
+            expect(FakeEventSource.instances).toHaveLength(1)
+            expect(client.status()).toEqual({ state: 'disabled' })
+        })
     })
 })

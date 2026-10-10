@@ -294,6 +294,19 @@ resetRealtime(pb); // open it again; every ready collection reloads
 
 `disconnectRealtime(pb)` closes the connection and keeps it closed until `resetRealtime(pb)`. Collections keep working over REST and keep their subscriptions registered. Use it at logout, or at startup where realtime is not wanted, such as an embedded view.
 
+After a drop, pbtsdb waits longer between each retry: the delay doubles from 250 ms up to 30 s, with random jitter so many clients do not retry at the same time. Use `setRealtimeBackoff(pb, fn)` to set your own delays. `fn` gets the retry number (0 for the first retry after a drop) and returns the delay in milliseconds. `undefined` restores the default.
+
+A long delay can keep the app offline after the network returns. Call `reconnectRealtime(pb)` when you know the network is back. It retries at once and keeps the session, so a server with resume support replays the gap. It does nothing unless a retry is waiting.
+
+```typescript
+import { reconnectRealtime, setRealtimeBackoff } from 'pbtsdb';
+
+setRealtimeBackoff(pb, (attempt) => Math.min(60_000, 1000 * 2 ** attempt));
+
+// for example, from a connectivity listener or an app-foreground handler
+reconnectRealtime(pb);
+```
+
 ### Custom EventSource
 
 By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. Call it before the first collection subscribes.
