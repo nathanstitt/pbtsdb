@@ -1,6 +1,6 @@
 import type { LoadSubsetOptions } from '@tanstack/db'
 import { joinPaths } from './expand-paths'
-import { subsetFromWhere, type WhereSubset } from './keyed-where'
+import { compoundSubsetFromWhere, subsetFromWhere, type WhereSubset } from './keyed-where'
 import { REALTIME_MAX_FILTER_LENGTH, subsetFilters } from './pocketbase-limits'
 import { convertToPocketBaseFilter, convertToPocketBaseSort } from './pocketbase-query-converter'
 
@@ -18,6 +18,7 @@ export interface PbRequest {
     /** Rows to skip before the first returned row; set only when no cursor is given. */
     offset?: number
     expand?: string
+    /** Rows whose field is in this set; with `filter`, rows that match both. */
     subset?: WhereSubset
     /**
      * TanStack's `cursor.whereFrom` as a PocketBase filter. Conjoined to the
@@ -29,8 +30,13 @@ export interface PbRequest {
 
 export function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
     const request: PbRequest = {}
-    const subset = subsetFromWhere(opts?.where)
-    const filter = subset ? undefined : convertToPocketBaseFilter(opts?.where)
+    const compound = compoundSubsetFromWhere(opts?.where)
+    const subset = compound?.subset ?? subsetFromWhere(opts?.where)
+    const filter = compound
+        ? convertToPocketBaseFilter(compound.extra)
+        : subset
+          ? undefined
+          : convertToPocketBaseFilter(opts?.where)
     const sort = convertToPocketBaseSort(opts?.orderBy)
     const expand = joinPaths((opts as LoadOptions | undefined)?.expand ?? [])
     const cursor = convertToPocketBaseFilter(opts?.cursor?.whereFrom)
@@ -47,10 +53,13 @@ export function toRequest(opts: LoadSubsetOptions | undefined): PbRequest {
 }
 
 /**
- * The filters a query's realtime entries send: every chunk of a keyed subset,
- * or the single converted filter. `undefined` means the whole collection.
+ * The filters a query's realtime entries send: every chunk of a keyed subset
+ * (each with the request's filter), or the single converted filter.
+ * `undefined` means the whole collection.
  */
 export function realtimeFiltersFor(request: PbRequest): string[] | undefined {
-    if (request.subset) return subsetFilters(request.subset, REALTIME_MAX_FILTER_LENGTH)
+    if (request.subset) {
+        return subsetFilters(request.subset, REALTIME_MAX_FILTER_LENGTH, request.filter)
+    }
     return request.filter ? [request.filter] : undefined
 }

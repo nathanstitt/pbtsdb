@@ -49,4 +49,28 @@ describe('subsetFilters', () => {
             values.map(value => `id = "${value}"`)
         )
     })
+
+    it('caps the terms per filter below the PocketBase expression limit', () => {
+        const values = Array.from({ length: 500 }, (_, i) => String(i))
+        const filters = subsetFilters({ field: 'n', values })
+        expect(filters.length).toBeGreaterThan(1)
+        for (const filter of filters) expect(filter.split(' || ').length).toBeLessThanOrEqual(150)
+        expect(filters.flatMap(filter => filter.split(' || '))).toEqual(
+            values.map(value => `n = "${value}"`)
+        )
+    })
+
+    it('conjoins extra to every filter and keeps each under the length limit', () => {
+        const values = Array.from({ length: 500 }, (_, i) => `id${String(i).padStart(13, '0')}`)
+        const extra = 'archived = false'
+        const filters = subsetFilters({ field: 'project', values }, 2500, extra)
+        expect(filters.length).toBeGreaterThan(1)
+        const terms: string[] = []
+        for (const filter of filters) {
+            expect(filter.length).toBeLessThanOrEqual(2500)
+            expect(filter.startsWith(`(${extra}) && (`)).toBe(true)
+            terms.push(...filter.slice(`(${extra}) && (`.length, -1).split(' || '))
+        }
+        expect(terms).toEqual(values.map(value => `project = "${value}"`))
+    })
 })

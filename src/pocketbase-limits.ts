@@ -66,28 +66,39 @@ export function realtimeTopicLength(
     return realtimeTopic(collectionName, options).length
 }
 
+// PocketBase refuses a filter with more than 200 expressions
+// (DefaultFilterExprLimit); the margin leaves room for an extra condition.
+const MAX_FILTER_TERMS = 150
+
 /**
  * The PocketBase filters that select `subset`, each short enough for the server
  * to accept: one when every value fits, more when they do not. `maxLength`
  * defaults to the REST fetch budget; pass `REALTIME_MAX_FILTER_LENGTH` when the
- * filters go to a realtime subscription instead.
+ * filters go to a realtime subscription instead. `extra` is conjoined to every
+ * filter and counts toward its length.
  */
 export function subsetFilters(
     { field, values }: WhereSubset,
-    maxLength = MAX_FILTER_LENGTH
+    maxLength = MAX_FILTER_LENGTH,
+    extra?: string
 ): string[] {
+    const wrap = (chunk: string) => (extra ? `(${extra}) && (${chunk})` : chunk)
+    const budget = maxLength - wrap('').length
     const filters: string[] = []
     let current = ''
+    let terms = 0
     for (const value of values) {
         const clause = `${field} = ${escapeValue(value)}`
         const joined = current ? `${current} || ${clause}` : clause
-        if (current && joined.length > maxLength) {
-            filters.push(current)
+        if (current && (joined.length > budget || terms >= MAX_FILTER_TERMS)) {
+            filters.push(wrap(current))
             current = clause
+            terms = 1
         } else {
             current = joined
+            terms += 1
         }
     }
-    if (current) filters.push(current)
+    if (current) filters.push(wrap(current))
     return filters
 }

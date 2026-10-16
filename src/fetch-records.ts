@@ -116,15 +116,16 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
     }
 
     // Stored rows were filed with alwaysFetchRelations already; only a view's
-    // extra `request.expand` forces a fetch. An empty subset selects nothing
-    // and must never become a request. A sorted and limited request must be
+    // extra `request.expand` forces a fetch, and a subset's extra `filter`
+    // needs the server. An empty subset selects nothing and must never
+    // become a request. A sorted and limited request must be
     // sliced in that order, which the store's id order cannot provide, and a
     // cursor is a boundary in that order too.
     function servedFromStore(request: PbRequest): T[] | undefined {
         const { subset, sort, limit } = request
         if (!subset) return undefined
         if (subset.values.length === 0) return []
-        if (request.expand || request.cursor || (sort && limit)) return undefined
+        if (request.filter || request.expand || request.cursor || (sort && limit)) return undefined
         const rows =
             subset.field === 'id' ? rowsFromStore(subset.values) : fieldSubsetFromStore(subset)
         return rows && limit ? rows.slice(0, limit) : rows
@@ -211,7 +212,9 @@ export function createFetcher<T extends object>(deps: FetchDeps<T>): Fetcher<T> 
             const servedAfterFiling = servedFromStore(request)
             if (servedAfterFiling) return { rows: servedAfterFiling, fromStore: true }
         }
-        const filters = request.subset ? subsetFilters(request.subset) : [request.filter]
+        const filters = request.subset
+            ? subsetFilters(request.subset, undefined, request.filter)
+            : [request.filter]
         const expand = deps.activeExpand(request)
         const chunk = chunkRequest(request, filters.length)
         const load = ++requestSeq

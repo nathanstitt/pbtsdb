@@ -1,6 +1,6 @@
 import type { IR } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
-import { matchesSubset, subsetFromWhere } from '../src/keyed-where'
+import { compoundSubsetFromWhere, matchesSubset, subsetFromWhere } from '../src/keyed-where'
 
 const ref = (...path: string[]) => ({ type: 'ref', path }) as unknown as IR.BasicExpression
 const val = (value: unknown) => ({ type: 'val', value }) as unknown as IR.BasicExpression
@@ -85,5 +85,38 @@ describe('matchesSubset', () => {
     it('does not match a missing or non-string field', () => {
         expect(matchesSubset({}, 'card', wanted)).toBe(false)
         expect(matchesSubset({ card: 1 }, 'card', wanted)).toBe(false)
+    })
+})
+
+describe('compoundSubsetFromWhere', () => {
+    const archived = fn('eq', ref('archived'), val(false))
+    const projects = fn('in', ref('project'), val(['p2', 'p1']))
+
+    it('splits and(extra, in(field, ...)) in either argument order', () => {
+        const expected = { subset: { field: 'project', values: ['p1', 'p2'] }, extra: archived }
+        expect(compoundSubsetFromWhere(fn('and', archived, projects))).toEqual(expected)
+        expect(compoundSubsetFromWhere(fn('and', projects, archived))).toEqual(expected)
+    })
+
+    it('reads an or-chain of eq on one field as the subset', () => {
+        const chain = fn('or', fn('eq', ref('list'), val('l1')), fn('eq', ref('list'), val('l2')))
+        expect(compoundSubsetFromWhere(fn('and', archived, chain))).toEqual({
+            subset: { field: 'list', values: ['l1', 'l2'] },
+            extra: archived,
+        })
+    })
+
+    it('keeps every other and argument as extra', () => {
+        const owner = fn('eq', ref('owner'), val('u1'))
+        expect(compoundSubsetFromWhere(fn('and', archived, projects, owner))?.extra).toEqual(
+            fn('and', archived, owner)
+        )
+    })
+
+    it('returns undefined when no and argument is a list', () => {
+        const owner = fn('eq', ref('owner'), val('u1'))
+        expect(compoundSubsetFromWhere(fn('and', archived, owner))).toBeUndefined()
+        expect(compoundSubsetFromWhere(projects)).toBeUndefined()
+        expect(compoundSubsetFromWhere(undefined)).toBeUndefined()
     })
 })

@@ -1,4 +1,4 @@
-import { and, eq, gt, IR, lt } from '@tanstack/db'
+import { and, eq, gt, IR, inArray, lt } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
 import { realtimeFiltersFor, toRequest } from '../src/request'
 
@@ -75,5 +75,39 @@ describe('toRequest paging', () => {
         expect(realtimeFiltersFor(request)).toEqual(['(genre = "Fantasy" && page_count > 1)'])
         const keyed = toRequest({ where: eq(field(['author']), 'a1'), offset: 30, limit: 10 })
         expect(realtimeFiltersFor(keyed)).toEqual(['author = "a1"'])
+    })
+})
+
+describe('toRequest compound subset', () => {
+    const ids = Array.from({ length: 500 }, (_, i) => `id${String(i).padStart(13, '0')}`)
+    const where = and(eq(field(['archived']), false), inArray(field(['project']), ids))
+
+    it('keeps the list as a subset and the other conditions as its filter', () => {
+        const request = toRequest({ where })
+        expect(request.subset).toEqual({ field: 'project', values: ids })
+        expect(request.filter).toBe('archived = false')
+    })
+
+    it('chunks realtime filters, each carrying the other conditions', () => {
+        const filters = realtimeFiltersFor(toRequest({ where })) ?? []
+        expect(filters.length).toBeGreaterThan(1)
+        for (const filter of filters) {
+            expect(filter.length).toBeLessThanOrEqual(1000)
+            expect(filter.startsWith('(archived = false) && (')).toBe(true)
+        }
+    })
+
+    it('converts several other conditions as one filter', () => {
+        const request = toRequest({
+            where: and(
+                eq(field(['archived']), false),
+                inArray(field(['project']), ['p1', 'p2']),
+                eq(field(['owner']), 'u1')
+            ),
+        })
+        expect(request.filter).toBe('(archived = false && owner = "u1")')
+        expect(realtimeFiltersFor(request)).toEqual([
+            '((archived = false && owner = "u1")) && (project = "p1" || project = "p2")',
+        ])
     })
 })
