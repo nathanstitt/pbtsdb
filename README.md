@@ -412,6 +412,14 @@ In on-demand mode a live query's subset is released when the last subscriber unm
 
 A subset load that fails is retried with backoff (`loadRetryDelays`, default 1, 2, 4, 8, 15 and then every 30 seconds) until it succeeds, so a live query stays loading through an outage instead of entering an error state it cannot leave. A `collection.reload()` or a realtime reconnect retries at once, also while another reload is running. A response the server gave on purpose, a 4xx other than 401, 408 or 429, is not retried and reports its error. A 401 waits for the next auth change and then retries. Delays carry a little jitter so many queries do not retry in lockstep.
 
+A live query that reports a non-retryable error stays in the error state: `collection.reload()` refetches the rows, but TanStack DB does not clear the query's error. To retry, build a new query. With `useLiveQuery`, add a counter to the dependency array and increment it on retry:
+
+```tsx
+const [attempt, setAttempt] = useState(0);
+const query = useLiveQuery((q) => q.from({ posts }), [attempt]);
+const retry = () => setAttempt((n) => n + 1);
+```
+
 ### Sync Modes
 
 Every collection is either **eager** (the default) or **on-demand**:
@@ -427,6 +435,19 @@ from memory. An on-demand collection translates each live query's `where`,
 for enter the store, and different filters are cached under different keys.
 Use on-demand for large collections; realtime keeps both modes current once rows
 are loaded.
+
+#### Supported `where` operators
+
+An on-demand `where` can use these TanStack DB operators. Any other operator throws.
+
+| Operator | PocketBase filter |
+| --- | --- |
+| `eq`, `gt`, `gte`, `lt`, `lte` | `=`, `>`, `>=`, `<`, `<=` |
+| `inArray` | `=` joined with `||` |
+| `like`, `ilike` | `~` (case-insensitive on the server) |
+| `isNull`, `isUndefined` | `= null` |
+| `and`, `or` | `&&`, `||` |
+| `not` | Negates the operator inside it, for example `not(eq(...))` gives `!=` |
 
 #### Paging
 
