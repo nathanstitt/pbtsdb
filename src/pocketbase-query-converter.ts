@@ -65,6 +65,7 @@ const NEGATED_OPERATORS: Record<string, string> = {
     notIn: 'in',
     like: 'notLike',
     notLike: 'like',
+    ilike: 'notLike',
     isNull: 'isNotNull',
     isUndefined: 'isNotNull',
     isNotNull: 'isNull',
@@ -150,6 +151,9 @@ export function convertToPocketBaseFilter(
             like: (field: FieldPath, value: unknown) => {
                 return `${fieldPathToString(field)} ~ ${escapeValue(value)}`
             },
+            ilike: (field: FieldPath, value: unknown) => {
+                return `${fieldPathToString(field)} ~ ${escapeValue(value)}`
+            },
             isNull: (field: FieldPath) => {
                 return `${fieldPathToString(field)} = null`
             },
@@ -163,7 +167,7 @@ export function convertToPocketBaseFilter(
         onUnknownOperator: (operator: string, _args: unknown[]) => {
             throw new Error(
                 `Unsupported operator '${operator}' for PocketBase filter conversion. ` +
-                    `Supported operators: eq, gt, gte, lt, lte, in, like, and, or, not, isNull, isUndefined`
+                    `Supported operators: eq, gt, gte, lt, lte, in, like, ilike, and, or, not, isNull, isUndefined`
             )
         },
     })

@@ -428,6 +428,19 @@ for enter the store, and different filters are cached under different keys.
 Use on-demand for large collections; realtime keeps both modes current once rows
 are loaded.
 
+#### Supported `where` operators
+
+An on-demand `where` can use these TanStack DB operators. Any other operator throws.
+
+| Operator | PocketBase filter |
+| --- | --- |
+| `eq`, `gt`, `gte`, `lt`, `lte` | `=`, `>`, `>=`, `<`, `<=` |
+| `inArray` | `=` joined with `||` |
+| `like`, `ilike` | `~` (case-insensitive on the server) |
+| `isNull`, `isUndefined` | `= null` |
+| `and`, `or` | `&&`, `||` |
+| `not` | Negates the operator inside it, for example `not(eq(...))` gives `!=` |
+
 #### Paging
 
 An on-demand query with `orderBy` and `limit` fetches one page of that size.

@@ -1,5 +1,5 @@
 import type { IR } from '@tanstack/db'
-import { and, eq, gt, inArray, isNull, like, lt, not, or } from '@tanstack/db'
+import { and, eq, gt, ilike, inArray, isNull, like, lt, not, or } from '@tanstack/db'
 import { describe, expect, it } from 'vitest'
 import {
     convertToPocketBaseFilter,
@@ -91,6 +91,14 @@ describe('PocketBase Query Converter', () => {
         })
     })
 
+    describe('ilike', () => {
+        it('should compile to the PocketBase ~ operator', () => {
+            expect(convertToPocketBaseFilter(ilike(mockField<string>(['genre']), 'fan%'))).toBe(
+                'genre ~ "fan%"'
+            )
+        })
+    })
+
     describe('not', () => {
         const genre = mockField<string>(['genre'])
         const pages = mockField<number>(['page_count'])
@@ -98,6 +106,7 @@ describe('PocketBase Query Converter', () => {
         it.each([
             ['eq', not(eq(genre, 'Fantasy')), 'genre != "Fantasy"'],
             ['like', not(like(genre, 'Fan%')), 'genre !~ "Fan%"'],
+            ['ilike', not(ilike(genre, 'fan%')), 'genre !~ "fan%"'],
             ['isNull', not(isNull(genre)), 'genre != null'],
             ['gt', not(gt(pages, 100)), 'page_count <= 100'],
             ['lt', not(lt(pages, 100)), 'page_count >= 100'],
