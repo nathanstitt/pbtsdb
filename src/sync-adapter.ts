@@ -1,6 +1,5 @@
 import {
     compileSingleRowExpression,
-    LoadSubsetOperationAbortedError,
     type LoadSubsetOptions,
     type SyncConfig,
     toBooleanPredicate,
@@ -180,17 +179,14 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         }
     }
 
-    // Core ignores an aborted load's outcome, but a direct caller
-    // (`beginLoadSubsetOperation`) must see that it did not complete. A
-    // reload skips the demand instead.
+    // An aborted load is obsolete demand, not a failure: it installs nothing
+    // and resolves with no rows. It never rejects, because core awaits a
+    // load it later aborts itself (a lazy join that replaces its segments
+    // awaits the replaced loads together with the replacement, then aborts
+    // them when the replacement settles), and a rejection there puts the
+    // live query into the error state.
     function isStopped(run: Run, opts: LoadSubsetOptions): boolean {
         return run.abort.signal.aborted || opts.signal?.aborted === true
-    }
-
-    function stopped(run: Run, opts: LoadSubsetOptions, wait: Wait): boolean {
-        if (!isStopped(run, opts)) return false
-        if (wait === 'visible') throw new LoadSubsetOperationAbortedError()
-        return true
     }
 
     // `unknown` is the answer for an expression the client cannot compile or
@@ -267,7 +263,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         const released = result.fromStore ? true : releaseOmitted(opts, before, ids)
         await settle(applied, wait)
         await settle(released, wait)
-        if (!stopped(run, opts, wait)) membership.confirm(opts, [ACCEPTED], ids)
+        if (!isStopped(run, opts)) membership.confirm(opts, [ACCEPTED], ids)
         return ids
     }
 
@@ -422,12 +418,11 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             if (result !== undefined && !superseded(run, opts, demand, seq)) {
                 return install(run, opts, wait, before, result)
             }
-            // Undo before `stopped` can throw, so an aborted result leaves
-            // the filings as they were. A superseded load resolves with the
-            // newer one, so the caller never resolves before its rows.
+            // An aborted result leaves the filings as they were. A superseded
+            // load resolves with the newer one, so the caller never resolves
+            // before its rows.
             result?.filings.undo()
             if (demand.seq !== seq) return demand.loading ?? []
-            stopped(run, opts, wait)
             return []
         })()
         demand.loading = loading

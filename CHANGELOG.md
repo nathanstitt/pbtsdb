@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- An aborted `loadSubset` now resolves with no rows instead of rejecting with
+  `LoadSubsetOperationAbortedError`. `@tanstack/db` 0.12 awaits, in one
+  `Promise.all`, the loads a lazy join replaces together with their
+  replacement, then aborts the replaced loads when the replacement settles;
+  the rejection put the live query into the error state ("Subset demand
+  '...' failed: Load subset operation was aborted before its result became
+  visible").
+
 ## [1.0.0] - 2026-10-07
 
 ### Breaking

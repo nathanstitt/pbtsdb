@@ -3,7 +3,6 @@ import {
     gt,
     IR,
     isNull,
-    LoadSubsetOperationAbortedError,
     type LoadSubsetOptions,
     like,
     type SyncConfig,
@@ -190,16 +189,18 @@ describe('sync adapter', () => {
         expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
     })
 
-    it('an abort before the receipt rejects with LoadSubsetOperationAbortedError', async () => {
+    it('an abort before the receipt resolves and installs nothing', async () => {
         const t = setup()
         const abort = new AbortController()
         const load = t.loadSubset({ signal: abort.signal })
         abort.abort()
         t.calls[0].resolve([row('a')])
-        await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        await expect(load).resolves.toBeUndefined()
+        expect(t.log).toEqual([])
+        expect(t.ledger.has('a')).toBe(false)
     })
 
-    it('an abort after an accepted receipt still rejects with LoadSubsetOperationAbortedError', async () => {
+    it('an abort after an accepted receipt resolves and leaves the rows unconfirmed', async () => {
         const t = setup()
         const visible = deferred()
         t.receipt(() => withAcceptedReceipt(visible.promise, true))
@@ -210,7 +211,7 @@ describe('sync adapter', () => {
         expect(t.log).toEqual(['begin', 'insert:a', 'commit'])
         abort.abort()
         visible.resolve()
-        await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        await expect(load).resolves.toBeUndefined()
     })
 
     it('a row deleted during its fetch is not installed', async () => {
@@ -278,7 +279,7 @@ describe('sync adapter', () => {
         const load = t.loadSubset({})
         t.cleanup()
         t.calls[0].resolve([row('a')])
-        await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        await expect(load).resolves.toBeUndefined()
         expect(t.log).toEqual([])
         expect(t.ledger.size()).toBe(0)
         expect(t.realtime.resetQueryFilters).toHaveBeenCalledTimes(1)
@@ -503,7 +504,7 @@ describe('sync adapter', () => {
             t.unloadSubset(first)
             expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
             t.calls[0].resolve([row('a', 'x')])
-            await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+            await expect(load).resolves.toBeUndefined()
 
             const second = named('x')
             const next = t.loadSubset(second)
@@ -620,7 +621,7 @@ describe('sync adapter', () => {
         const aborted = t.loadSubset({ signal: abort.signal })
         abort.abort()
         t.calls[2].resolve([row('c')])
-        await expect(aborted).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        await expect(aborted).resolves.toBeUndefined()
         expect(t.calls[2].filings.undo).toHaveBeenCalledTimes(1)
     })
 
@@ -720,8 +721,8 @@ describe('sync adapter', () => {
             expect(t.adapter.loadStatus()).toEqual({ retrying: 2, failed: 0, failingSince: since })
             t.cleanup()
             expect(t.adapter.loadStatus()).toEqual({ retrying: 0, failed: 0 })
-            await expect(first).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
-            await expect(second).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+            await expect(first).resolves.toBeUndefined()
+            await expect(second).resolves.toBeUndefined()
         })
 
         it('does not count a demand once it is unloaded or parked', async () => {
@@ -977,7 +978,7 @@ describe('sync adapter', () => {
         await flush()
         abort.abort()
         visible.resolve()
-        await expect(load).rejects.toBeInstanceOf(LoadSubsetOperationAbortedError)
+        await expect(load).resolves.toBeUndefined()
         t.unloadSubset(opts)
         expect(t.ledger.idsOf(ACCEPTED)).toEqual(['a'])
     })
