@@ -184,7 +184,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     // load it later aborts itself (a lazy join that replaces its segments
     // awaits the replaced loads together with the replacement, then aborts
     // them when the replacement settles), and a rejection there puts the
-    // live query into the error state. See docs/aborted-loads.md.
+    // live query into the error state.
     function isStopped(run: Run, opts: LoadSubsetOptions): boolean {
         return run.abort.signal.aborted || opts.signal?.aborted === true
     }

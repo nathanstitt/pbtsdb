@@ -15,7 +15,7 @@ All notable changes to this project will be documented in this file.
   replacement, then aborts the replaced loads when the replacement settles;
   the rejection put the live query into the error state ("Subset demand
   '...' failed: Load subset operation was aborted before its result became
-  visible"). See `docs/aborted-loads.md`.
+  visible").
 
 ## [1.0.0] - 2026-10-07
 

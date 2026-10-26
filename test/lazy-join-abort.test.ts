@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 import { createCollection, disconnectRealtime } from '../src'
 import type { Books, Schema } from './schema'
 
-// Regression for docs/aborted-loads.md. A lazy join replaces its segments
+// A lazy join replaces its segments
 // when the parent keys churn; @tanstack/db 0.12 awaits the replaced loads
 // together with the replacement and then aborts them when the replacement
 // settles. An aborted load that rejected put the live query into the error
