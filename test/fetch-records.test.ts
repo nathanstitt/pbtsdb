@@ -9,8 +9,8 @@ type Row = { id: string; n: number }
 const rows = (count: number): Row[] =>
     Array.from({ length: count }, (_, i) => ({ id: `r${i}`, n: i }))
 
-function fetcherFor(pb: PocketBase) {
-    return createFetcher<Row>({
+function fetcherDeps(pb = {} as PocketBase) {
+    return {
         pb,
         collectionName: 'books',
         relationTargets: undefined,
@@ -24,7 +24,11 @@ function fetcherFor(pb: PocketBase) {
             fileExpanded: async () => ({ commit: () => {}, undo: () => {} }),
             canFileFirst: () => false,
         },
-    })
+    }
+}
+
+function fetcherFor(pb: PocketBase) {
+    return createFetcher<Row>(fetcherDeps(pb))
 }
 
 // A fake PocketBase whose list calls return `count` rows, enough for any
@@ -145,5 +149,32 @@ describe('fetchRecords abort', () => {
             FetchAbortedError
         )
         expect(getFullList).not.toHaveBeenCalled()
+    })
+})
+
+describe('compound subset fetch', () => {
+    it('sends each chunk with the extra filter and merges the rows', async () => {
+        const { getFullList, fetch } = setup(3)
+        const values = Array.from({ length: 500 }, (_, i) => `id${String(i).padStart(13, '0')}`)
+        await fetch({ subset: { field: 'project', values }, filter: 'archived = false' })
+        const filters = getFullList.mock.calls.map(
+            ([options]) => (options as { filter: string }).filter
+        )
+        expect(filters).toEqual(
+            subsetFilters({ field: 'project', values }, 2500, 'archived = false')
+        )
+        expect(filters.length).toBeGreaterThan(1)
+        for (const filter of filters) expect(filter).toContain('(archived = false) && (')
+    })
+
+    it('does not serve a subset with an extra filter from the store', () => {
+        const fetcher = createFetcher<Row>({
+            ...fetcherDeps(),
+            syncedRow: id => ({ id, n: 0 }),
+        })
+        expect(fetcher.serveFromStore({ subset: { field: 'id', values: ['a'] } })).toHaveLength(1)
+        expect(
+            fetcher.serveFromStore({ subset: { field: 'id', values: ['a'] }, filter: 'n = 1' })
+        ).toBeUndefined()
     })
 })

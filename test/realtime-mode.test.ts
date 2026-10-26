@@ -1,4 +1,4 @@
-import { and, eq, inArray, useLiveQuery } from '@tanstack/react-db'
+import { and, eq, inArray, or, useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
 import {
     afterAll,
@@ -371,6 +371,30 @@ describe('realtime mode', () => {
             expect(filters.join(' || ').split(' || ')).toHaveLength(130)
         }, 20000)
 
+        it('opens one entry per chunk of an oversized subset beside another condition', async () => {
+            const { books } = make()
+            const ids = Array.from({ length: 130 }, () => newRecordId())
+            const { result } = renderHook(() =>
+                useLiveQuery(q =>
+                    q
+                        .from({ b: books })
+                        .where(({ b }) => and(inArray(b.id, ids), eq(b.genre, 'Fantasy')))
+                )
+            )
+            await waitForLoadFinish(result, 10000)
+            await books.waitForSubscription()
+
+            const filters = filtersSubscribed().filter((f): f is string => f !== undefined)
+            expect(filters).toEqual(
+                subsetFilters(
+                    { field: 'id', values: [...ids].sort() },
+                    REALTIME_MAX_FILTER_LENGTH,
+                    FANTASY
+                )
+            )
+            expect(filters.length).toBeGreaterThan(1)
+        }, 20000)
+
         describe('topic cap', () => {
             const logger = createTestLogger()
 
@@ -408,7 +432,7 @@ describe('realtime mode', () => {
                     useLiveQuery(q =>
                         q
                             .from({ b: books })
-                            .where(({ b }) => and(inArray(b.id, ids), eq(b.genre, 'Fantasy')))
+                            .where(({ b }) => or(inArray(b.id, ids), eq(b.genre, 'Fantasy')))
                     )
                 )
                 await waitForLoadFinish(result, 10000)

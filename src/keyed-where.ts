@@ -1,4 +1,4 @@
-import type { IR } from '@tanstack/db'
+import { IR } from '@tanstack/db'
 
 export type WhereSubset = { field: string; values: string[] }
 
@@ -65,6 +65,27 @@ export function subsetFromWhere(
     if (!where) return undefined
     const subset = collect(where as unknown as Node)
     return subset ? { field: subset.field, values: [...new Set(subset.values)].sort() } : undefined
+}
+
+/**
+ * An `and` whose arguments include a list on one field (`in`, or an `or` of
+ * `eq`): that list as a subset, and the `and` of every other argument as
+ * `extra`. The subset can then be chunked with `extra` on each chunk.
+ */
+export function compoundSubsetFromWhere(
+    where: IR.BasicExpression<boolean> | undefined | null
+): { subset: WhereSubset; extra: IR.BasicExpression<boolean> } | undefined {
+    const node = where as unknown as Node | undefined | null
+    if (node?.type !== 'func' || node.name !== 'and' || !node.args) return undefined
+    for (const [index, arg] of node.args.entries()) {
+        if (arg.name !== 'in' && arg.name !== 'or') continue
+        const subset = subsetFromWhere(arg as unknown as IR.BasicExpression<boolean>)
+        if (!subset) continue
+        const rest = node.args.filter((_, i) => i !== index) as unknown as IR.BasicExpression[]
+        const extra = rest.length === 1 ? rest[0] : new IR.Func('and', rest)
+        return { subset, extra: extra as IR.BasicExpression<boolean> }
+    }
+    return undefined
 }
 
 /** Whether a row's `field` is one of `wanted` (a multiple relation matches by containment). */
