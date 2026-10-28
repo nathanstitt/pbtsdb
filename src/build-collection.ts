@@ -258,9 +258,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // In eager mode the whole collection stays loaded after the last
     // subscriber leaves, until GC, so a topic's rows keep their holder until
-    // reload() or cleanup. In on-demand mode they leave with the topic.
+    // reload() or cleanup. In on-demand mode they leave with the topic,
+    // except rows a live query matches: a filter entry stays closed while
+    // '*' is open, so a row created meanwhile came only on '*'.
     function releaseTopic(topic: string): void {
         if (syncMode === 'eager') return
+        rehome(ledger.idsOf(topic))
         if (membership.drop([topic]) === false) {
             logger.debug('Ignoring topic release while sync is not running', {
                 collectionName,
@@ -373,13 +376,18 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // matches leaves. A row another holder took meanwhile keeps it.
     const acceptedTimers = new Set<ReturnType<typeof setTimeout>>()
     function settleAccepted(ids: readonly string[]): void {
+        rehome(ids)
+        membership.drop([ACCEPTED], ids)
+    }
+    // Every live query whose where matches a row takes it, so a holder that
+    // leaves never removes a row a query still shows.
+    function rehome(ids: readonly string[]): void {
         for (const id of ids) {
             const row = ledger.row(id)
             if (!row) continue
             const holders = adapter.holdersFor(row)
             if (holders.length > 0) membership.hold(holders, [id])
         }
-        membership.drop([ACCEPTED], ids)
     }
     function expireAccepted(rows: readonly RecordType[]): void {
         if (subsetGcTime <= 0) return
