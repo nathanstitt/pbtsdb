@@ -149,7 +149,8 @@ export const defaultRealtimeBackoff: RealtimeBackoff = attempt => {
     return ceiling / 2 + Math.random() * (ceiling / 2)
 }
 
-type Waiter = { resolve: () => void; reject: (error: unknown) => void }
+/** `removal` marks a POST that only drops topics: its caller needs no confirmation. */
+type Waiter = { resolve: () => void; reject: (error: unknown) => void; removal: boolean }
 
 // Statuses a new connection can clear: PocketBase answers 404 for a client
 // id it no longer holds (a forced or idle close, a restart) and 403 when the
@@ -159,9 +160,18 @@ type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 // must not start a reconnect loop.
 const TRANSIENT_POST_STATUSES = new Set([0, 403, 404, 408, 429])
 
-function isTransientPostError(error: unknown): boolean {
+// The server's client for this id is gone (404) or holds another auth
+// (403); resuming it would fail the same way.
+const SESSION_LOST_STATUSES = new Set([403, 404])
+
+function postStatus(error: unknown): number | undefined {
     const status = (error as { status?: unknown } | null)?.status
-    return typeof status === 'number' && (status >= 500 || TRANSIENT_POST_STATUSES.has(status))
+    return typeof status === 'number' ? status : undefined
+}
+
+function isTransientPostError(error: unknown): boolean {
+    const status = postStatus(error)
+    return status !== undefined && (status >= 500 || TRANSIENT_POST_STATUSES.has(status))
 }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
@@ -183,8 +193,14 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let lostAt: number | undefined
     let nextRetryAt = 0
     let everConnected = false
-    /** A POST failed transiently since the last connection's POST succeeded. */
-    let topicsLost = false
+    /**
+     * Set when a POST fails with an unknown outcome: the topics the server
+     * held throughout, whether it applied the failed lists or not. A resumed
+     * reconnect replays only these.
+     */
+    let heldSinceFailure: string[] | undefined
+    /** Bumped on every accepted `PB_CONNECT`; a POST sent on an earlier connection is stale. */
+    let connection = 0
     /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
     let session = 0
     let disabled = false
@@ -232,8 +248,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         for (const waiter of pending) error === undefined ? waiter.resolve() : waiter.reject(error)
     }
 
-    async function sendTopics(): Promise<void> {
-        const list = topics()
+    async function sendTopics(list: string[]): Promise<void> {
         if (list.length === 0) {
             close(true)
             clientId = undefined
@@ -248,18 +263,24 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         if (clientId === id) confirmed = list
     }
 
+    /** Removal waiters settle at once; the rest go back to the front of the queue. */
+    function requeue(pending: Waiter[]): void {
+        settleWaiters(pending.filter(waiter => waiter.removal))
+        waiters = [...pending.filter(waiter => !waiter.removal), ...waiters]
+    }
+
     /**
-     * A POST outlived its session (a `reset()` or full teardown ran while it
-     * was in flight): its waiters never got the topic under the new session,
-     * so they go back to the front of the queue for the next `runSubmit`
-     * pass instead of settling now, and the POST's own outcome is moot.
+     * A POST outlived its connection (a reconnect, a `reset()` or a full
+     * teardown ran while it was in flight): its waiters never got the topic
+     * on the current connection, so they go back to the queue for the next
+     * `runSubmit` pass instead of settling now.
      */
     function requeueStale(pending: Waiter[]): void {
         if (disabled) {
             settleWaiters(pending)
             return
         }
-        waiters = [...pending, ...waiters]
+        requeue(pending)
         resubmit = true
     }
 
@@ -275,41 +296,55 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         settleWaiters(pending)
     }
 
+    // The server may or may not have applied `list`, so nothing counts as
+    // confirmed and the next POST always goes out.
+    function outcomeUnknown(list: string[]): void {
+        heldSinceFailure = (heldSinceFailure ?? confirmed).filter(topic => list.includes(topic))
+        confirmed = []
+    }
+
     /**
      * A POST failed in a way a new connection can clear. Its subscriptions
      * stay registered and pending, and the stream is replaced: it can stay
      * open while the POST fails, and then nothing else reconnects. The
      * reconnect's POST carries every registered topic and settles the
-     * waiters. The server never had those topics, so no replay covers them,
-     * and that reconnect is reported as not resumed. The server may still
-     * have applied the failed list, so nothing counts as confirmed, and even
-     * a resumed reconnect with an unchanged list POSTs.
+     * waiters. After a 403 or 404 the reconnect does not resume, because the
+     * server's client for the old id is gone or holds another auth.
      */
     function keepThroughFailedPost(pending: Waiter[], error: unknown): void {
         logger.warn('Realtime subscriptions POST failed; reconnecting', { error })
-        waiters = [...pending, ...waiters]
-        topicsLost = true
-        confirmed = []
+        requeue(pending)
+        const status = postStatus(error)
+        if (status !== undefined && SESSION_LOST_STATUSES.has(status)) {
+            clientId = undefined
+            lastSeq = undefined
+        }
         if (!source) return
         close(false)
         scheduleReconnect()
         statusChanged()
     }
 
-    // A POST is stale when its session ended or a reconnect replaced the
-    // client id it was sent for: `close(false)` keeps `session`, so the id
-    // tells a POST of a dropped connection from one of the current one.
+    // A POST is stale when its session ended or a newer connection took
+    // over. A resumed connection keeps the client id, so only the connection
+    // count tells its POSTs from those of the connection it replaced.
     async function postTopics(pending: Waiter[], startedSession: number): Promise<void> {
+        const list = topics()
         const startedId = clientId
-        const isStale = () => session !== startedSession || clientId !== startedId
+        const startedConnection = connection
+        const isStale = () => session !== startedSession || connection !== startedConnection
         try {
-            await sendTopics()
+            await sendTopics(list)
             if (isStale()) requeueStale(pending)
             else settleWaiters(pending)
         } catch (error) {
+            const transient = isTransientPostError(error)
+            if (transient && session === startedSession && clientId === startedId) {
+                outcomeUnknown(list)
+            }
             if (isStale()) {
                 requeueStale(pending)
-            } else if (isTransientPostError(error)) {
+            } else if (transient) {
                 keepThroughFailedPost(pending, error)
             } else {
                 logger.error('Failed to set realtime subscriptions', { error })
@@ -341,9 +376,9 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         }
     }
 
-    function submit(): Promise<void> {
+    function submit(removal = false): Promise<void> {
         const done = new Promise<void>((resolve, reject) => {
-            waiters.push({ resolve, reject })
+            waiters.push({ resolve, reject, removal })
         })
         if (!submitQueued) {
             submitQueued = true
@@ -454,6 +489,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             const resumed = data.resumed === true && id === previousId
             clientId = id
             connected = true
+            connection += 1
             if (!resumed) {
                 lastSeq = undefined
                 confirmed = []
@@ -470,8 +506,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                     if (source !== target) return
                     attempts = 0
                     lostAt = undefined
-                    const lost = topicsLost
-                    topicsLost = false
+                    const held = heldSinceFailure
+                    heldSinceFailure = undefined
+                    const lost =
+                        held !== undefined && confirmed.some(topic => !held.includes(topic))
                     statusChanged()
                     if (isReconnect) deps.onReconnect?.(resumed && !lost)
                 },
@@ -518,7 +556,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         signal: AbortSignal | undefined
     ): Promise<() => Promise<void>> {
         const unsubscribe = async () => {
-            if (removeListener(topic, listener)) await submit().catch(() => undefined)
+            if (removeListener(topic, listener)) await submit(true).catch(() => undefined)
         }
         return new Promise((resolve, reject) => {
             let settled = false
@@ -529,7 +567,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             function onAbort() {
                 if (settled) return
                 finish()
-                if (removeListener(topic, listener)) void submit().catch(() => undefined)
+                if (removeListener(topic, listener)) void submit(true).catch(() => undefined)
                 reject(new RealtimeSubscribeAbortedError())
             }
             signal?.addEventListener('abort', onAbort)
