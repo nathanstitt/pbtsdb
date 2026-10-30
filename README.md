@@ -320,7 +320,7 @@ await rerun(); // the first fetch, after the topic is confirmed
 await unsubscribe();
 ```
 
-A server such as tinycld sends `{}` on `collection/<name>` after a write commits, so a client can rerun a custom query without a record-level subscription.
+A PocketBase JS hook can send such a signal through `$app.subscriptionsBroker()`, for example `{}` on `collection/<name>` after a write commits, so a client can rerun a custom query without a record-level subscription.
 
 To keep a collection live on such topics, give it `liveTopics`. PocketBase sends no record events for a view collection, so a view needs this to show changes in the tables it reads:
 
@@ -333,7 +333,7 @@ const authorBookCounts = c('author_book_counts', {
 
 While the collection syncs, it subscribes to each topic. The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100 ms), and the collection reloads once when the window closes. Messages during the window do not extend it, so a steady stream of messages still reloads once per window. When the server confirms a topic after a load started, the collection reloads once more, because a write between that load and the confirmation sends a message that this client does not get. If the subscriptions request fails in one of those ways, the topic stays registered and the reconnect that follows sends it again; the collection then reloads when the server confirms it. A topic the server refuses with another 4xx, such as a 400, is logged and stays off. The topics close when the collection is cleaned up, also while one still waits for the server. An empty topic or a topic over 2500 characters throws when the collection is built.
 
-Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads. A tinycld server sends change signals only to signed-in clients, so a `liveTopics` collection on a signed-out page never reloads.
+Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads. If the server sends change signals only to signed-in clients, a `liveTopics` collection on a signed-out page never reloads.
 
 ### Custom EventSource
 

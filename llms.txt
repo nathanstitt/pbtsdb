@@ -133,8 +133,8 @@ JSON is dropped. A subscriptions request that fails with no response, a 5xx,
 or a 403, 404, 408 or 429 keeps the promise pending until the reconnect that
 follows confirms the topic; another 4xx, such as a 400, rejects it. Pass
 `{ signal }` as a fourth argument to abort a pending subscribe. Both errors are
-exported: `RealtimeTopicTooLongError`, `RealtimeSubscribeAbortedError`. A server such as tinycld sends `{}` on `collection/<name>` after a
-write.
+exported: `RealtimeTopicTooLongError`, `RealtimeSubscribeAbortedError`. A PocketBase JS hook can send `{}` on `collection/<name>` after a write,
+through `$app.subscriptionsBroker()`.
 
 ```typescript
 const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun());
@@ -167,8 +167,8 @@ const counts = c('author_book_counts', {
   Cleanup drops a topic that still waits for the server.
 - An empty topic or a topic over 2500 characters throws at build.
 - The server must send a message on the view's topic when a source table of the
-  view changes. A tinycld server sends change signals only to signed-in
-  clients, so a `liveTopics` collection on a signed-out page never reloads.
+  view changes. If the server sends change signals only to signed-in
+  clients, a `liveTopics` collection on a signed-out page never reloads.
 
 ## Testing
 

@@ -1,7 +1,7 @@
 // Test fixture: sends `count` data-free messages on `topic` to every
-// signed-in realtime client subscribed to it, the way tinycld core's
-// changesignal package does after a write. The payload is '{}': pbtsdb drops
-// an event whose data is not JSON.
+// signed-in realtime client subscribed to it, as a server that sends change
+// signals does after a write. The payload is '{}': pbtsdb drops an event
+// whose data is not JSON.
 routerAdd(
     'POST',
     '/api/test/signal',
