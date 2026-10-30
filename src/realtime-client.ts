@@ -75,13 +75,31 @@ export class RealtimeDisconnectedError extends Error {
     }
 }
 
+/** Rejects a pending `subscribe` whose `signal` aborted. */
+export class RealtimeSubscribeAbortedError extends Error {
+    constructor() {
+        super('Realtime subscription was aborted before it was confirmed')
+        this.name = 'RealtimeSubscribeAbortedError'
+    }
+}
+
 /**
  * One SSE connection to PocketBase with its topic list. Topic changes made
  * in one tick go out in one POST; `subscribe` resolves once the server has
  * the topic (see docs/internals.md, "Realtime client").
  */
 export interface RealtimeClient {
-    subscribe: (topic: string, listener: RealtimeListener) => Promise<() => Promise<void>>
+    /**
+     * Resolves once a POST carrying the topic succeeds. A POST that fails
+     * with no response or a 5xx keeps it pending until the reconnect's POST;
+     * a 4xx rejects it. Aborting `signal` while pending drops the
+     * registration and rejects with `RealtimeSubscribeAbortedError`.
+     */
+    subscribe: (
+        topic: string,
+        listener: RealtimeListener,
+        options?: { signal?: AbortSignal }
+    ) => Promise<() => Promise<void>>
     topics: () => string[]
     isConnected: () => boolean
     status: () => RealtimeStatus
@@ -160,6 +178,8 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     let lostAt: number | undefined
     let nextRetryAt = 0
     let everConnected = false
+    /** A POST failed transiently since the last connection's POST succeeded. */
+    let topicsLost = false
     /** Bumped by `reset()` and every full teardown; a POST that outlives its session is stale. */
     let session = 0
     let disabled = false
@@ -250,10 +270,18 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         settleWaiters(pending)
     }
 
-    // The stream can stay open while a POST fails, and then nothing else
-    // reconnects: the reconnect is what makes collections subscribe what the
-    // failed POST lost again (see `onReconnect`).
-    function reconnectAfterFailedPost(): void {
+    /**
+     * A POST failed with no response or a server error. Its subscriptions
+     * stay registered and pending, and the stream is replaced: it can stay
+     * open while the POST fails, and then nothing else reconnects. The
+     * reconnect's POST carries every registered topic and settles the
+     * waiters. The server never had those topics, so no replay covers them,
+     * and that reconnect is reported as not resumed.
+     */
+    function keepThroughFailedPost(pending: Waiter[], error: unknown): void {
+        logger.warn('Realtime subscriptions POST failed; reconnecting', { error })
+        waiters = [...pending, ...waiters]
+        topicsLost = true
         if (!source) return
         close(false)
         scheduleReconnect()
@@ -268,10 +296,11 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         } catch (error) {
             if (session !== startedSession) {
                 requeueStale(pending)
+            } else if (isTransientPostError(error)) {
+                keepThroughFailedPost(pending, error)
             } else {
                 logger.error('Failed to set realtime subscriptions', { error })
                 settleWaiters(pending, error)
-                if (isTransientPostError(error)) reconnectAfterFailedPost()
             }
         }
     }
@@ -428,8 +457,10 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                     if (source !== target) return
                     attempts = 0
                     lostAt = undefined
+                    const lost = topicsLost
+                    topicsLost = false
                     statusChanged()
-                    if (isReconnect) deps.onReconnect?.(resumed)
+                    if (isReconnect) deps.onReconnect?.(resumed && !lost)
                 },
                 () => {
                     if (source !== target || !isReconnect) return
@@ -441,8 +472,74 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         })
     }
 
+    function addListener(topic: string, listener: RealtimeListener): void {
+        let set = listeners.get(topic)
+        const isNew = set === undefined
+        if (!set) {
+            set = new Set()
+            listeners.set(topic, set)
+        }
+        set.add(listener)
+        if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
+    }
+
+    /** Returns true when `topic` has no listener left, so the server's list must change. */
+    function removeListener(topic: string, listener: RealtimeListener): boolean {
+        const current = listeners.get(topic)
+        if (!current?.delete(listener) || current.size > 0) return false
+        listeners.delete(topic)
+        const dispatch = dispatchers.get(topic)
+        if (dispatch) {
+            source?.removeEventListener(topic, dispatch)
+            dispatchers.delete(topic)
+        }
+        return true
+    }
+
+    // A subscribe can stay pending across reconnects; aborting it drops the
+    // registration at once, so no later POST carries it.
+    function awaitConfirmation(
+        ready: Promise<void>,
+        topic: string,
+        listener: RealtimeListener,
+        signal: AbortSignal | undefined
+    ): Promise<() => Promise<void>> {
+        const unsubscribe = async () => {
+            if (removeListener(topic, listener)) await submit().catch(() => undefined)
+        }
+        return new Promise((resolve, reject) => {
+            let settled = false
+            const finish = () => {
+                settled = true
+                signal?.removeEventListener('abort', onAbort)
+            }
+            function onAbort() {
+                if (settled) return
+                finish()
+                if (removeListener(topic, listener)) void submit().catch(() => undefined)
+                reject(new RealtimeSubscribeAbortedError())
+            }
+            signal?.addEventListener('abort', onAbort)
+            ready.then(
+                () => {
+                    if (settled) return
+                    finish()
+                    resolve(unsubscribe)
+                },
+                (error: unknown) => {
+                    if (settled) return
+                    finish()
+                    removeListener(topic, listener)
+                    reject(error)
+                }
+            )
+        })
+    }
+
     return {
-        subscribe(topic, listener) {
+        subscribe(topic, listener, options) {
+            const signal = options?.signal
+            if (signal?.aborted) return Promise.reject(new RealtimeSubscribeAbortedError())
             if (topic.length > REALTIME_TOPIC_MAX_LENGTH) {
                 return Promise.reject(new RealtimeTopicTooLongError(topic.length))
             }
@@ -453,45 +550,12 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
                     return Promise.reject(error)
                 }
             }
-            let set = listeners.get(topic)
-            const isNew = set === undefined
-            if (!set) {
-                set = new Set()
-                listeners.set(topic, set)
-            }
-            set.add(listener)
-            if (isNew && source && connected) source.addEventListener(topic, dispatcherFor(topic))
+            addListener(topic, listener)
             // While disabled nothing can confirm a topic; the registration
             // goes out with the first POST after enable(). Resolving now lets
             // the caller open and close entries, so idle cleanup still runs.
             const ready = disabled ? Promise.resolve() : submit()
-            const unsubscribe = async () => {
-                const current = listeners.get(topic)
-                if (!current?.delete(listener)) return
-                if (current.size > 0) return
-                listeners.delete(topic)
-                const dispatch = dispatchers.get(topic)
-                if (dispatch) {
-                    source?.removeEventListener(topic, dispatch)
-                    dispatchers.delete(topic)
-                }
-                await submit().catch(() => undefined)
-            }
-            return ready.then(
-                () => unsubscribe,
-                (error: unknown) => {
-                    const current = listeners.get(topic)
-                    if (current?.delete(listener) && current.size === 0) {
-                        listeners.delete(topic)
-                        const dispatch = dispatchers.get(topic)
-                        if (dispatch) {
-                            source?.removeEventListener(topic, dispatch)
-                            dispatchers.delete(topic)
-                        }
-                    }
-                    throw error
-                }
-            )
+            return awaitConfirmation(ready, topic, listener, signal)
         },
         topics,
         isConnected: () => connected,

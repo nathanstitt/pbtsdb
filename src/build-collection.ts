@@ -523,16 +523,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // A window from the first message, not a trailing debounce: a steady
     // stream of messages still reloads once per window. reload() queues one
-    // follow-up for a message that arrives during a fetch. A refused
-    // subscribe leaves the topic off the connection; `retry` subscribes it
-    // again (the next reconnect or auth change calls it), and the
-    // confirmation then reloads, since no message reported the gap.
-    function openLiveTopics(): { retry: () => void; close: () => void } {
-        if (liveTopics.length === 0) return { retry: () => undefined, close: () => undefined }
+    // follow-up for a message that arrives during a fetch. A subscribe stays
+    // pending through a transient POST failure and resolves on the
+    // reconnect, and its confirmation then reloads; cleanup aborts it.
+    function openLiveTopics(): () => void {
+        if (liveTopics.length === 0) return () => undefined
         let timer: ReturnType<typeof setTimeout> | undefined
-        let closed = false
-        const subscribed = new Map<string, () => Promise<void>>()
-        const subscribing = new Set<string>()
+        const abort = new AbortController()
+        const subscribed: (() => Promise<void>)[] = []
         const onMessage = () => {
             if (timer !== undefined) return
             timer = setTimeout(function closeLiveTopicWindow() {
@@ -540,16 +538,14 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 reloadFor('live topic')
             }, LIVE_TOPIC_WINDOW_MS)
         }
-        const subscribe = (topic: string) => {
-            subscribing.add(topic)
-            void transport.subscribeTopic(topic, onMessage).then(
+        for (const topic of liveTopics) {
+            void transport.subscribeTopic(topic, onMessage, abort.signal).then(
                 unsubscribe => {
-                    subscribing.delete(topic)
-                    if (closed) {
+                    if (abort.signal.aborted) {
                         void unsubscribe()
                         return
                     }
-                    subscribed.set(topic, unsubscribe)
+                    subscribed.push(unsubscribe)
                     // A load that started before the server had the topic
                     // may predate a change no message reported to us. An
                     // eager first load still running counts too: a reload
@@ -559,10 +555,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     }
                 },
                 (error: unknown) => {
-                    subscribing.delete(topic)
-                    // A cleanup racing a disconnect refuses the pending
-                    // subscribe; nothing wants the topic any more.
-                    if (closed) return
+                    // Cleanup aborted it, or a disconnect refused it after
+                    // cleanup; nothing wants the topic any more.
+                    if (abort.signal.aborted) return
                     logger.error('Failed to subscribe to a live topic', {
                         collectionName,
                         topic,
@@ -571,21 +566,11 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 }
             )
         }
-        for (const topic of liveTopics) subscribe(topic)
-        return {
-            retry() {
-                if (closed) return
-                for (const topic of liveTopics) {
-                    if (!subscribed.has(topic) && !subscribing.has(topic)) subscribe(topic)
-                }
-            },
-            close() {
-                closed = true
-                if (timer !== undefined) clearTimeout(timer)
-                timer = undefined
-                for (const unsubscribe of subscribed.values()) void unsubscribe()
-                subscribed.clear()
-            },
+        return () => {
+            abort.abort()
+            if (timer !== undefined) clearTimeout(timer)
+            timer = undefined
+            for (const unsubscribe of subscribed.splice(0)) void unsubscribe()
         }
     }
 
@@ -597,10 +582,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (event.status === 'cleaned-up') subsets.clear()
         if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
             const removeLoadSource = transport.addLoadSource(adapter.loadStatus)
-            const topics = openLiveTopics()
+            const closeLiveTopics = openLiveTopics()
             const removeReconnect = transport.onReconnect(resumed => {
-                topics.retry()
-                if (resumed || !realtime.isOpen()) return
+                // An entry still opening is confirmed by this reconnect's
+                // POST: a subscribe kept through a failed POST resolves just
+                // after this listener runs, and its rows need the reload too.
+                if (resumed || !(realtime.isOpen() || realtime.isOpening())) return
                 // A collection still loading has no live demands to reload,
                 // but its first load may be waiting out a retry.
                 if (!collection.isReady()) {
@@ -615,13 +602,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 acceptedTimers.clear()
                 membership.drop([ACCEPTED])
                 if (store.isAttached()) reloadFor('auth change')
-                topics.retry()
             })
             removeTransportListeners = () => {
                 removeLoadSource()
                 removeReconnect()
                 removeAuth()
-                topics.close()
+                closeLiveTopics()
             }
         } else if (removeTransportListeners && event.status === 'cleaned-up') {
             removeTransportListeners()

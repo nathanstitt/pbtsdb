@@ -123,8 +123,6 @@ const failWith = (status: number) => () =>
         })
     )
 
-const refused = failWith(400)
-
 // Fails the first subscriptions POST that carries `topic` with `status`,
 // and holds the second until `release` is called.
 function refuseFirstTopicPost(topic: string, status = 400) {
@@ -369,37 +367,7 @@ describe('liveTopics', () => {
         )
     })
 
-    it('subscribes a refused topic again on the next reconnect, then reloads', async () => {
-        const author = await createAuthor()
-        // Keeps a topic on the connection, so a reconnect happens after the
-        // refused topic leaves it.
-        const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
-        try {
-            const post = refuseFirstTopicPost(TOPIC)
-            const counts = createCountsCollection()
-            const { result } = mountCount(counts, author)
-            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
-            await waitFor(() => expect(post.attempts()).toBe(1))
-            await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(TOPIC))
-
-            reconnectNow()
-            await waitFor(() => expect(post.attempts()).toBe(2))
-            // Settles the reconnect's own reload: only the retry's
-            // confirmation can bring in a write made now.
-            await counts.utils.reload()
-            await createBook(author)
-            post.release()
-            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
-
-            await createBook(author)
-            await sendSignal(TOPIC)
-            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(2))
-        } finally {
-            await keep()
-        }
-    })
-
-    it('reconnects after a subscriptions POST fails with a 500, then reloads', async () => {
+    it('keeps its topic through a POST that fails with a 500, then reloads', async () => {
         const author = await createAuthor()
         setRealtimeBackoff(pb, () => 0)
         const post = refuseFirstTopicPost(TOPIC, 500)
@@ -407,11 +375,13 @@ describe('liveTopics', () => {
         const { result } = mountCount(counts, author)
         await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
 
-        // No reconnectNow(): the failed POST itself reconnects, and the
-        // retry goes out on the new connection.
+        // The failed POST reconnects, and the reconnect's POST carries the
+        // kept topic; it is held here.
         await waitFor(() => expect(post.attempts()).toBe(2))
         expect(post.clientIds[1]).not.toBe(post.clientIds[0])
-        await counts.utils.reload()
+        expect(realtimeClientFor(pb).topics()).toContain(TOPIC)
+        // Written before the server has the topic: no message reports it,
+        // so only a reload after the confirmation brings it in.
         await createBook(author)
         post.release()
         await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
@@ -421,7 +391,49 @@ describe('liveTopics', () => {
         await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(2))
     })
 
-    it('keeps the connection after a subscriptions POST is refused with a 400', async () => {
+    it('keeps a lone topic through a POST that fails with a 500', async () => {
+        const author = await createAuthor()
+        await waitFor(() => expect(realtimeClientFor(pb).topics()).toEqual([]))
+        setRealtimeBackoff(pb, () => 0)
+        const post = refuseFirstTopicPost(TOPIC, 500)
+        // Synced with no query: the live topic is the only topic on the
+        // connection, so only it can bring the connection back.
+        const counts = createCountsCollection()
+        counts.startSyncImmediate()
+        await waitFor(() => expect(post.attempts()).toBe(2))
+        expect(realtimeClientFor(pb).topics()).toEqual([TOPIC])
+        expect(post.clientIds[1]).not.toBe(post.clientIds[0])
+        post.release()
+        await confirmTopics()
+
+        const { result } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
+        await counts.utils.reload()
+        await createBook(author)
+        await sendSignal(TOPIC)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
+    })
+
+    it('leaves no topic when cleaned up while its subscribe waits out a failed POST', async () => {
+        const topic = 'collection/live_pending_cleanup'
+        const author = await createAuthor()
+        setRealtimeBackoff(pb, () => 60_000)
+        const post = refuseFirstTopicPost(topic, 500)
+        const counts = createCountsCollection([topic])
+        const { result, unmount } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data).toHaveLength(1))
+        await waitFor(() => expect(realtimeClientFor(pb).status().state).toBe('reconnecting'))
+        expect(realtimeClientFor(pb).topics()).toContain(topic)
+
+        unmount()
+        await counts.cleanup()
+        expect(realtimeClientFor(pb).topics()).not.toContain(topic)
+        // A POST made now carries every topic still registered.
+        await confirmTopics()
+        expect(post.attempts()).toBe(1)
+    })
+
+    it('leaves a topic refused with a 400 off, without a reconnect', async () => {
         const author = await createAuthor()
         const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
         try {
@@ -434,66 +446,18 @@ describe('liveTopics', () => {
             await barrier()
             expect(realtimeClientFor(pb).clientId()).toBe(connectedId)
             expect(post.attempts()).toBe(1)
-        } finally {
-            await keep()
-        }
-    })
 
-    // With no topic left on the connection, an auth change opens no new
-    // connection, so no reconnect can retry the refused topic.
-    it('subscribes a refused topic again after an auth change', async () => {
-        const author = await createAuthor()
-        let refusing = true
-        pb.beforeSend = (url: string, options: SendOptions) => {
-            if (refusing && url.endsWith('/api/realtime') && options.method === 'POST') {
-                options.fetch = refused
-            }
-            return { url, options }
-        }
-        const counts = createCountsCollection()
-        const { result } = mountCount(counts, author)
-        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
-        await waitFor(() => expect(realtimeClientFor(pb).topics()).toEqual([]))
-        refusing = false
-
-        clearAuth()
-        await authenticateTestUser()
-        await waitFor(() => expect(realtimeClientFor(pb).topics()).toContain(TOPIC))
-        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
-        await confirmTopics()
-        await counts.utils.reload()
-
-        await createBook(author)
-        await sendSignal(TOPIC)
-        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
-    })
-
-    it('stops retrying a refused topic after cleanup', async () => {
-        const topic = 'collection/live_refused_cleanup'
-        const author = await createAuthor()
-        const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
-        try {
-            const post = refuseFirstTopicPost(topic)
-            const counts = createCountsCollection([topic])
-            const { result, unmount } = mountCount(counts, author)
-            await waitFor(() => expect(result.current.data).toHaveLength(1))
-            await waitFor(() => expect(post.attempts()).toBe(1))
-            await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(topic))
-            unmount()
-            await counts.cleanup()
-
+            // The server would refuse it again: a later reconnect does not resend it.
             reconnectNow()
-            // The barrier's subscribe settles after the reconnect's POST,
-            // and the reconnect listeners run before it continues.
             await barrier()
-            expect(realtimeClientFor(pb).topics()).not.toContain(topic)
+            expect(realtimeClientFor(pb).topics()).not.toContain(TOPIC)
             expect(post.attempts()).toBe(1)
         } finally {
             await keep()
         }
     })
 
-    it('leaves a topic whose subscribe resolves after cleanup', async () => {
+    it('drops a topic whose POST is still in flight at cleanup', async () => {
         const topic = 'collection/live_late'
         const author = await createAuthor()
         const post = gate()
@@ -502,12 +466,14 @@ describe('liveTopics', () => {
         const counts = createCountsCollection([topic])
         const { result, unmount } = mountCount(counts, author)
         await waitFor(() => expect(result.current.data).toHaveLength(1))
+        expect(realtimeClientFor(pb).topics()).toContain(topic)
         unmount()
         await counts.cleanup()
-        expect(realtimeClientFor(pb).topics()).toContain(topic)
+        expect(realtimeClientFor(pb).topics()).not.toContain(topic)
 
         post.open()
-        await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(topic))
+        await confirmTopics()
+        expect(realtimeClientFor(pb).topics()).not.toContain(topic)
     })
 
     it('logs no error for a subscribe that a disconnect refuses after cleanup', async () => {

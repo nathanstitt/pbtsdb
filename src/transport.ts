@@ -20,11 +20,15 @@ export type Unsubscribe = () => Promise<void>
 
 /** What pbtsdb needs from the server for realtime. REST calls stay on the SDK. */
 export interface Transport {
-    /** Resolves once the server has the topic. */
+    /**
+     * Resolves once the server has the topic; stays pending through a
+     * transient POST failure. Aborting `signal` while pending drops it.
+     */
     subscribe: <T extends object>(
         collectionName: string,
         options: RecordSubscribeOptions | undefined,
-        handler: (event: RecordSubscription<T>) => void
+        handler: (event: RecordSubscription<T>) => void,
+        signal?: AbortSignal
     ) => Promise<Unsubscribe>
     /** Called after every reconnect of the shared connection. */
     onReconnect: (listener: (resumed: boolean) => void) => () => void
@@ -39,7 +43,11 @@ export interface Transport {
     /** @internal Number of load sources registered; tests assert on it. */
     loadSourceCount: () => number
     /** Resolves once the server has the topic; see {@link subscribeTopic}. */
-    subscribeTopic: (topic: string, onMessage: () => void) => Promise<Unsubscribe>
+    subscribeTopic: (
+        topic: string,
+        onMessage: () => void,
+        signal?: AbortSignal
+    ) => Promise<Unsubscribe>
 }
 
 type Entry = {
@@ -201,7 +209,10 @@ export function setRealtimeEventSource(
  * cannot miss a change the server reports on it; resolves to the
  * unsubscribe function. Rejects an empty topic, and a topic over 2500
  * characters with `RealtimeTopicTooLongError`. A message whose data is not
- * JSON is dropped.
+ * JSON is dropped. A subscriptions POST that fails with no response or a
+ * server error keeps the promise pending until the reconnect that follows
+ * confirms the topic; a 4xx rejects it. Aborting `options.signal` while it
+ * is pending drops the topic and rejects with `RealtimeSubscribeAbortedError`.
  *
  * @example
  * const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun())
@@ -210,10 +221,11 @@ export function setRealtimeEventSource(
 export function subscribeTopic(
     pb: PocketBase,
     topic: string,
-    onMessage: () => void
+    onMessage: () => void,
+    options?: { signal?: AbortSignal }
 ): Promise<() => Promise<void>> {
     if (topic === '') return Promise.reject(new Error('subscribeTopic: topic is empty'))
-    return entryFor(pb).client.subscribe(topic, () => onMessage())
+    return entryFor(pb).client.subscribe(topic, () => onMessage(), options)
 }
 
 /**
@@ -240,12 +252,16 @@ export function transportFor(pb: PocketBase): Transport {
         subscribe: <T extends object>(
             collectionName: string,
             options: RecordSubscribeOptions | undefined,
-            handler: (event: RecordSubscription<T>) => void
+            handler: (event: RecordSubscription<T>) => void,
+            signal?: AbortSignal
         ) =>
-            entry.client.subscribe(realtimeTopic(collectionName, options), event =>
-                handler(event as unknown as RecordSubscription<T>)
+            entry.client.subscribe(
+                realtimeTopic(collectionName, options),
+                event => handler(event as unknown as RecordSubscription<T>),
+                { signal }
             ),
-        subscribeTopic: (topic, onMessage) => subscribeTopic(pb, topic, onMessage),
+        subscribeTopic: (topic, onMessage, signal) =>
+            subscribeTopic(pb, topic, onMessage, { signal }),
         onReconnect(listener) {
             entry.reconnectListeners.add(listener)
             return () => {

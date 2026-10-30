@@ -9,8 +9,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- `subscribeTopic(pb, topic, onMessage)`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection.
-- `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals. A topic the server refuses is subscribed again after the next reconnect or auth change, and the collection reloads once it is confirmed. A subscriptions POST that fails with no response or a 5xx now starts that reconnect at once, with the usual backoff; a 4xx does not.
+- `subscribeTopic(pb, topic, onMessage, { signal })`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection; abort `signal` to drop a subscribe that still waits for the server.
+- `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals.
+
+### Changed
+
+- A subscriptions POST that fails with no response or a 5xx no longer drops the subscriptions it carried. They stay registered and pending, pbtsdb reconnects at once with the usual backoff, and the reconnect's POST sends them again; record subscriptions and live topics then reload as after any non-resumed reconnect. A 4xx still rejects the subscribe and keeps the connection. A pending record subscription that is no longer wanted, or a live topic of a cleaned-up collection, is dropped at once.
 
 ### Fixed
 
