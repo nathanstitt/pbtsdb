@@ -209,9 +209,10 @@ export function setRealtimeEventSource(
  * cannot miss a change the server reports on it; resolves to the
  * unsubscribe function. Rejects an empty topic, and a topic over 2500
  * characters with `RealtimeTopicTooLongError`. A message whose data is not
- * JSON is dropped. A subscriptions POST that fails with no response or a
- * server error keeps the promise pending until the reconnect that follows
- * confirms the topic; a 4xx rejects it. Aborting `options.signal` while it
+ * JSON is dropped. A subscriptions POST that fails with no response, a
+ * server error, or a 403, 404, 408 or 429 keeps the promise pending until
+ * the reconnect that follows confirms the topic; another 4xx, such as a
+ * 400, rejects it. Aborting `options.signal` while it
  * is pending drops the topic and rejects with `RealtimeSubscribeAbortedError`.
  *
  * @example

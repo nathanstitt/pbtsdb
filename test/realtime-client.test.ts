@@ -355,8 +355,11 @@ describe('realtime client', () => {
         return () => settled
     }
 
+    // 404 and 403 are PocketBase's answers for a client it no longer holds
+    // (a forced or idle close, a restart) or whose auth changed; 408 and 429
+    // pass on a later try.
     it.each([
-        500, 503, 0,
+        500, 503, 0, 404, 403, 408, 429,
     ])('keeps a subscribe pending through a POST that fails with status %i, and confirms it on the reconnect', async status => {
         const t = await connectedWithFailingPost(status)
         t.failNextPost()
@@ -470,7 +473,67 @@ describe('realtime client', () => {
         expect(FakeEventSource.instances).toHaveLength(0)
     })
 
-    it('keeps the stream when the server refuses a subscriptions POST with a 4xx', async () => {
+    it('POSTs on a resumed reconnect even when the list equals the last confirmed one', async () => {
+        const t = await connectedWithFailingPost(502)
+        const unsubscribeT2 = await t.client.subscribe('t2', () => undefined)
+        expect(t.sent.at(-1)).toEqual({ clientId: 'client-1', subscriptions: ['t1', 't2'] })
+        const sentBefore = t.sent.length
+
+        // The POST of [t1] fails with a 502, which the server may still have
+        // applied; t2 is subscribed again before the reconnect.
+        t.failNextPost()
+        void unsubscribeT2()
+        await vi.advanceTimersByTimeAsync(0)
+        const again = t.client.subscribe('t2', () => undefined)
+        FakeEventSource.instances
+            .at(-1)
+            ?.emit('PB_CONNECT', { clientId: 'client-1', resumed: true }, 'client-1')
+        await again
+        expect(t.sent).toHaveLength(sentBefore + 1)
+        expect(t.sent.at(-1)).toEqual({ clientId: 'client-1', subscriptions: ['t1', 't2'] })
+    })
+
+    it('requeues a failed POST sent for a client id the reconnect replaced', async () => {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        let holdNext = false
+        let refuse: () => void = () => undefined
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                if (holdNext) {
+                    holdNext = false
+                    // The server dropped this client; the answer comes late.
+                    await new Promise<void>((_resolve, reject) => {
+                        refuse = () => reject(Object.assign(new Error('bad'), { status: 400 }))
+                    })
+                }
+                sent.push(body)
+            },
+            eventSource: url => new FakeEventSource(url),
+            backoff: () => 0,
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const source = FakeEventSource.instances.at(-1)
+        source?.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await first
+
+        holdNext = true
+        const second = client.subscribe('t2', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        source?.fail()
+        await vi.advanceTimersByTimeAsync(0)
+        FakeEventSource.instances.at(-1)?.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        refuse()
+        await expect(second).resolves.toBeTypeOf('function')
+        expect(client.topics()).toEqual(['t1', 't2'])
+        expect(sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1', 't2'] })
+    })
+
+    it('keeps the stream when the server refuses a subscriptions POST with a 400', async () => {
         const t = await connectedWithFailingPost(400)
         t.failNextPost()
         await expect(t.client.subscribe('t2', () => undefined)).rejects.toMatchObject({

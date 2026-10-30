@@ -40,6 +40,7 @@ export type {
     RealtimeBackoff,
     RealtimeEventSourceFactory,
 } from './realtime-client'
+export { RealtimeSubscribeAbortedError, RealtimeTopicTooLongError } from './realtime-client'
 export type { LoadStatus, RealtimeStatus, SyncStatus, SyncStatusListener } from './sync-status'
 export {
     disconnectRealtime,

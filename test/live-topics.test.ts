@@ -367,10 +367,15 @@ describe('liveTopics', () => {
         )
     })
 
-    it('keeps its topic through a POST that fails with a 500, then reloads', async () => {
+    // A 404 is PocketBase's answer when it no longer holds the client id: a
+    // POST in flight when the server drops the client (forced or idle close,
+    // restart) gets it.
+    it.each([
+        500, 404,
+    ])('keeps its topic through a POST that fails with a %i, then reloads', async status => {
         const author = await createAuthor()
         setRealtimeBackoff(pb, () => 0)
-        const post = refuseFirstTopicPost(TOPIC, 500)
+        const post = refuseFirstTopicPost(TOPIC, status)
         const counts = createCountsCollection()
         const { result } = mountCount(counts, author)
         await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
@@ -447,7 +452,7 @@ describe('liveTopics', () => {
             expect(realtimeClientFor(pb).clientId()).toBe(connectedId)
             expect(post.attempts()).toBe(1)
 
-            // The server would refuse it again: a later reconnect does not resend it.
+            // A rejected subscribe is gone: a later reconnect does not resend it.
             reconnectNow()
             await barrier()
             expect(realtimeClientFor(pb).topics()).not.toContain(TOPIC)

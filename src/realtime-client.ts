@@ -91,8 +91,8 @@ export class RealtimeSubscribeAbortedError extends Error {
 export interface RealtimeClient {
     /**
      * Resolves once a POST carrying the topic succeeds. A POST that fails
-     * with no response or a 5xx keeps it pending until the reconnect's POST;
-     * a 4xx rejects it. Aborting `signal` while pending drops the
+     * in a way a new connection can clear (see `isTransientPostError`) keeps
+     * it pending until the reconnect's POST; another 4xx rejects it. Aborting `signal` while pending drops the
      * registration and rejects with `RealtimeSubscribeAbortedError`.
      */
     subscribe: (
@@ -151,12 +151,17 @@ export const defaultRealtimeBackoff: RealtimeBackoff = attempt => {
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
-// No response (status 0) or a server error may pass on a new connection. A
+// Statuses a new connection can clear: PocketBase answers 404 for a client
+// id it no longer holds (a forced or idle close, a restart) and 403 when the
+// request's auth differs from the connection's; 408 and 429 pass on a later
+// try. No response (status 0) and a server error may pass too. Any other
 // 4xx is the server's answer to this topic list and would fail again, so it
 // must not start a reconnect loop.
+const TRANSIENT_POST_STATUSES = new Set([0, 403, 404, 408, 429])
+
 function isTransientPostError(error: unknown): boolean {
     const status = (error as { status?: unknown } | null)?.status
-    return typeof status === 'number' && (status === 0 || status >= 500)
+    return typeof status === 'number' && (status >= 500 || TRANSIENT_POST_STATUSES.has(status))
 }
 
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
@@ -271,30 +276,38 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     }
 
     /**
-     * A POST failed with no response or a server error. Its subscriptions
+     * A POST failed in a way a new connection can clear. Its subscriptions
      * stay registered and pending, and the stream is replaced: it can stay
      * open while the POST fails, and then nothing else reconnects. The
      * reconnect's POST carries every registered topic and settles the
      * waiters. The server never had those topics, so no replay covers them,
-     * and that reconnect is reported as not resumed.
+     * and that reconnect is reported as not resumed. The server may still
+     * have applied the failed list, so nothing counts as confirmed, and even
+     * a resumed reconnect with an unchanged list POSTs.
      */
     function keepThroughFailedPost(pending: Waiter[], error: unknown): void {
         logger.warn('Realtime subscriptions POST failed; reconnecting', { error })
         waiters = [...pending, ...waiters]
         topicsLost = true
+        confirmed = []
         if (!source) return
         close(false)
         scheduleReconnect()
         statusChanged()
     }
 
+    // A POST is stale when its session ended or a reconnect replaced the
+    // client id it was sent for: `close(false)` keeps `session`, so the id
+    // tells a POST of a dropped connection from one of the current one.
     async function postTopics(pending: Waiter[], startedSession: number): Promise<void> {
+        const startedId = clientId
+        const isStale = () => session !== startedSession || clientId !== startedId
         try {
             await sendTopics()
-            if (session !== startedSession) requeueStale(pending)
+            if (isStale()) requeueStale(pending)
             else settleWaiters(pending)
         } catch (error) {
-            if (session !== startedSession) {
+            if (isStale()) {
                 requeueStale(pending)
             } else if (isTransientPostError(error)) {
                 keepThroughFailedPost(pending, error)

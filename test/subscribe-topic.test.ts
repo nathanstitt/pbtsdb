@@ -1,6 +1,6 @@
 import { waitFor } from '@testing-library/react'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { subscribeTopic } from '../src'
+import { RealtimeSubscribeAbortedError, RealtimeTopicTooLongError, subscribeTopic } from '../src'
 import { authenticateTestUser, clearAuth, pb, sendSignal } from './helpers'
 
 // A message on `barrier` arrives after every message the server sent before
@@ -63,8 +63,14 @@ describe('subscribeTopic', () => {
 
     it('rejects an empty topic and a topic over 2500 characters', async () => {
         await expect(subscribeTopic(pb, '', vi.fn())).rejects.toThrow('topic is empty')
-        await expect(subscribeTopic(pb, 'x'.repeat(2501), vi.fn())).rejects.toMatchObject({
-            name: 'RealtimeTopicTooLongError',
-        })
+        await expect(subscribeTopic(pb, 'x'.repeat(2501), vi.fn())).rejects.toBeInstanceOf(
+            RealtimeTopicTooLongError
+        )
+    })
+
+    it('rejects with RealtimeSubscribeAbortedError when its signal aborts', async () => {
+        await expect(
+            subscribeTopic(pb, 'test/aborted', vi.fn(), { signal: AbortSignal.abort() })
+        ).rejects.toBeInstanceOf(RealtimeSubscribeAbortedError)
     })
 })
