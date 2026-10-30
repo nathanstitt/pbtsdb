@@ -120,6 +120,23 @@ const c = createCollection<Schema>(pb, {
   can therefore serve both REST and real-time.
 - Requires `pocketbase >= 0.22.0`.
 
+## Change signals
+
+`subscribeTopic(pb, topic, onMessage): Promise<() => Promise<void>>` listens to
+a custom realtime topic over pbtsdb's shared connection (the same one
+`resetRealtime(pb)` controls). `onMessage` is called with no argument: a topic
+message, such as a data-free change signal, says only that something changed,
+and the caller fetches what it needs. The promise resolves once the server has
+the topic, so subscribe first, then fetch. It rejects an empty topic and a topic
+over 2500 characters (`RealtimeTopicTooLongError`). A message whose data is not
+JSON is dropped. A server such as tinycld sends `{}` on `collection/<name>`
+after a write.
+
+```typescript
+const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun());
+await rerun();
+```
+
 ## Testing
 
 ```bash

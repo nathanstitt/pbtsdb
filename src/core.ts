@@ -48,6 +48,7 @@ export {
     setRealtimeBackoff,
     setRealtimeEventSource,
     subscribeSyncStatus,
+    subscribeTopic,
 } from './transport'
 export type {
     CreateCollectionOptions,

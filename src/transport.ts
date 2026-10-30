@@ -38,6 +38,8 @@ export interface Transport {
     loadStatusChanged: () => void
     /** @internal Number of load sources registered; tests assert on it. */
     loadSourceCount: () => number
+    /** Resolves once the server has the topic; see {@link subscribeTopic}. */
+    subscribeTopic: (topic: string, onMessage: () => void) => Promise<Unsubscribe>
 }
 
 type Entry = {
@@ -191,6 +193,30 @@ export function setRealtimeEventSource(
 }
 
 /**
+ * Calls `onMessage` for each message the server sends on `topic`, over
+ * pbtsdb's shared realtime connection for `pb`. The message's data is not
+ * passed on: a topic message, such as a data-free change signal, says only
+ * that something changed, and the caller fetches what it needs. Resolves
+ * once the server has the topic, so a fetch started after it resolves
+ * cannot miss a change the server reports on it; resolves to the
+ * unsubscribe function. Rejects an empty topic, and a topic over 2500
+ * characters with `RealtimeTopicTooLongError`. A message whose data is not
+ * JSON is dropped.
+ *
+ * @example
+ * const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun())
+ * await rerun()
+ */
+export function subscribeTopic(
+    pb: PocketBase,
+    topic: string,
+    onMessage: () => void
+): Promise<() => Promise<void>> {
+    if (topic === '') return Promise.reject(new Error('subscribeTopic: topic is empty'))
+    return entryFor(pb).client.subscribe(topic, () => onMessage())
+}
+
+/**
  * The sync state of `pb`'s collections: whether pbtsdb's realtime stream
  * is up, and how many live loads are stuck in retry or ended in an error
  * the server meant. The snapshot is stable until a value changes, so it
@@ -219,6 +245,7 @@ export function transportFor(pb: PocketBase): Transport {
             entry.client.subscribe(realtimeTopic(collectionName, options), event =>
                 handler(event as unknown as RecordSubscription<T>)
             ),
+        subscribeTopic: (topic, onMessage) => subscribeTopic(pb, topic, onMessage),
         onReconnect(listener) {
             entry.reconnectListeners.add(listener)
             return () => {

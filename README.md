@@ -307,6 +307,21 @@ setRealtimeBackoff(pb, (attempt) => Math.min(60_000, 1000 * 2 ** attempt));
 reconnectRealtime(pb);
 ```
 
+### Change signals
+
+`subscribeTopic(pb, topic, onMessage)` listens to a custom realtime topic over the same connection as the collections, with the same reconnect, resume and auth handling. `onMessage` is called with no argument: a topic message, such as a data-free change signal, says only that something changed, and you fetch what you need. The returned promise resolves once the server has the topic, so subscribe first and fetch after: a change the server reports on the topic cannot fall between the two. It resolves to an unsubscribe function. It rejects an empty topic, and a topic over 2500 characters with `RealtimeTopicTooLongError`. A message whose data is not JSON is dropped.
+
+```typescript
+import { subscribeTopic } from 'pbtsdb';
+
+const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun());
+await rerun(); // the first fetch, after the topic is confirmed
+
+await unsubscribe();
+```
+
+A server such as tinycld sends `{}` on `collection/<name>` after a write commits, so a client can rerun a custom query without a record-level subscription.
+
 ### Custom EventSource
 
 By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. Call it before the first collection subscribes.

@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `subscribeTopic(pb, topic, onMessage)`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection.
+
 ### Fixed
 
 - An aborted `loadSubset` now resolves with no rows instead of rejecting with
