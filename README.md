@@ -322,6 +322,19 @@ await unsubscribe();
 
 A server such as tinycld sends `{}` on `collection/<name>` after a write commits, so a client can rerun a custom query without a record-level subscription.
 
+To keep a collection live on such topics, give it `liveTopics`. PocketBase sends no record events for a view collection, so a view needs this to show changes in the tables it reads:
+
+```typescript
+const authorBookCounts = c('author_book_counts', {
+    syncMode: 'on-demand',
+    liveTopics: ['collection/author_book_counts'],
+});
+```
+
+While the collection syncs, it subscribes to each topic. The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100 ms), and the collection reloads once when the window closes. Messages during the window do not extend it, so a steady stream of messages still reloads once per window. When the server confirms a topic after a load started, the collection reloads once more, because a write between that load and the confirmation sends a message that this client does not get. The topics close when the collection is cleaned up. An empty topic or a topic over 2500 characters throws when the collection is built.
+
+Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads.
+
 ### Custom EventSource
 
 By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. Call it before the first collection subscribes.
@@ -562,6 +575,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
 - `realtime?: 'collection' | 'query'` - Which rows the realtime subscription covers (default: `'collection'`; `'query'` requires `syncMode: 'on-demand'`; see [Realtime Scope](#realtime-scope))
+- `liveTopics?: readonly string[]` - Custom realtime topics whose messages reload the collection, coalesced over `LIVE_TOPIC_WINDOW_MS` (100 ms); each topic is 1 to 2500 characters (see [Change signals](#change-signals))
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable

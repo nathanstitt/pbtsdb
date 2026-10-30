@@ -137,6 +137,29 @@ const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void reru
 await rerun();
 ```
 
+The `liveTopics?: readonly string[]` collection option keeps a collection live
+on such topics. Use it for a view collection: PocketBase sends no record events
+for a view.
+
+```typescript
+const counts = c('author_book_counts', {
+    syncMode: 'on-demand',
+    liveTopics: ['collection/author_book_counts'],
+});
+```
+
+- While the collection syncs, each topic is subscribed; the topics close when
+  the collection is cleaned up.
+- The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100, exported),
+  and the collection reloads once when it closes. Later messages do not extend
+  the window, so a steady stream still reloads once per window.
+- When the server confirms a topic after a load started, the collection reloads
+  once more: a change between that load and the confirmation sent no message
+  to this client.
+- An empty topic or a topic over 2500 characters throws at build.
+- The server must send a message on the view's topic when a source table of the
+  view changes.
+
 ## Testing
 
 ```bash
