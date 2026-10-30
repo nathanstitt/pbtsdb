@@ -303,6 +303,73 @@ describe('realtime client', () => {
         expect(sent).toEqual([{ clientId: 'client-1', subscriptions: ['t2'] }])
     })
 
+    // A client whose next POST, once armed, fails with `status`, after a
+    // first POST that confirmed t1.
+    async function connectedWithFailingPost(status: number) {
+        vi.useFakeTimers()
+        FakeEventSource.instances = []
+        let failNext = false
+        const sent: { clientId: string; subscriptions: string[] }[] = []
+        const reconnects: boolean[] = []
+        const client = createRealtimeClient({
+            url: 'http://pb.test/api/realtime',
+            send: async body => {
+                if (failNext) {
+                    failNext = false
+                    throw Object.assign(new Error('refused'), { status })
+                }
+                sent.push(body)
+            },
+            eventSource: url => new FakeEventSource(url),
+            onReconnect: resumed => reconnects.push(resumed),
+            backoff: () => 0,
+        })
+        const first = client.subscribe('t1', () => undefined)
+        await vi.advanceTimersByTimeAsync(0)
+        const source = FakeEventSource.instances.at(-1)
+        if (!source) throw new Error('no EventSource opened')
+        source.emit('PB_CONNECT', { clientId: 'client-1' }, 'client-1')
+        await first
+        return {
+            client,
+            sent,
+            reconnects,
+            source,
+            failNextPost: () => {
+                failNext = true
+            },
+        }
+    }
+
+    it.each([
+        500, 503, 0,
+    ])('reconnects when a subscriptions POST fails with status %i while the stream stays open', async status => {
+        const t = await connectedWithFailingPost(status)
+        t.failNextPost()
+        await expect(t.client.subscribe('t2', () => undefined)).rejects.toMatchObject({ status })
+        expect(t.source.closed).toBe(true)
+
+        await vi.advanceTimersByTimeAsync(0)
+        expect(FakeEventSource.instances).toHaveLength(2)
+        FakeEventSource.instances.at(-1)?.emit('PB_CONNECT', { clientId: 'client-2' }, 'client-2')
+        await vi.advanceTimersByTimeAsync(0)
+        expect(t.sent.at(-1)).toEqual({ clientId: 'client-2', subscriptions: ['t1'] })
+        expect(t.reconnects).toEqual([false])
+    })
+
+    it('keeps the stream when the server refuses a subscriptions POST with a 4xx', async () => {
+        const t = await connectedWithFailingPost(400)
+        t.failNextPost()
+        await expect(t.client.subscribe('t2', () => undefined)).rejects.toMatchObject({
+            status: 400,
+        })
+        await vi.advanceTimersByTimeAsync(0)
+        expect(t.source.closed).toBe(false)
+        expect(FakeEventSource.instances).toHaveLength(1)
+        expect(t.client.status()).toEqual({ state: 'connected' })
+        expect(t.reconnects).toEqual([])
+    })
+
     it('rejects a pending subscribe on disconnect and leaves no registration behind', async () => {
         const { client } = setup()
         const sub = client.subscribe('t1', () => undefined)

@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `subscribeTopic(pb, topic, onMessage)`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection.
-- `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals. A topic the server refuses is subscribed again after the next reconnect or auth change, and the collection reloads once it is confirmed.
+- `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals. A topic the server refuses is subscribed again after the next reconnect or auth change, and the collection reloads once it is confirmed. A subscriptions POST that fails with no response or a 5xx now starts that reconnect at once, with the usual backoff; a 4xx does not.
 
 ### Fixed
 

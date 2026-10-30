@@ -133,6 +133,14 @@ export const defaultRealtimeBackoff: RealtimeBackoff = attempt => {
 
 type Waiter = { resolve: () => void; reject: (error: unknown) => void }
 
+// No response (status 0) or a server error may pass on a new connection. A
+// 4xx is the server's answer to this topic list and would fail again, so it
+// must not start a reconnect loop.
+function isTransientPostError(error: unknown): boolean {
+    const status = (error as { status?: unknown } | null)?.status
+    return typeof status === 'number' && (status === 0 || status >= 500)
+}
+
 export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
     const listeners = new Map<string, Set<RealtimeListener>>()
     const dispatchers = new Map<string, EventSourceListener>()
@@ -242,6 +250,16 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
         settleWaiters(pending)
     }
 
+    // The stream can stay open while a POST fails, and then nothing else
+    // reconnects: the reconnect is what makes collections subscribe what the
+    // failed POST lost again (see `onReconnect`).
+    function reconnectAfterFailedPost(): void {
+        if (!source) return
+        close(false)
+        scheduleReconnect()
+        statusChanged()
+    }
+
     async function postTopics(pending: Waiter[], startedSession: number): Promise<void> {
         try {
             await sendTopics()
@@ -253,6 +271,7 @@ export function createRealtimeClient(deps: RealtimeClientDeps): RealtimeClient {
             } else {
                 logger.error('Failed to set realtime subscriptions', { error })
                 settleWaiters(pending, error)
+                if (isTransientPostError(error)) reconnectAfterFailedPost()
             }
         }
     }

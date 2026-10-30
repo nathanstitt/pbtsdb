@@ -4,7 +4,12 @@ import type { SendOptions } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection, LIVE_TOPIC_WINDOW_MS, subscribeTopic } from '../src'
 import { logger } from '../src/logger'
-import { realtimeClientFor, reconnectRealtime, setRealtimeEventSource } from '../src/transport'
+import {
+    realtimeClientFor,
+    reconnectRealtime,
+    setRealtimeBackoff,
+    setRealtimeEventSource,
+} from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -110,28 +115,30 @@ function isTopicPost(url: string, options: SendOptions, topic: string): boolean 
     )
 }
 
-const refused = () =>
+const failWith = (status: number) => () =>
     Promise.resolve(
         new Response(JSON.stringify({ message: 'Refused by the test.' }), {
-            status: 400,
+            status,
             headers: { 'Content-Type': 'application/json' },
         })
     )
 
-// Refuses the first subscriptions POST that carries `topic` and holds the
-// second until `release` is called.
-function refuseFirstTopicPost(topic: string) {
+const refused = failWith(400)
+
+// Fails the first subscriptions POST that carries `topic` with `status`,
+// and holds the second until `release` is called.
+function refuseFirstTopicPost(topic: string, status = 400) {
     const release = gate()
-    let attempts = 0
+    const clientIds: unknown[] = []
     pb.beforeSend = async (url: string, options: SendOptions) => {
         if (isTopicPost(url, options, topic)) {
-            attempts += 1
-            if (attempts === 1) options.fetch = refused
-            if (attempts === 2) await release.opened
+            clientIds.push((options.body as { clientId?: unknown } | undefined)?.clientId)
+            if (clientIds.length === 1) options.fetch = failWith(status)
+            if (clientIds.length === 2) await release.opened
         }
         return { url, options }
     }
-    return { attempts: () => attempts, release: release.open }
+    return { attempts: () => clientIds.length, clientIds, release: release.open }
 }
 
 function countViewRequests(): () => number {
@@ -251,6 +258,7 @@ describe('liveTopics', () => {
         holdRealtimePost = undefined
         holdViewResponse = undefined
         setRealtimeEventSource(pb, undefined)
+        setRealtimeBackoff(pb, undefined)
         await Promise.all(built.splice(0).map(collection => collection.cleanup()))
     })
 
@@ -386,6 +394,46 @@ describe('liveTopics', () => {
             await createBook(author)
             await sendSignal(TOPIC)
             await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(2))
+        } finally {
+            await keep()
+        }
+    })
+
+    it('reconnects after a subscriptions POST fails with a 500, then reloads', async () => {
+        const author = await createAuthor()
+        setRealtimeBackoff(pb, () => 0)
+        const post = refuseFirstTopicPost(TOPIC, 500)
+        const counts = createCountsCollection()
+        const { result } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
+
+        // No reconnectNow(): the failed POST itself reconnects, and the
+        // retry goes out on the new connection.
+        await waitFor(() => expect(post.attempts()).toBe(2))
+        expect(post.clientIds[1]).not.toBe(post.clientIds[0])
+        await counts.utils.reload()
+        await createBook(author)
+        post.release()
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
+
+        await createBook(author)
+        await sendSignal(TOPIC)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(2))
+    })
+
+    it('keeps the connection after a subscriptions POST is refused with a 400', async () => {
+        const author = await createAuthor()
+        const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
+        try {
+            const connectedId = realtimeClientFor(pb).clientId()
+            const post = refuseFirstTopicPost(TOPIC)
+            const counts = createCountsCollection()
+            const { result } = mountCount(counts, author)
+            await waitFor(() => expect(result.current.data).toHaveLength(1))
+            await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(TOPIC))
+            await barrier()
+            expect(realtimeClientFor(pb).clientId()).toBe(connectedId)
+            expect(post.attempts()).toBe(1)
         } finally {
             await keep()
         }
