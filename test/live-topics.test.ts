@@ -3,7 +3,8 @@ import { renderHook, waitFor } from '@testing-library/react'
 import type { SendOptions } from 'pocketbase'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection, LIVE_TOPIC_WINDOW_MS, subscribeTopic } from '../src'
-import { realtimeClientFor } from '../src/transport'
+import { logger } from '../src/logger'
+import { realtimeClientFor, reconnectRealtime, setRealtimeEventSource } from '../src/transport'
 import {
     authenticateTestUser,
     clearAuth,
@@ -96,25 +97,107 @@ function holdRequests(): void {
     }
 }
 
+function subscriptionsOf(options: SendOptions): string[] {
+    const body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body
+    return (body as { subscriptions?: string[] } | undefined)?.subscriptions ?? []
+}
+
+function isTopicPost(url: string, options: SendOptions, topic: string): boolean {
+    return (
+        url.endsWith('/api/realtime') &&
+        options.method === 'POST' &&
+        subscriptionsOf(options).includes(topic)
+    )
+}
+
+const refused = () =>
+    Promise.resolve(
+        new Response(JSON.stringify({ message: 'Refused by the test.' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+        })
+    )
+
+// Refuses the first subscriptions POST that carries `topic` and holds the
+// second until `release` is called.
+function refuseFirstTopicPost(topic: string) {
+    const release = gate()
+    let attempts = 0
+    pb.beforeSend = async (url: string, options: SendOptions) => {
+        if (isTopicPost(url, options, topic)) {
+            attempts += 1
+            if (attempts === 1) options.fetch = refused
+            if (attempts === 2) await release.opened
+        }
+        return { url, options }
+    }
+    return { attempts: () => attempts, release: release.open }
+}
+
+function countViewRequests(): () => number {
+    let count = 0
+    pb.beforeSend = (url: string, options: SendOptions) => {
+        if (url.includes(VIEW_PATH)) count += 1
+        return { url, options }
+    }
+    return () => count
+}
+
+// Drops the shared connection, then connects again at once.
+function reconnectNow(): void {
+    realtimeClientFor(pb).simulateDisconnect()
+    reconnectRealtime(pb)
+}
+
+// A connection that opens and never confirms anything.
+const idleSource = () => ({
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    close: () => undefined,
+})
+
+// The window timer is a named function: matching the name as well as the
+// delay leaves every other 100 ms timer in the process running as usual.
+function isLiveTopicWindow(handler: TimerHandler, timeout: number | undefined): boolean {
+    return (
+        timeout === LIVE_TOPIC_WINDOW_MS &&
+        typeof handler === 'function' &&
+        handler.name === 'closeLiveTopicWindow'
+    )
+}
+
+type HeldWindow = { handle: ReturnType<typeof setTimeout>; run: () => void; cleared: boolean }
+
 // Holds every live-topic window instead of starting its timer, so a test
-// decides when each one closes. Other timers run as usual.
+// decides when each one closes. A window cleared while held never closes.
 function holdWindows() {
     const realSetTimeout = globalThis.setTimeout
-    const held: (() => void)[] = []
+    const realClearTimeout = globalThis.clearTimeout
+    const held: HeldWindow[] = []
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
         handler: TimerHandler,
         timeout?: number,
         ...args: unknown[]
     ) => {
-        if (timeout !== LIVE_TOPIC_WINDOW_MS || typeof handler !== 'function') {
+        if (!isLiveTopicWindow(handler, timeout) || typeof handler !== 'function') {
             return realSetTimeout(handler, timeout, ...args)
         }
-        held.push(() => handler(...args))
-        return realSetTimeout(() => undefined, 0)
+        const handle = realSetTimeout(() => undefined, 0)
+        held.push({ handle, run: () => handler(...args), cleared: false })
+        return handle
     }) as typeof setTimeout)
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((
+        handle?: ReturnType<typeof setTimeout>
+    ) => {
+        for (const window of held) if (window.handle === handle) window.cleared = true
+        realClearTimeout(handle)
+    }) as typeof clearTimeout)
     return {
         count: () => held.length,
-        close: (index: number) => held[index]?.(),
+        close: (index: number) => {
+            const window = held[index]
+            if (window && !window.cleared) window.run()
+        },
     }
 }
 
@@ -167,6 +250,7 @@ describe('liveTopics', () => {
         pb.beforeSend = originalBeforeSend
         holdRealtimePost = undefined
         holdViewResponse = undefined
+        setRealtimeEventSource(pb, undefined)
         await Promise.all(built.splice(0).map(collection => collection.cleanup()))
     })
 
@@ -275,6 +359,155 @@ describe('liveTopics', () => {
         await waitFor(() =>
             expect(realtimeClientFor(pb).topics()).not.toContain('collection/live_cleanup')
         )
+    })
+
+    it('subscribes a refused topic again on the next reconnect, then reloads', async () => {
+        const author = await createAuthor()
+        // Keeps a topic on the connection, so a reconnect happens after the
+        // refused topic leaves it.
+        const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
+        try {
+            const post = refuseFirstTopicPost(TOPIC)
+            const counts = createCountsCollection()
+            const { result } = mountCount(counts, author)
+            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
+            await waitFor(() => expect(post.attempts()).toBe(1))
+            await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(TOPIC))
+
+            reconnectNow()
+            await waitFor(() => expect(post.attempts()).toBe(2))
+            // Settles the reconnect's own reload: only the retry's
+            // confirmation can bring in a write made now.
+            await counts.utils.reload()
+            await createBook(author)
+            post.release()
+            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
+
+            await createBook(author)
+            await sendSignal(TOPIC)
+            await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(2))
+        } finally {
+            await keep()
+        }
+    })
+
+    // With no topic left on the connection, an auth change opens no new
+    // connection, so no reconnect can retry the refused topic.
+    it('subscribes a refused topic again after an auth change', async () => {
+        const author = await createAuthor()
+        let refusing = true
+        pb.beforeSend = (url: string, options: SendOptions) => {
+            if (refusing && url.endsWith('/api/realtime') && options.method === 'POST') {
+                options.fetch = refused
+            }
+            return { url, options }
+        }
+        const counts = createCountsCollection()
+        const { result } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
+        await waitFor(() => expect(realtimeClientFor(pb).topics()).toEqual([]))
+        refusing = false
+
+        clearAuth()
+        await authenticateTestUser()
+        await waitFor(() => expect(realtimeClientFor(pb).topics()).toContain(TOPIC))
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(0))
+        await confirmTopics()
+        await counts.utils.reload()
+
+        await createBook(author)
+        await sendSignal(TOPIC)
+        await waitFor(() => expect(result.current.data?.[0]?.book_count).toBe(1))
+    })
+
+    it('stops retrying a refused topic after cleanup', async () => {
+        const topic = 'collection/live_refused_cleanup'
+        const author = await createAuthor()
+        const keep = await subscribeTopic(pb, 'test/keep', () => undefined)
+        try {
+            const post = refuseFirstTopicPost(topic)
+            const counts = createCountsCollection([topic])
+            const { result, unmount } = mountCount(counts, author)
+            await waitFor(() => expect(result.current.data).toHaveLength(1))
+            await waitFor(() => expect(post.attempts()).toBe(1))
+            await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(topic))
+            unmount()
+            await counts.cleanup()
+
+            reconnectNow()
+            // The barrier's subscribe settles after the reconnect's POST,
+            // and the reconnect listeners run before it continues.
+            await barrier()
+            expect(realtimeClientFor(pb).topics()).not.toContain(topic)
+            expect(post.attempts()).toBe(1)
+        } finally {
+            await keep()
+        }
+    })
+
+    it('leaves a topic whose subscribe resolves after cleanup', async () => {
+        const topic = 'collection/live_late'
+        const author = await createAuthor()
+        const post = gate()
+        holdRealtimePost = post.opened
+        holdRequests()
+        const counts = createCountsCollection([topic])
+        const { result, unmount } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data).toHaveLength(1))
+        unmount()
+        await counts.cleanup()
+        expect(realtimeClientFor(pb).topics()).toContain(topic)
+
+        post.open()
+        await waitFor(() => expect(realtimeClientFor(pb).topics()).not.toContain(topic))
+    })
+
+    it('logs no error for a subscribe that a disconnect refuses after cleanup', async () => {
+        const topic = 'collection/live_disconnect'
+        const author = await createAuthor()
+        const client = realtimeClientFor(pb)
+        client.disconnect()
+        setRealtimeEventSource(pb, idleSource)
+        const subscribe = vi.spyOn(client, 'subscribe')
+        const error = vi.spyOn(logger, 'error')
+        const counts = createCountsCollection([topic])
+        const { result, unmount } = mountCount(counts, author)
+        await waitFor(() => expect(result.current.data).toHaveLength(1))
+        unmount()
+        await counts.cleanup()
+
+        client.disconnect()
+        // Its handlers were attached first, so they have run once these settle.
+        await Promise.allSettled(subscribe.mock.results.map(call => call.value))
+        expect(error).not.toHaveBeenCalledWith(
+            'Failed to subscribe to a live topic',
+            expect.anything()
+        )
+    })
+
+    it('drops a window that is open at cleanup', async () => {
+        const author = await createAuthor()
+        const counts = createCountsCollection()
+        const first = mountCount(counts, author)
+        await waitFor(() => expect(first.result.current.data?.[0]?.book_count).toBe(0))
+        await confirmTopics()
+        await counts.utils.reload()
+        const windows = holdWindows()
+        await sendSignal(TOPIC)
+        await barrier()
+        expect(windows.count()).toBe(1)
+        first.unmount()
+        await counts.cleanup()
+
+        // A restarted sync would take the stale window's reload.
+        const second = mountCount(counts, author)
+        await waitFor(() => expect(second.result.current.data?.[0]?.book_count).toBe(0))
+        await confirmTopics()
+        await counts.utils.reload()
+        const viewRequests = countViewRequests()
+        windows.close(0)
+        await counts.utils.reload()
+        expect(viewRequests()).toBe(1)
     })
 
     it('refuses an empty topic and a topic over 2500 characters at build', () => {

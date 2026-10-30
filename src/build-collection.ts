@@ -523,25 +523,33 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
 
     // A window from the first message, not a trailing debounce: a steady
     // stream of messages still reloads once per window. reload() queues one
-    // follow-up for a message that arrives during a fetch.
-    function openLiveTopics(): () => void {
-        if (liveTopics.length === 0) return () => undefined
+    // follow-up for a message that arrives during a fetch. A refused
+    // subscribe leaves the topic off the connection; `retry` subscribes it
+    // again (the next reconnect or auth change calls it), and the
+    // confirmation then reloads, since no message reported the gap.
+    function openLiveTopics(): { retry: () => void; close: () => void } {
+        if (liveTopics.length === 0) return { retry: () => undefined, close: () => undefined }
         let timer: ReturnType<typeof setTimeout> | undefined
         let closed = false
+        const subscribed = new Map<string, () => Promise<void>>()
+        const subscribing = new Set<string>()
         const onMessage = () => {
             if (timer !== undefined) return
-            timer = setTimeout(() => {
+            timer = setTimeout(function closeLiveTopicWindow() {
                 timer = undefined
                 reloadFor('live topic')
             }, LIVE_TOPIC_WINDOW_MS)
         }
-        const pending = liveTopics.map(topic =>
-            transport.subscribeTopic(topic, onMessage).then(
+        const subscribe = (topic: string) => {
+            subscribing.add(topic)
+            void transport.subscribeTopic(topic, onMessage).then(
                 unsubscribe => {
+                    subscribing.delete(topic)
                     if (closed) {
                         void unsubscribe()
-                        return undefined
+                        return
                     }
+                    subscribed.set(topic, unsubscribe)
                     // A load that started before the server had the topic
                     // may predate a change no message reported to us. An
                     // eager first load still running counts too: a reload
@@ -549,23 +557,35 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                     if (collection.status === 'loading' || collection.isReady()) {
                         reloadFor('live topic confirmed')
                     }
-                    return unsubscribe
                 },
                 (error: unknown) => {
+                    subscribing.delete(topic)
+                    // A cleanup racing a disconnect refuses the pending
+                    // subscribe; nothing wants the topic any more.
+                    if (closed) return
                     logger.error('Failed to subscribe to a live topic', {
                         collectionName,
                         topic,
                         error,
                     })
-                    return undefined
                 }
             )
-        )
-        return () => {
-            closed = true
-            if (timer !== undefined) clearTimeout(timer)
-            timer = undefined
-            for (const unsubscribe of pending) void unsubscribe.then(fn => fn?.())
+        }
+        for (const topic of liveTopics) subscribe(topic)
+        return {
+            retry() {
+                if (closed) return
+                for (const topic of liveTopics) {
+                    if (!subscribed.has(topic) && !subscribing.has(topic)) subscribe(topic)
+                }
+            },
+            close() {
+                closed = true
+                if (timer !== undefined) clearTimeout(timer)
+                timer = undefined
+                for (const unsubscribe of subscribed.values()) void unsubscribe()
+                subscribed.clear()
+            },
         }
     }
 
@@ -577,7 +597,9 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (event.status === 'cleaned-up') subsets.clear()
         if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
             const removeLoadSource = transport.addLoadSource(adapter.loadStatus)
+            const topics = openLiveTopics()
             const removeReconnect = transport.onReconnect(resumed => {
+                topics.retry()
                 if (resumed || !realtime.isOpen()) return
                 // A collection still loading has no live demands to reload,
                 // but its first load may be waiting out a retry.
@@ -593,13 +615,13 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 acceptedTimers.clear()
                 membership.drop([ACCEPTED])
                 if (store.isAttached()) reloadFor('auth change')
+                topics.retry()
             })
-            const removeLiveTopics = openLiveTopics()
             removeTransportListeners = () => {
                 removeLoadSource()
                 removeReconnect()
                 removeAuth()
-                removeLiveTopics()
+                topics.close()
             }
         } else if (removeTransportListeners && event.status === 'cleaned-up') {
             removeTransportListeners()

@@ -156,9 +156,13 @@ const counts = c('author_book_counts', {
 - When the server confirms a topic after a load started, the collection reloads
   once more: a change between that load and the confirmation sent no message
   to this client.
+- If the server refuses a topic, it is subscribed again after the next
+  reconnect or auth change, and the collection reloads once the server
+  confirms it. A cleaned-up collection does not try again.
 - An empty topic or a topic over 2500 characters throws at build.
 - The server must send a message on the view's topic when a source table of the
-  view changes.
+  view changes. A tinycld server sends change signals only to signed-in
+  clients, so a `liveTopics` collection on a signed-out page never reloads.
 
 ## Testing
 

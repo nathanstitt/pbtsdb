@@ -331,9 +331,9 @@ const authorBookCounts = c('author_book_counts', {
 });
 ```
 
-While the collection syncs, it subscribes to each topic. The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100 ms), and the collection reloads once when the window closes. Messages during the window do not extend it, so a steady stream of messages still reloads once per window. When the server confirms a topic after a load started, the collection reloads once more, because a write between that load and the confirmation sends a message that this client does not get. The topics close when the collection is cleaned up. An empty topic or a topic over 2500 characters throws when the collection is built.
+While the collection syncs, it subscribes to each topic. The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100 ms), and the collection reloads once when the window closes. Messages during the window do not extend it, so a steady stream of messages still reloads once per window. When the server confirms a topic after a load started, the collection reloads once more, because a write between that load and the confirmation sends a message that this client does not get. If the server refuses a topic, pbtsdb subscribes to it again after the next reconnect or auth change, and the collection reloads once the server confirms it. The topics close when the collection is cleaned up, and a refused topic is not tried again after that. An empty topic or a topic over 2500 characters throws when the collection is built.
 
-Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads.
+Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads. A tinycld server sends change signals only to signed-in clients, so a `liveTopics` collection on a signed-out page never reloads.
 
 ### Custom EventSource
 
