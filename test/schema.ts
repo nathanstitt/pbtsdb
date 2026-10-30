@@ -476,6 +476,37 @@ export interface TokenGated {
     updated: string
 }
 
+export interface AuthorBookCounts {
+    /**
+     * |          |               |
+     * | -------- | ------------- |
+     * | type     | `text`        |
+     * | hidden   | `false`       |
+     * | required | `true`        |
+     * | pattern  | `^[a-z0-9]+$` |
+     */
+    id: string
+    /**
+     * |          |         |
+     * | -------- | ------- |
+     * | type     | `text`  |
+     * | hidden   | `false` |
+     * | required | `true`  |
+     * | min      | `1`     |
+     * | max      | `255`   |
+     */
+    name: string
+    /**
+     * |          |          |
+     * | -------- | -------- |
+     * | type     | `number` |
+     * | hidden   | `false`  |
+     * | required | `false`  |
+     * | onlyInt  | `true`   |
+     */
+    book_count: number
+}
+
 
 /**
  * Commented-out back-relations are what will be inferred by pocketbase-ts from the forward relations.
@@ -524,6 +555,9 @@ export type Schema = {
     }
     token_gated: {
         type: TokenGated
+    }
+    author_book_counts: {
+        type: AuthorBookCounts
     }
 }
 

@@ -469,6 +469,22 @@ export interface CreateCollectionOptions<
     realtime?: RealtimeMode
 
     /**
+     * Realtime topics whose messages mean "this collection's rows may have
+     * changed", such as the data-free change signal `collection/<name>` a
+     * server sends after a write. While the collection syncs, the first
+     * message on any of them opens a window of `LIVE_TOPIC_WINDOW_MS`
+     * milliseconds, and the collection reloads (`collection.reload()`) once
+     * when it closes. Use it for a view collection, for which PocketBase
+     * sends no record events.
+     *
+     * @example
+     * ```ts
+     * const counts = c('author_book_counts', { liveTopics: ['collection/author_book_counts'] })
+     * ```
+     */
+    liveTopics?: readonly string[]
+
+    /**
      * How long, in milliseconds, an on-demand subset stays loaded after its
      * last live query unsubscribes. A query with an equal request that mounts
      * within the window reuses the rows with no request; realtime keeps them

@@ -76,6 +76,11 @@ export async function authenticateTestUser(): Promise<void> {
     await pb.collection('users').authWithPassword(TEST_USER_EMAIL, TEST_USER_PW)
 }
 
+/** Asks the test server to send `count` data-free messages on `topic`. */
+export async function sendSignal(topic: string, count = 1): Promise<void> {
+    await pb.send('/api/test/signal', { method: 'POST', body: { topic, count } })
+}
+
 /**
  * Clear PocketBase authentication
  */

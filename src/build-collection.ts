@@ -29,6 +29,7 @@ import { ACCEPTED, createLedger } from './ledger'
 import { createLoadedSubsets } from './loaded-subsets'
 import { logger } from './logger'
 import { createMembership } from './membership'
+import { REALTIME_TOPIC_MAX_LENGTH } from './pocketbase-limits'
 import { createRealtimeSubscription } from './realtime-subscription'
 import { idOf, updatedAtOf } from './records'
 import type { PbRequest } from './request'
@@ -45,6 +46,20 @@ import type {
 import { createViewRegistry, createViews, type ViewTag } from './views'
 
 const REALTIME_MODES: readonly RealtimeMode[] = ['collection', 'query']
+
+/** How long the first message on a `liveTopics` topic waits for others before the reload. */
+export const LIVE_TOPIC_WINDOW_MS = 100
+
+function uniqueLiveTopics(collectionName: string, topics: readonly string[] = []): string[] {
+    for (const topic of topics) {
+        if (topic === '' || topic.length > REALTIME_TOPIC_MAX_LENGTH) {
+            throw new Error(
+                `Collection '${collectionName}': each liveTopics entry must be 1 to ${REALTIME_TOPIC_MAX_LENGTH} characters`
+            )
+        }
+    }
+    return [...new Set(topics)]
+}
 
 /**
  * Options applied to every collection built by a {@link createCollection} factory.
@@ -221,6 +236,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         }
     }
     assertRealtimeMode(realtimeMode)
+    const liveTopics = uniqueLiveTopics(collectionName, options?.liveTopics)
 
     // Paths requested by views that have subscribed at least once. Eager fetches
     // read it because they cannot receive per-subset options; the realtime
@@ -504,6 +520,60 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 logger.error(`Failed to reload after ${reason}`, { collectionName, error })
             )
     }
+
+    // A window from the first message, not a trailing debounce: a steady
+    // stream of messages still reloads once per window. reload() queues one
+    // follow-up for a message that arrives during a fetch. A subscribe stays
+    // pending through a transient POST failure and resolves on the
+    // reconnect, and its confirmation then reloads; cleanup aborts it.
+    function openLiveTopics(): () => void {
+        if (liveTopics.length === 0) return () => undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const abort = new AbortController()
+        const subscribed: (() => Promise<void>)[] = []
+        const onMessage = () => {
+            if (timer !== undefined) return
+            timer = setTimeout(function closeLiveTopicWindow() {
+                timer = undefined
+                reloadFor('live topic')
+            }, LIVE_TOPIC_WINDOW_MS)
+        }
+        for (const topic of liveTopics) {
+            void transport.subscribeTopic(topic, onMessage, abort.signal).then(
+                unsubscribe => {
+                    if (abort.signal.aborted) {
+                        void unsubscribe()
+                        return
+                    }
+                    subscribed.push(unsubscribe)
+                    // A load that started before the server had the topic
+                    // may predate a change no message reported to us. An
+                    // eager first load still running counts too: a reload
+                    // supersedes it.
+                    if (collection.status === 'loading' || collection.isReady()) {
+                        reloadFor('live topic confirmed')
+                    }
+                },
+                (error: unknown) => {
+                    // Cleanup aborted it, or a disconnect refused it after
+                    // cleanup; nothing wants the topic any more.
+                    if (abort.signal.aborted) return
+                    logger.error('Failed to subscribe to a live topic', {
+                        collectionName,
+                        topic,
+                        error,
+                    })
+                }
+            )
+        }
+        return () => {
+            abort.abort()
+            if (timer !== undefined) clearTimeout(timer)
+            timer = undefined
+            for (const unsubscribe of subscribed.splice(0)) void unsubscribe()
+        }
+    }
+
     // Registered for the life of a sync, like the listeners: a cleaned-up
     // collection reports no loads, and collections recreated for one `pb`
     // must not accumulate in its status.
@@ -512,8 +582,12 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         if (event.status === 'cleaned-up') subsets.clear()
         if (!removeTransportListeners && (event.status === 'loading' || event.status === 'ready')) {
             const removeLoadSource = transport.addLoadSource(adapter.loadStatus)
+            const closeLiveTopics = openLiveTopics()
             const removeReconnect = transport.onReconnect(resumed => {
-                if (resumed || !realtime.isOpen()) return
+                // An entry still opening is confirmed by this reconnect's
+                // POST: a subscribe kept through a failed POST resolves just
+                // after this listener runs, and its rows need the reload too.
+                if (resumed || !(realtime.isOpen() || realtime.isOpening())) return
                 // A collection still loading has no live demands to reload,
                 // but its first load may be waiting out a retry.
                 if (!collection.isReady()) {
@@ -533,6 +607,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                 removeLoadSource()
                 removeReconnect()
                 removeAuth()
+                closeLiveTopics()
             }
         } else if (removeTransportListeners && event.status === 'cleaned-up') {
             removeTransportListeners()

@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `subscribeTopic(pb, topic, onMessage, { signal })`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection; abort `signal` to drop a subscribe that still waits for the server.
+- `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals.
+- `RealtimeTopicTooLongError` and `RealtimeSubscribeAbortedError` are exported, for `instanceof` checks.
+
+### Changed
+
+- A subscriptions POST that fails with no response, a 5xx, or a 403, 404, 408 or 429 no longer drops the subscriptions it carried. PocketBase answers 404 when it no longer holds the client (a forced or idle close, a restart) and 403 when the auth changed. The subscriptions stay registered and pending, pbtsdb closes the stream and schedules a reconnect after the usual backoff delay, and the reconnect's POST sends them again; record subscriptions and live topics then reload as after any non-resumed reconnect. Another 4xx, such as a 400, still rejects the subscribe and keeps the connection. After a 403 or 404 the reconnect does not resume, because the server's client for the old id is gone or holds another auth. An unsubscribe whose POST fails this way settles at once, and does not by itself make the reconnect reload. A failed POST sent on a connection that a reconnect has since replaced, also one that resumed with the same client id, is sent again on the new connection and does not close it. A pending record subscription that is no longer wanted, or a live topic of a cleaned-up collection, is dropped at once.
+
 ### Fixed
 
 - An aborted `loadSubset` now resolves with no rows instead of rejecting with

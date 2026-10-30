@@ -120,6 +120,56 @@ const c = createCollection<Schema>(pb, {
   can therefore serve both REST and real-time.
 - Requires `pocketbase >= 0.22.0`.
 
+## Change signals
+
+`subscribeTopic(pb, topic, onMessage): Promise<() => Promise<void>>` listens to
+a custom realtime topic over pbtsdb's shared connection (the same one
+`resetRealtime(pb)` controls). `onMessage` is called with no argument: a topic
+message, such as a data-free change signal, says only that something changed,
+and the caller fetches what it needs. The promise resolves once the server has
+the topic, so subscribe first, then fetch. It rejects an empty topic and a topic
+over 2500 characters (`RealtimeTopicTooLongError`). A message whose data is not
+JSON is dropped. A subscriptions request that fails with no response, a 5xx,
+or a 403, 404, 408 or 429 keeps the promise pending until the reconnect that
+follows confirms the topic; another 4xx, such as a 400, rejects it. Pass
+`{ signal }` as a fourth argument to abort a pending subscribe. Both errors are
+exported: `RealtimeTopicTooLongError`, `RealtimeSubscribeAbortedError`. A PocketBase JS hook can send `{}` on `collection/<name>` after a write,
+through `$app.subscriptionsBroker()`.
+
+```typescript
+const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun());
+await rerun();
+```
+
+The `liveTopics?: readonly string[]` collection option keeps a collection live
+on such topics. Use it for a view collection: PocketBase sends no record events
+for a view.
+
+```typescript
+const counts = c('author_book_counts', {
+    syncMode: 'on-demand',
+    liveTopics: ['collection/author_book_counts'],
+});
+```
+
+- While the collection syncs, each topic is subscribed; the topics close when
+  the collection is cleaned up.
+- The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100, exported),
+  and the collection reloads once when it closes. Later messages do not extend
+  the window, so a steady stream still reloads once per window.
+- When the server confirms a topic after a load started, the collection reloads
+  once more: a change between that load and the confirmation sent no message
+  to this client.
+- A subscriptions request that fails with no response, a 5xx, or a 403, 404,
+  408 or 429 keeps the topic registered; the reconnect that follows sends it
+  again, and the collection reloads once the server confirms it. A topic
+  refused with another 4xx, such as a 400, stays off.
+  Cleanup drops a topic that still waits for the server.
+- An empty topic or a topic over 2500 characters throws at build.
+- The server must send a message on the view's topic when a source table of the
+  view changes. If the server sends change signals only to signed-in
+  clients, a `liveTopics` collection on a signed-out page never reloads.
+
 ## Testing
 
 ```bash

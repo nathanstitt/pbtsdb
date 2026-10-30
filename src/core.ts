@@ -24,6 +24,7 @@ export {
 } from '@tanstack/db'
 export type { RecordSubscribeOptions } from 'pocketbase'
 export type { PbCollectionUtils } from './build-collection'
+export { LIVE_TOPIC_WINDOW_MS } from './build-collection'
 export {
     type CreateCollectionFactoryOptions,
     createCollection,
@@ -39,6 +40,7 @@ export type {
     RealtimeBackoff,
     RealtimeEventSourceFactory,
 } from './realtime-client'
+export { RealtimeSubscribeAbortedError, RealtimeTopicTooLongError } from './realtime-client'
 export type { LoadStatus, RealtimeStatus, SyncStatus, SyncStatusListener } from './sync-status'
 export {
     disconnectRealtime,
@@ -48,6 +50,7 @@ export {
     setRealtimeBackoff,
     setRealtimeEventSource,
     subscribeSyncStatus,
+    subscribeTopic,
 } from './transport'
 export type {
     CreateCollectionOptions,

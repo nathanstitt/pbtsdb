@@ -2,6 +2,7 @@ import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
 import { RefCounter } from './filter-refs'
 import { logger } from './logger'
 import { REALTIME_TOPIC_MAX_LENGTH, realtimeTopicLength } from './pocketbase-limits'
+import { RealtimeSubscribeAbortedError } from './realtime-client'
 import type { Transport } from './transport'
 
 export interface RealtimeSubscriptionDeps<T extends object> {
@@ -48,6 +49,8 @@ export interface RealtimeSubscription {
     /** Close every open entry and reopen what is wanted; a no-op when nothing is live. */
     restart: () => void
     isOpen: () => boolean
+    /** An entry's subscribe is still waiting for the server to confirm it. */
+    isOpening: () => boolean
     /** Resolves once an entry is open; rejects when none opens within `timeout`. */
     wait: (timeout?: number) => Promise<void>
 }
@@ -76,6 +79,9 @@ export function createRealtimeSubscription<T extends object>(
     // Topics that opened at least once, so the ledger may hold rows under them.
     const delivered = new Set<string>()
 
+    // Entries whose subscribe is still pending, by topic ('*' or the filter).
+    const opening = new Map<string, AbortController>()
+
     const isStarOpen = () => starUnsubscribe !== null
     const isOpen = () => isStarOpen() || filterEntries.size > 0
     const wantedFilters = () => new Set([...queryRefs.keys(), ...holdRefs.keys()])
@@ -102,20 +108,46 @@ export function createRealtimeSubscription<T extends object>(
         })
     }
 
+    // A subscribe stays pending through a transient POST failure until the
+    // reconnect confirms it, so an entry can still be opening when it stops
+    // being wanted. `abortUnwanted` drops such a registration at once.
+    async function subscribeEntry(
+        topic: string,
+        options: RecordSubscribeOptions | undefined,
+        expand: string | undefined
+    ): Promise<() => Promise<void>> {
+        const abort = new AbortController()
+        opening.set(topic, abort)
+        try {
+            return await deps.transport.subscribe<T>(
+                collectionName,
+                options,
+                event => deps.handleEvent(event, topic, expand),
+                abort.signal
+            )
+        } finally {
+            opening.delete(topic)
+        }
+    }
+
+    function abortUnwanted(): void {
+        const wanted = wantedFilters()
+        for (const [topic, abort] of opening) {
+            if (topic === '*' ? !wantsStar() : !wanted.has(topic)) abort.abort()
+        }
+    }
+
     async function openStar(): Promise<void> {
         if (isStarOpen()) return
         const expand = deps.pendingExpand()
         try {
-            starUnsubscribe = await deps.transport.subscribe<T>(
-                collectionName,
-                deps.subscribeOptions(),
-                event => deps.handleEvent(event, '*', expand)
-            )
+            starUnsubscribe = await subscribeEntry('*', deps.subscribeOptions(), expand)
             delivered.add('*')
             starExpand = expand
             logger.debug('Subscription started', { collectionName })
             notifyOpened()
         } catch (error) {
+            if (error instanceof RealtimeSubscribeAbortedError) return
             logger.error('Failed to start subscription', { collectionName, error })
         }
     }
@@ -150,14 +182,13 @@ export function createRealtimeSubscription<T extends object>(
         const options = filteredOptions(filter)
         const expand = deps.pendingExpand()
         try {
-            const unsubscribe = await deps.transport.subscribe<T>(collectionName, options, event =>
-                deps.handleEvent(event, filter, expand)
-            )
+            const unsubscribe = await subscribeEntry(filter, options, expand)
             delivered.add(filter)
             filterEntries.set(filter, { unsubscribe, expand })
             logger.debug('Filtered subscription started', { collectionName, filter })
             notifyOpened()
         } catch (error) {
+            if (error instanceof RealtimeSubscribeAbortedError) return
             logger.error('Failed to start filtered subscription', {
                 collectionName,
                 filter,
@@ -257,7 +288,10 @@ export function createRealtimeSubscription<T extends object>(
         await doReconcile()
     }
 
-    const reconcile = () => enqueue(doReconcile)
+    const reconcile = () => {
+        abortUnwanted()
+        enqueue(doReconcile)
+    }
     const restart = () => enqueue(doRestart)
 
     return {
@@ -293,6 +327,7 @@ export function createRealtimeSubscription<T extends object>(
         reconcile,
         restart,
         isOpen,
+        isOpening: () => opening.size > 0,
         wait(timeout = 5000) {
             if (isOpen()) return Promise.resolve()
             return new Promise((resolve, reject) => {

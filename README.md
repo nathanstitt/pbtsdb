@@ -307,6 +307,34 @@ setRealtimeBackoff(pb, (attempt) => Math.min(60_000, 1000 * 2 ** attempt));
 reconnectRealtime(pb);
 ```
 
+### Change signals
+
+`subscribeTopic(pb, topic, onMessage)` listens to a custom realtime topic over the same connection as the collections, with the same reconnect, resume and auth handling. `onMessage` is called with no argument: a topic message, such as a data-free change signal, says only that something changed, and you fetch what you need. The returned promise resolves once the server has the topic, so subscribe first and fetch after: a change the server reports on the topic cannot fall between the two. It resolves to an unsubscribe function. It rejects an empty topic, and a topic over 2500 characters with `RealtimeTopicTooLongError`. A message whose data is not JSON is dropped. If the subscriptions request fails with no response, a server error, or a 403, 404, 408 or 429, the promise stays pending: pbtsdb reconnects, and the reconnect sends the topic again. (PocketBase answers 404 when it no longer holds the client, for example after its 30-minute forced close, and 403 when the auth changed.) Another 4xx, such as a 400, rejects it. To stop waiting, pass `{ signal }` as the fourth argument and abort it; the topic is then dropped and the promise rejects with `RealtimeSubscribeAbortedError`. Both error classes are exported for `instanceof` checks.
+
+```typescript
+import { subscribeTopic } from 'pbtsdb';
+
+const unsubscribe = await subscribeTopic(pb, 'collection/books', () => void rerun());
+await rerun(); // the first fetch, after the topic is confirmed
+
+await unsubscribe();
+```
+
+A PocketBase JS hook can send such a signal through `$app.subscriptionsBroker()`, for example `{}` on `collection/<name>` after a write commits, so a client can rerun a custom query without a record-level subscription.
+
+To keep a collection live on such topics, give it `liveTopics`. PocketBase sends no record events for a view collection, so a view needs this to show changes in the tables it reads:
+
+```typescript
+const authorBookCounts = c('author_book_counts', {
+    syncMode: 'on-demand',
+    liveTopics: ['collection/author_book_counts'],
+});
+```
+
+While the collection syncs, it subscribes to each topic. The first message opens a window of `LIVE_TOPIC_WINDOW_MS` (100 ms), and the collection reloads once when the window closes. Messages during the window do not extend it, so a steady stream of messages still reloads once per window. When the server confirms a topic after a load started, the collection reloads once more, because a write between that load and the confirmation sends a message that this client does not get. If the subscriptions request fails in one of those ways, the topic stays registered and the reconnect that follows sends it again; the collection then reloads when the server confirms it. A topic the server refuses with another 4xx, such as a 400, is logged and stays off. The topics close when the collection is cleaned up, also while one still waits for the server. An empty topic or a topic over 2500 characters throws when the collection is built.
+
+Use it with a server that sends a message on the view's topic when a source table of the view changes. pbtsdb cannot know which tables a view reads. If the server sends change signals only to signed-in clients, a `liveTopics` collection on a signed-out page never reloads.
+
 ### Custom EventSource
 
 By default pbtsdb opens its realtime connection with the global `EventSource`. That sends no auth header, and React Native has no global `EventSource`. Use `setRealtimeEventSource(pb, factory)` to open the connection your own way. Call it before the first collection subscribes.
@@ -547,6 +575,7 @@ const collection = c(collectionName: string, options?: CreateCollectionOptions);
 - `omitOnInsert?: readonly string[]` - Fields to make optional during insert (e.g., `['created', 'updated'] as const`)
 - `syncMode?: 'eager' | 'on-demand'` - Data fetching strategy (default: `'eager'`)
 - `realtime?: 'collection' | 'query'` - Which rows the realtime subscription covers (default: `'collection'`; `'query'` requires `syncMode: 'on-demand'`; see [Realtime Scope](#realtime-scope))
+- `liveTopics?: readonly string[]` - Custom realtime topics whose messages reload the collection, coalesced over `LIVE_TOPIC_WINDOW_MS` (100 ms); each topic is 1 to 2500 characters (see [Change signals](#change-signals))
 - `onInsert?: InsertMutationFn | false` - Custom insert handler or `false` to disable
 - `onUpdate?: UpdateMutationFn | false` - Custom update handler or `false` to disable
 - `onDelete?: DeleteMutationFn | false` - Custom delete handler or `false` to disable

@@ -1,11 +1,13 @@
 import { eq, useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { SendOptions } from 'pocketbase'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCollection } from '../src'
 import {
     disconnectRealtime,
     realtimeClientFor,
     resetRealtime,
+    setRealtimeBackoff,
     transportFor,
 } from '../src/transport'
 import {
@@ -13,10 +15,67 @@ import {
     clearAuth,
     createAuthorsCollection,
     createBooksCollection,
+    getTestSlug,
+    newRecordId,
     pb,
     waitForLoadFinish,
 } from './helpers'
 import type { Schema } from './schema'
+
+const isAuthorBooksTopic = (topic: string, author: string) =>
+    topic.startsWith('books/') && topic.includes(author)
+
+// Fails the first subscriptions POST that carries the books topic of
+// `author` with a 500, and holds the second until `release` is called.
+function failFirstBooksPost(author: string) {
+    let release: () => void = () => undefined
+    const released = new Promise<void>(resolve => {
+        release = resolve
+    })
+    let attempts = 0
+    pb.beforeSend = async (url: string, options: SendOptions) => {
+        const body = options.body as { subscriptions?: string[] } | undefined
+        if (
+            url.endsWith('/api/realtime') &&
+            options.method === 'POST' &&
+            body?.subscriptions?.some(topic => isAuthorBooksTopic(topic, author))
+        ) {
+            attempts += 1
+            if (attempts === 1) {
+                options.fetch = () =>
+                    Promise.resolve(
+                        new Response(JSON.stringify({ message: 'Unavailable.' }), {
+                            status: 500,
+                            headers: { 'Content-Type': 'application/json' },
+                        })
+                    )
+            }
+            if (attempts === 2) await released
+        }
+        return { url, options }
+    }
+    return { attempts: () => attempts, release }
+}
+
+async function createAuthor(): Promise<string> {
+    const author = newRecordId()
+    await pb.collection('authors').create({ id: author, name: author, email: `${author}@gap.test` })
+    return author
+}
+
+async function createBook(author: string): Promise<string> {
+    const id = newRecordId()
+    await pb.collection('books').create({
+        id,
+        title: 'Gap',
+        isbn: getTestSlug('isbn'),
+        genre: 'Fiction',
+        author,
+        page_count: 1,
+        published_date: '',
+    })
+    return id
+}
 
 describe('reconnect refetch lifecycle', () => {
     beforeAll(async () => {
@@ -275,4 +334,72 @@ describe('reconnect refetch lifecycle', () => {
         await books.cleanup()
         getFullList.mockRestore()
     }, 20000)
+
+    describe('a subscriptions POST that fails with a 500', () => {
+        const originalBeforeSend = pb.beforeSend
+        const built: { cleanup: () => Promise<void> }[] = []
+
+        afterEach(async () => {
+            pb.beforeSend = originalBeforeSend
+            setRealtimeBackoff(pb, undefined)
+            await Promise.all(built.splice(0).map(collection => collection.cleanup()))
+        })
+
+        // Each test filters on a new author, so its topic is new to the
+        // connection and its subscribe always sends a POST.
+        async function mountAuthorBooks() {
+            const author = await createAuthor()
+            const post = failFirstBooksPost(author)
+            const books = createCollection<Schema>(pb)('books', {
+                syncMode: 'on-demand',
+                realtime: 'query',
+            })
+            built.push(books)
+            const hook = renderHook(() =>
+                useLiveQuery(q => q.from({ books }).where(({ books }) => eq(books.author, author)))
+            )
+            await waitForLoadFinish(hook.result)
+            const hasTopic = () =>
+                realtimeClientFor(pb)
+                    .topics()
+                    .some(topic => isAuthorBooksTopic(topic, author))
+            return { author, post, books, hook, hasTopic }
+        }
+
+        it('keeps the record subscription, which opens on the reconnect and reloads the gap', async () => {
+            setRealtimeBackoff(pb, () => 0)
+            const { author, post, books, hook, hasTopic } = await mountAuthorBooks()
+            const ids = () => hook.result.current.data?.map(book => book.id)
+
+            // The reconnect's POST carries the kept topic; it is held here.
+            await waitFor(() => expect(post.attempts()).toBe(2))
+            expect(hasTopic()).toBe(true)
+            expect(books.isSubscribed()).toBe(false)
+
+            // Written before the server has the topic: only a reload brings it in.
+            const gap = await createBook(author)
+            post.release()
+            await waitFor(() => expect(ids()).toContain(gap))
+
+            await books.waitForSubscription()
+            const live = await createBook(author)
+            await waitFor(() => expect(ids()).toContain(live))
+        })
+
+        it('leaves no topic when the collection is cleaned up while the subscription waits', async () => {
+            setRealtimeBackoff(pb, () => 60_000)
+            const { post, books, hook, hasTopic } = await mountAuthorBooks()
+            await waitFor(() => expect(post.attempts()).toBe(1))
+            await waitFor(() => expect(realtimeClientFor(pb).status().state).toBe('reconnecting'))
+            expect(hasTopic()).toBe(true)
+
+            hook.unmount()
+            await books.cleanup()
+            await waitFor(() => expect(hasTopic()).toBe(false))
+            // A POST made now carries every topic still registered.
+            const unsubscribe = await realtimeClientFor(pb).subscribe('test/probe', () => undefined)
+            await unsubscribe()
+            expect(post.attempts()).toBe(1)
+        })
+    })
 })
