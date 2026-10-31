@@ -225,6 +225,10 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         return { holders, rows }
     }
 
+    function isWindow(opts: LoadSubsetOptions): boolean {
+        return opts.limit !== undefined || Boolean(opts.cursor) || opts.offset !== undefined
+    }
+
     // A complete fresh result is the server's answer for `where`: a row
     // ACCEPTED or a filter topic holds, that matches `where` and that the result
     // omits, is gone or changed on the server (rule 6 exception). A page
@@ -234,7 +238,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         before: { holders: Holder[]; rows: Map<string, T> },
         ids: readonly string[]
     ): Applied {
-        if (opts.limit !== undefined || opts.cursor || opts.offset !== undefined) return true
+        if (isWindow(opts)) return true
         const returned = new Set(ids)
         const matches = matcherFor(opts.where, false)
         const omitted = [...before.rows]
@@ -502,7 +506,9 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
     }
 
     // Rows already at hand for a new demand: a parked equal demand's, or
-    // the store's. False when a fetch is needed.
+    // the store's. False when a fetch is needed. A parked window is fetched
+    // again: a row that left it while parked leaves a gap that only the
+    // server can fill.
     function startFromHeld(
         opts: LoadSubsetOptions,
         demand: Demand,
@@ -511,7 +517,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         if (parkedOpts === undefined) return serve(opts, demand)
         const adopted = adopt(opts, parkedOpts)
         demand.landed = true
-        return opts.refetch === true ? false : adopted
+        return opts.refetch === true || isWindow(opts) ? false : adopted
     }
 
     // Rows adopted while a reload is running predate it; fetch them again
@@ -556,7 +562,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             // A load that fails keeps retrying and keeps its demand, so the
             // live query stays loading rather than erroring; a reload() or
             // reconnect wakes it. An unload releases it as usual.
-            return load(run, opts, demand, 'visible', opts.refetch === true).then(() => undefined)
+            const refetch = opts.refetch === true || parkedOpts !== undefined
+            return load(run, opts, demand, 'visible', refetch).then(() => undefined)
         }
     }
 

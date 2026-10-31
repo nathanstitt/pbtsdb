@@ -19,6 +19,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A parked subset with a `limit`, cursor or offset is now fetched again when
+  an equal query adopts it. Before, a row deleted while the subset was parked
+  made the adopted window short with no request: a `limit(1)` query answered
+  `[]` while the server still had rows, and a page could lose its last row.
+  Subsets with no window still adopt with no request.
 - An aborted `loadSubset` now resolves with no rows instead of rejecting with
   `LoadSubsetOperationAbortedError`. `@tanstack/db` 0.12 awaits, in one
   `Promise.all`, the loads a lazy join replaces together with their
