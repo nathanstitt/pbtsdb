@@ -482,6 +482,54 @@ describe('sync adapter', () => {
             await wait(1100)
         })
 
+        it('with a limit is adopted and then fetched again before the load resolves', async () => {
+            const t = setup('on-demand', 1000)
+            const first = { ...named('x'), limit: 1 }
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([row('a', 'x')])
+            await load
+            t.unloadSubset(first)
+            t.ledger.releaseAll('a')
+
+            const second = { ...named('x'), limit: 1 }
+            let resolved = false
+            const adopting = t.loadSubset(second)
+            expect(adopting).not.toBe(true)
+            void Promise.resolve(adopting).then(() => {
+                resolved = true
+            })
+            expect(t.calls).toHaveLength(2)
+            expect(t.calls[1].options?.refetch).toBe(true)
+            expect(t.realtime.retainQueryFilters).toHaveBeenCalledTimes(1)
+            await wait(0)
+            expect(resolved).toBe(false)
+
+            t.calls[1].resolve([row('b', 'x')])
+            await adopting
+            expect(t.ledger.idsOf(second)).toEqual(['b'])
+            t.unloadSubset(second)
+            await wait(1100)
+        })
+
+        it('with a limit keeps its adopted rows until the fetch answers', async () => {
+            const t = setup('on-demand', 1000)
+            const first = { ...named('x'), limit: 2 }
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([row('a', 'x'), row('b', 'x')])
+            await load
+            t.unloadSubset(first)
+
+            const second = { ...named('x'), limit: 2 }
+            const adopting = t.loadSubset(second)
+            expect(t.ledger.idsOf(second)).toEqual(['a', 'b'])
+            t.calls[1].resolve([row('a', 'x'), row('c', 'x')])
+            await adopting
+            expect(t.ledger.idsOf(second)).toEqual(['a', 'c'])
+            expect(t.ledger.has('b')).toBe(false)
+            t.unloadSubset(second)
+            await wait(1100)
+        })
+
         it('is expired by a reload instead of being refetched', async () => {
             const t = setup('on-demand', 1000)
             const opts = named('x')

@@ -488,7 +488,9 @@ export interface CreateCollectionOptions<
      * How long, in milliseconds, an on-demand subset stays loaded after its
      * last live query unsubscribes. A query with an equal request that mounts
      * within the window reuses the rows with no request; realtime keeps them
-     * fresh meanwhile. Rows a parent filed through a relation follow the
+     * fresh meanwhile. A query with a `limit`, cursor or offset reuses the
+     * rows but fetches its window again before it resolves, because a row
+     * that left the window while parked leaves a gap. Rows a parent filed through a relation follow the
      * same window, and so does the accepted holder a mutation write-back or
      * `accept()` gives a row. `0` releases a subset as soon as it unloads
      * and keeps an accepted row until a reload or idle. A `reload()`
