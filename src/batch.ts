@@ -56,10 +56,22 @@ function operationsOf(mutations: readonly PendingMutation[]): Operation[] {
                 `batch: collection '${target.collectionName}' has a custom or disabled ${mutation.type} handler and cannot join a batch`
             )
         }
+        const sent = mutation.type === 'insert' ? mutation.modified : mutation.changes
+        if (mutation.type !== 'delete' && Object.values(sent).some(holdsFile)) {
+            throw new Error(
+                `batch: a batch cannot upload a file (collection '${target.collectionName}'); send the file in its own mutation`
+            )
+        }
         const row = mutation.type === 'insert' ? mutation.modified : mutation.original
         const id = String((row as { id?: unknown }).id ?? mutation.key)
         return { mutation, target, id }
     })
+}
+
+// The batch goes out as JSON, where a file would become `{}` with no error.
+function holdsFile(value: unknown): boolean {
+    if (Array.isArray(value)) return value.some(holdsFile)
+    return typeof Blob !== 'undefined' && value instanceof Blob
 }
 
 function clientOf(operations: readonly Operation[]): PocketBase {
@@ -109,6 +121,9 @@ async function sendBatch(mutations: readonly PendingMutation[]): Promise<void> {
         results = await pb.send<BatchResult[]>('/api/batch', {
             method: 'POST',
             body: { requests: operations.map(requestOf) },
+            // Every batch has the same method and path, so the SDK's
+            // auto-cancellation would abort one of two concurrent batches.
+            requestKey: null,
         })
     } catch (error) {
         const failed = failedOperation(error)
@@ -152,6 +167,10 @@ export async function batch(fn: () => void): Promise<void> {
         autoCommit: false,
         mutationFn: ({ transaction: tx }) => sendBatch(tx.mutations),
     })
+    // A rollback rejects the transaction's own promise. Nothing else observes
+    // it when the callback threw before any mutation; the caller gets the
+    // error from this function.
+    transaction.when('settled').catch(() => {})
     try {
         transaction.mutate(() => {
             const returned: unknown = fn()

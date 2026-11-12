@@ -1,7 +1,13 @@
 import { useLiveQuery } from '@tanstack/react-db'
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { BatchMutationError, batch, createCollection } from '../src'
+import {
+    BatchMutationError,
+    batch,
+    createCollection,
+    disconnectRealtime,
+    resetRealtime,
+} from '../src'
 import {
     authenticateTestUser,
     clearAuth,
@@ -76,32 +82,122 @@ describe('batch', () => {
 
         const send = vi.spyOn(pb, 'send')
         const book = bookRow(authorId)
-        await batch(() => {
-            books.insert(book)
-            tags.update(kept.id, draft => {
-                draft.color = '#ff0000'
+        // Realtime is closed for the batch, so the rows asserted below can
+        // only be the ones the batch itself landed, not an echo.
+        disconnectRealtime(pb)
+        try {
+            await batch(() => {
+                books.insert(book)
+                tags.update(kept.id, draft => {
+                    draft.color = '#ff0000'
+                })
+                tags.delete(removed.id)
             })
-            tags.delete(removed.id)
-        })
 
-        const requests = send.mock.calls.filter(([path]) => path === '/api/batch')
-        expect(requests).toHaveLength(1)
-        expect(send.mock.calls.some(([path]) => String(path).startsWith('/api/collections/'))).toBe(
-            false
-        )
+            const requests = send.mock.calls.filter(([path]) => path === '/api/batch')
+            expect(requests).toHaveLength(1)
+            expect(
+                send.mock.calls.some(([path]) => String(path).startsWith('/api/collections/'))
+            ).toBe(false)
+            expect(books.get(book.id)?.created).toBeTruthy()
+            expect(tags.get(kept.id)?.color).toBe('#ff0000')
+            expect(tags.get(removed.id)).toBeUndefined()
+        } finally {
+            resetRealtime(pb)
+        }
+
         expect(await exists('books', book.id)).toBe(true)
         expect((await pb.collection('tags').getOne(kept.id)).color).toBe('#ff0000')
         expect(await exists('tags', removed.id)).toBe(false)
 
-        // The landed rows are the server's rows and stay after the echo.
-        await waitFor(() => {
-            expect(books.get(book.id)?.created).toBeTruthy()
-            expect(tags.get(kept.id)?.color).toBe('#ff0000')
-            expect(tags.get(removed.id)).toBeUndefined()
-        })
-        await new Promise(resolve => setTimeout(resolve, 500))
-        expect(booksLive.result.current.data.filter(row => row.id === book.id)).toHaveLength(1)
+        // The rows stay as landed once the echo of a later change has arrived.
+        await pb.collection('tags').update(kept.id, { name: 'echo marker' })
+        await waitFor(() => expect(tags.get(kept.id)?.name).toBe('echo marker'))
+        expect(books.get(book.id)?.created).toBeTruthy()
         expect(tags.get(kept.id)?.color).toBe('#ff0000')
+        expect(tags.get(removed.id)).toBeUndefined()
+    })
+
+    it('names the first operation when it is the one that fails', async () => {
+        const { books, tags } = collections()
+        const booksLive = renderHook(() => useLiveQuery(q => q.from({ book: books })))
+        const tagsLive = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(booksLive.result)
+        await waitForLoadFinish(tagsLive.result)
+
+        const bad = bookRow(authorId, { title: '' })
+        const tag = tagRow()
+        const failure = await batch(() => {
+            books.insert(bad)
+            tags.insert(tag)
+        }).then(
+            () => null,
+            (error: unknown) => error
+        )
+
+        expect(failure).toBeInstanceOf(BatchMutationError)
+        const error = failure as BatchMutationError
+        expect(error.index).toBe(0)
+        expect(error.collection).toBe('books')
+        expect(error.recordId).toBe(bad.id)
+        expect(await exists('tags', tag.id)).toBe(false)
+    })
+
+    it('lets two batches run at the same time when the client cancels duplicate requests', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const first = tagRow()
+        const second = tagRow()
+        pb.autoCancellation(true)
+        try {
+            await Promise.all([
+                batch(() => {
+                    tags.insert(first)
+                }),
+                batch(() => {
+                    tags.insert(second)
+                }),
+            ])
+        } finally {
+            pb.autoCancellation(false)
+        }
+        expect(await exists('tags', first.id)).toBe(true)
+        expect(await exists('tags', second.id)).toBe(true)
+    })
+
+    it('refuses a file value, which a batch cannot upload', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const send = vi.spyOn(pb, 'send')
+        const tag = tagRow({ name: new Blob(['x']) as unknown as string })
+        await expect(
+            batch(() => {
+                tags.insert(tag)
+            })
+        ).rejects.toThrow(/cannot upload a file/)
+        expect(tags.get(tag.id)).toBeUndefined()
+        expect(send.mock.calls.filter(([path]) => path === '/api/batch')).toHaveLength(0)
+    })
+
+    it('leaves no unhandled rejection when the callback throws before any mutation', async () => {
+        const unhandled: unknown[] = []
+        const record = (reason: unknown) => unhandled.push(reason)
+        process.on('unhandledRejection', record)
+        try {
+            await expect(
+                batch(() => {
+                    throw new Error('stop')
+                })
+            ).rejects.toThrow('stop')
+            await new Promise(resolve => setTimeout(resolve, 20))
+        } finally {
+            process.off('unhandledRejection', record)
+        }
+        expect(unhandled).toEqual([])
     })
 
     it('rolls back every operation when one fails, and names the failed operation', async () => {
@@ -194,11 +290,14 @@ describe('batch', () => {
         const stored = tagRow()
         await pb.collection('tags').create(stored)
         await disabled.utils.reload()
+        await waitFor(() => expect(disabled.get(stored.id)).toBeDefined())
         await expect(
             batch(() => {
                 disabled.delete(stored.id)
             })
-        ).rejects.toThrow()
+        ).rejects.toThrow(/custom or disabled delete handler/)
+        expect(send.mock.calls.filter(([path]) => path === '/api/batch')).toHaveLength(0)
+        expect(disabled.get(stored.id)).toBeDefined()
         expect(await exists('tags', stored.id)).toBe(true)
     })
 
