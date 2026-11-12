@@ -23,6 +23,7 @@ export {
     toArray,
 } from '@tanstack/db'
 export type { RecordSubscribeOptions } from 'pocketbase'
+export { BatchMutationError, batch } from './batch'
 export type { PbCollectionUtils } from './build-collection'
 export { LIVE_TOPIC_WINDOW_MS } from './build-collection'
 export {
