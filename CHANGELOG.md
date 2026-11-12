@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - `subscribeTopic(pb, topic, onMessage, { signal })`: listen to a custom realtime topic, such as a data-free change signal, over pbtsdb's shared connection; abort `signal` to drop a subscribe that still waits for the server.
 - `liveTopics` collection option: reload the collection on messages on custom realtime topics, coalesced over `LIVE_TOPIC_WINDOW_MS`; keeps view collections live with a server that sends change signals.
 - `RealtimeTopicTooLongError` and `RealtimeSubscribeAbortedError` are exported, for `instanceof` checks.
+- `batch(fn)`: send the mutations of one or more collections in one PocketBase batch request and one database transaction. Rejects with `BatchMutationError`, which names the failed operation, and rolls back every optimistic change.
 
 ### Changed
 

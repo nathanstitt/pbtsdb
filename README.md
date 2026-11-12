@@ -524,6 +524,35 @@ The option only affects the built-in default handlers. A custom `onInsert`, `onU
 - In on-demand mode, when realtime goes idle (no live query on the collection), rows held only by an accepted write-back are released. A row written back while nothing is mounted is fetched again on the next mount.
 - The handler returns `void`. Core no longer reads a `{ refetch }` result; call `collection.reload()` yourself if the handler needs a refetch.
 
+### Batch Mutations
+
+`batch` sends the mutations of one or more collections to PocketBase in one request and one database transaction. All of them are saved, or none.
+
+```typescript
+import { batch, BatchMutationError, newRecordId } from 'pbtsdb'
+
+try {
+    await batch(() => {
+        orders.update(orderId, draft => { draft.status = 'placed' })
+        lines.insert({ id: newRecordId(), order: orderId, quantity: 2 })
+        lines.delete(oldLineId)
+    })
+} catch (error) {
+    if (error instanceof BatchMutationError) {
+        // error.index, error.collection, error.recordId name the failed
+        // operation; error.response is its PocketBase error body.
+    }
+}
+```
+
+- The callback is synchronous. Do not `await` in it: the calls only record the mutations and apply them optimistically. The one request is sent when the callback returns.
+- The Promise resolves when the server accepted the batch and the returned rows are in their collections. On failure every optimistic change is rolled back and the Promise rejects.
+- The PocketBase server must have the batch API enabled (Settings → Batch API), with `maxRequests` at or above the largest batch you send.
+- All collections in one batch must come from the same PocketBase client.
+- A collection with a custom `onInsert`/`onUpdate`/`onDelete`, or with that operation disabled, cannot take that operation in a batch.
+- File uploads are not supported in a batch. The batch is sent as JSON.
+- A batch does not detect a stale editor. It only makes the write atomic.
+
 ### Writing server rows yourself
 
 `collection.accept(rows)` lands rows the server returned, for example the response of a custom endpoint, as confirmed state. A row older than the stored one is ignored. Use it when the screen must update before the realtime echo arrives. It resolves when the rows are accepted, so a custom mutation handler can await it.

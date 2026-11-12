@@ -241,6 +241,25 @@ function BooksList() {
 - A custom `onInsert`/`onUpdate` should `await collection.accept(serverRows)` and a custom `onDelete` should `await collection.evict(ids)` before it returns `void`; otherwise the row shows its previous server value from settle until the realtime echo
 - `collection.accept(rows)` lands server-returned rows as confirmed state; `collection.evict(ids)` removes rows the server deleted; `collection.reload()` refetches every live query's subset and drops rows the results do not confirm. All three resolve on acceptance and are also on `collection.utils`
 
+**Batch (atomic) mutations:**
+
+```typescript
+import { batch } from 'pbtsdb';
+
+// One /api/batch request, one database transaction: all or none.
+await batch(() => {
+    books.update(bookId, (draft) => { draft.title = 'New' });
+    tags.insert({ id: newRecordId(), name: 'x' });
+    tags.delete(oldTagId);
+});
+```
+
+- The callback is synchronous; never `await` inside it
+- Rejects with `BatchMutationError` (`index`, `collection`, `recordId`, `status`, `response`) when one operation fails; every optimistic change is rolled back
+- Needs the PocketBase batch API enabled on the server
+- Refused for a collection with a custom or disabled handler for that operation, and for collections of two PocketBase clients
+- No file uploads; the batch is sent as JSON
+
 ## Common Patterns
 
 **Approach 1: Related data (Recommended)**
