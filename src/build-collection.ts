@@ -10,6 +10,7 @@ import {
 } from '@tanstack/db'
 import type PocketBase from 'pocketbase'
 import type { RecordSubscribeOptions, RecordSubscription } from 'pocketbase'
+import { registerBatchTarget } from './batch-registry'
 import {
     createExpandFiler,
     stripFetchedRelations,
@@ -499,6 +500,21 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         onUpdate: resolveHandler(options?.onUpdate, defaultUpdate),
         onDelete: resolveHandler(options?.onDelete, defaultDelete),
         utils: { accept, reload: adapter.reload, evict },
+    })
+
+    // `batch` sends the mutations of several collections in one request, so
+    // it cannot call a custom handler and must not go around a disabled one.
+    registerBatchTarget(collection, {
+        pb,
+        collectionName,
+        handles: {
+            insert: options?.onInsert === undefined,
+            update: options?.onUpdate === undefined,
+            delete: options?.onDelete === undefined,
+        },
+        land: rows => landServerRows(rows as RecordType[]),
+        evict,
+        settle: settleHandler,
     })
 
     // A reconnect the server did not resume lost every event of the gap.
