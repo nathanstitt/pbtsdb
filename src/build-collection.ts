@@ -692,6 +692,22 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     // its subsets, the parents whose hold covers it and the accepted
     // holder; a delete on '*' removes the row. A delete is also recorded
     // against every fetch in flight, whose result may predate it.
+    //
+    // A create/update that files its relations first lands asynchronously.
+    // While one is pending, every later event waits behind it, so events
+    // apply in arrival order; with nothing pending an event applies at once.
+    let pendingEchoes: Promise<void> | undefined
+
+    function queueEchoes(work: Promise<void>): void {
+        const tail = work.catch(error =>
+            logger.error('Failed to apply realtime echo', { collectionName, error })
+        )
+        pendingEchoes = tail
+        tail.then(() => {
+            if (pendingEchoes === tail) pendingEchoes = undefined
+        })
+    }
+
     function handleRealtimeEvent(
         event: RecordSubscription<RecordType>,
         topic: string,
@@ -699,8 +715,22 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
     ): void {
         const id = idOf(event.record)
         if (!id) return
+        if (event.action === 'delete') adapter.noteDeleted(id, topic)
+        if (pendingEchoes) {
+            queueEchoes(pendingEchoes.then(() => applyRealtimeEvent(event, id, topic, expand)))
+            return
+        }
+        const filing = applyRealtimeEvent(event, id, topic, expand)
+        if (filing) queueEchoes(filing)
+    }
+
+    function applyRealtimeEvent(
+        event: RecordSubscription<RecordType>,
+        id: string,
+        topic: string,
+        expand: string | undefined
+    ): Promise<void> | undefined {
         if (event.action === 'delete') {
-            adapter.noteDeleted(id, topic)
             const applied =
                 topic === '*'
                     ? membership.dropAll([id])
@@ -735,7 +765,7 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
         // yet would hold the parent back for a load, so the parent lands
         // first in that case too.
         if (filer.canFileFirst([event.record], relationTargets)) {
-            filer
+            return filer
                 .fileExpanded([event.record], relationTargets, paths)
                 .then(change => {
                     if (land()) {
@@ -754,7 +784,6 @@ export function buildCollection<Schema extends SchemaDeclaration, C extends keyo
                         error,
                     })
                 )
-            return
         }
         if (!land()) {
             logger.debug('Ignoring realtime echo while sync is not running', { collectionName, id })
