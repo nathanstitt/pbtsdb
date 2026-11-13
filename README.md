@@ -900,6 +900,9 @@ the change. An update that moves a row out of every active filter sends no
 event, so the row stays in the store until its query refetches. Deletes and
 creates are delivered correctly. Use `'collection'` mode where that matters.
 
+Realtime events are applied in the order they arrive. An event that files
+expanded relations first lands asynchronously, and later events wait for it.
+
 A held `'query'` target keeps the ids filed into it until the parent
 collection is cleaned up, so a long session with many distinct filed ids
 opens many subscriptions, one per id chunk.
