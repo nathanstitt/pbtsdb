@@ -562,6 +562,51 @@ describe('sync adapter', () => {
             expect(t.ledger.idsOf(second)).toEqual(['a'])
         })
 
+        it('whose reload is cancelled after the unload expires, so an equal load fetches', async () => {
+            const t = setup('on-demand', 1000)
+            const abort = new AbortController()
+            const first = { ...named('x'), signal: abort.signal }
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([])
+            await load
+            const reload = t.adapter.reload()
+            expect(t.calls).toHaveLength(2)
+            t.unloadSubset(first)
+            abort.abort()
+            t.calls[1].reject(new Error('aborted'))
+            await reload
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+
+            const second = named('x')
+            const next = t.loadSubset(second)
+            expect(t.calls).toHaveLength(3)
+            t.calls[2].resolve([row('a', 'x')])
+            await next
+            expect(t.ledger.idsOf(second)).toEqual(['a'])
+        })
+
+        it('is not parked when its reload was cancelled before the unload', async () => {
+            const t = setup('on-demand', 1000)
+            const abort = new AbortController()
+            const first = { ...named('x'), signal: abort.signal }
+            const load = t.loadSubset(first)
+            t.calls[0].resolve([])
+            await load
+            const reload = t.adapter.reload()
+            abort.abort()
+            t.calls[1].reject(new Error('aborted'))
+            await reload
+            t.unloadSubset(first)
+            expect(t.realtime.releaseQueryFilters).toHaveBeenCalledTimes(1)
+
+            const second = named('x')
+            const next = t.loadSubset(second)
+            expect(t.calls).toHaveLength(3)
+            t.calls[2].resolve([row('a', 'x')])
+            await next
+            expect(t.ledger.idsOf(second)).toEqual(['a'])
+        })
+
         it('is released by expireParked', async () => {
             const t = setup('on-demand', 1000)
             const opts = named('x')

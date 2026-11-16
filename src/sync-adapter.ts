@@ -99,6 +99,8 @@ type Demand = {
     retryingSince: number | undefined
     /** The newest load ended in an error that is not retried. */
     failed: boolean
+    /** A refetch ended with no install, so the held rows may lack a server change; never parked. */
+    stale: boolean
 }
 
 /** One run of `sync()`, from its call to its cleanup. */
@@ -133,6 +135,7 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             wake: undefined,
             retryingSince: undefined,
             failed: false,
+            stale: false,
         }
         if (mode !== 'query') return { ...base, filters: undefined, counted: false }
         const filters = realtimeFiltersFor(toRequest({ where: realtimeWhereFor(opts) }))
@@ -262,7 +265,10 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         }
         result.filings.commit()
         const demand = run.demands.get(opts)
-        if (demand) demand.landed = true
+        if (demand) {
+            demand.landed = true
+            demand.stale = false
+        }
         const ids = idsOf(result.rows)
         const released = result.fromStore ? true : releaseOmitted(opts, before, ids)
         await settle(applied, wait)
@@ -427,10 +433,18 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
             // before its rows.
             result?.filings.undo()
             if (demand.seq !== seq) return demand.loading ?? []
+            if (refetch) markStale(run, opts, demand)
             return []
         })()
         demand.loading = loading
         return loading
+    }
+
+    // A parked demand is a cache, and a cache whose refetch was cancelled
+    // is not served: it expires, so the next equal load fetches.
+    function markStale(run: Run, opts: LoadSubsetOptions, demand: Demand): void {
+        demand.stale = true
+        if (run.demands.get(opts) === demand && demand.parked !== undefined) expire(run, opts)
     }
 
     function expire(run: Run, opts: LoadSubsetOptions): void {
@@ -452,7 +466,8 @@ export function createSyncAdapter<T extends object>(deps: SyncAdapterDeps<T>): S
         try {
             const demand = run.demands.get(opts)
             if (!demand) return
-            if (subsetGcTime <= 0 || demand.parked !== undefined || !demand.landed) {
+            const parkable = subsetGcTime > 0 && demand.landed && !demand.stale
+            if (!parkable || demand.parked !== undefined) {
                 expire(run, opts)
                 return
             }

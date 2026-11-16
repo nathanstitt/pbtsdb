@@ -20,6 +20,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A subset whose `reload()` fetch was cancelled, because its query unmounted
+  during the reload, is now released instead of parked. Before, an equal
+  query that mounted again within `subsetGcTime` reused the rows from before
+  the reload with no request, so a row a custom endpoint had created stayed
+  absent until the subset expired.
 - A parked subset with a `limit`, cursor or offset is now fetched again when
   an equal query adopts it. Before, a row deleted while the subset was parked
   made the adopted window short with no request: a `limit(1)` query answered
