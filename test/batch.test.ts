@@ -7,6 +7,7 @@ import {
     createCollection,
     disconnectRealtime,
     resetRealtime,
+    stagedBatch,
 } from '../src'
 import {
     authenticateTestUser,
@@ -328,6 +329,110 @@ describe('batch', () => {
             tags.insert(tag)
         }) as unknown as () => void
         await expect(batch(asyncFn)).rejects.toThrow(/must be synchronous/)
+        expect(tags.get(tag.id)).toBeUndefined()
+    })
+
+    it('stagedBatch shows the rows at once and sends nothing before commit', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const send = vi.spyOn(pb, 'send')
+        const tag = tagRow()
+        const staged = stagedBatch(() => {
+            tags.insert(tag)
+        })
+
+        expect(tags.get(tag.id)?.name).toBe(tag.name)
+        await new Promise(resolve => setTimeout(resolve, 50))
+        expect(send.mock.calls.filter(([path]) => path === '/api/batch')).toHaveLength(0)
+        expect(await exists('tags', tag.id)).toBe(false)
+
+        await staged.commit()
+        expect(send.mock.calls.filter(([path]) => path === '/api/batch')).toHaveLength(1)
+        expect(tags.get(tag.id)?.created).toBeTruthy()
+        expect(await exists('tags', tag.id)).toBe(true)
+    })
+
+    it('stagedBatch commits reach the server in the order they are committed', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const first = tagRow()
+        const second = tagRow()
+        const stagedFirst = stagedBatch(() => {
+            tags.insert(first)
+        })
+        const stagedSecond = stagedBatch(() => {
+            tags.insert(second)
+        })
+        expect(tags.get(first.id)).toBeDefined()
+        expect(tags.get(second.id)).toBeDefined()
+
+        await stagedFirst.commit()
+        expect(await exists('tags', first.id)).toBe(true)
+        expect(await exists('tags', second.id)).toBe(false)
+        // The first commit must not remove the row that still waits.
+        expect(tags.get(second.id)?.name).toBe(second.name)
+
+        await stagedSecond.commit()
+        expect(await exists('tags', second.id)).toBe(true)
+    })
+
+    it('stagedBatch rolls back its rows when the commit fails', async () => {
+        const { books } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ book: books })))
+        await waitForLoadFinish(live.result)
+
+        const bad = bookRow(authorId, { title: '' })
+        const staged = stagedBatch(() => {
+            books.insert(bad)
+        })
+        expect(books.get(bad.id)).toBeDefined()
+
+        await expect(staged.commit()).rejects.toBeInstanceOf(BatchMutationError)
+        expect(books.get(bad.id)).toBeUndefined()
+        expect(await exists('books', bad.id)).toBe(false)
+    })
+
+    it('stagedBatch rollback removes the rows and sends nothing', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const unhandled: unknown[] = []
+        const record = (reason: unknown) => unhandled.push(reason)
+        process.on('unhandledRejection', record)
+        const send = vi.spyOn(pb, 'send')
+        const tag = tagRow()
+        try {
+            const staged = stagedBatch(() => {
+                tags.insert(tag)
+            })
+            expect(tags.get(tag.id)).toBeDefined()
+            staged.rollback()
+            await new Promise(resolve => setTimeout(resolve, 20))
+        } finally {
+            process.off('unhandledRejection', record)
+        }
+        expect(unhandled).toEqual([])
+        expect(tags.get(tag.id)).toBeUndefined()
+        expect(send.mock.calls.filter(([path]) => path === '/api/batch')).toHaveLength(0)
+    })
+
+    it('stagedBatch throws from the call when the callback throws', async () => {
+        const { tags } = collections()
+        const live = renderHook(() => useLiveQuery(q => q.from({ tag: tags })))
+        await waitForLoadFinish(live.result)
+
+        const tag = tagRow()
+        expect(() =>
+            stagedBatch(() => {
+                tags.insert(tag)
+                throw new Error('stop')
+            })
+        ).toThrow('stop')
         expect(tags.get(tag.id)).toBeUndefined()
     })
 

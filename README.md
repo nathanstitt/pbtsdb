@@ -553,6 +553,28 @@ try {
 - File uploads are not supported in a batch. The batch is sent as JSON.
 - A batch does not detect a stale editor. It only makes the write atomic.
 
+#### Show now, send later
+
+`stagedBatch` applies the mutations at once, as optimistic changes, and sends the request only when you call `commit()`. Use it when the user must see a change immediately but its request must wait, for example until an earlier request that the server must receive first has returned.
+
+```typescript
+import { stagedBatch, newRecordId } from 'pbtsdb'
+
+const staged = stagedBatch(() => {
+    cards.insert({ id: newRecordId(), title })
+})
+// The card is in the collection now. No request was sent.
+
+await earlierCreate
+await staged.commit()
+```
+
+- `commit()` sends the one batch request. It resolves and rejects as `batch` does, and a failed commit rolls the changes back.
+- `rollback()` removes the optimistic changes and sends nothing.
+- Call `commit()` once. Until then the rows have `$hasPendingWrites`.
+- When the callback throws, the changes are rolled back and `stagedBatch` throws the error.
+- The rules for `batch` above apply here too.
+
 ### Writing server rows yourself
 
 `collection.accept(rows)` lands rows the server returned, for example the response of a custom endpoint, as confirmed state. A row older than the stored one is ignored. Use it when the screen must update before the realtime echo arrives. It resolves when the rows are accepted, so a custom mutation handler can await it.

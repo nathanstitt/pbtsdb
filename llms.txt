@@ -259,6 +259,7 @@ await batch(() => {
 - Needs the PocketBase batch API enabled on the server
 - Refused for a collection with a custom or disabled handler for that operation, and for collections of two PocketBase clients
 - No file uploads; the batch is sent as JSON
+- `stagedBatch(fn)` applies the same mutations at once (optimistic) and returns `{ commit, rollback }`; the one request is sent only by `commit()`. Use it when the user must see a change at once but its request must wait for an earlier one
 
 ## Common Patterns
 

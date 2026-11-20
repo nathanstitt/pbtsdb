@@ -163,13 +163,38 @@ async function sendBatch(mutations: readonly PendingMutation[]): Promise<void> {
  * back every optimistic change) when the batch fails or is refused.
  */
 export async function batch(fn: () => void): Promise<void> {
+    await stagedBatch(fn).commit()
+}
+
+/** A batch whose optimistic changes are applied and whose request is not sent yet. */
+export interface StagedBatch {
+    /**
+     * Send the batch. Resolves and rejects as {@link batch} does. Call it
+     * once: a batch that was sent or rolled back cannot be sent again.
+     */
+    commit: () => Promise<void>
+    /** Remove the optimistic changes. Nothing is sent. */
+    rollback: () => void
+}
+
+/**
+ * Apply the collection mutations made in `fn` now, as optimistic changes, and
+ * send them later as one PocketBase batch, when `commit` is called.
+ *
+ * Use it when the user must see a change at once but its request must wait,
+ * for example for an earlier request that the server must receive first.
+ *
+ * `fn` must be synchronous. When it throws, the changes are rolled back and
+ * the error is thrown from this call.
+ */
+export function stagedBatch(fn: () => void): StagedBatch {
     const transaction = createTransaction({
         autoCommit: false,
         mutationFn: ({ transaction: tx }) => sendBatch(tx.mutations),
     })
     // A rollback rejects the transaction's own promise. Nothing else observes
-    // it when the callback threw before any mutation; the caller gets the
-    // error from this function.
+    // it when the callback threw before any mutation or the caller rolled
+    // back; a failed commit reaches the caller through commit().
     transaction.when('settled').catch(() => {})
     try {
         transaction.mutate(() => {
@@ -184,5 +209,12 @@ export async function batch(fn: () => void): Promise<void> {
         transaction.rollback()
         throw error
     }
-    await transaction.commit()
+    return {
+        commit: async () => {
+            await transaction.commit()
+        },
+        rollback: () => {
+            transaction.rollback()
+        },
+    }
 }
