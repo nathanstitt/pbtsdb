@@ -1,6 +1,6 @@
 {
     "name": "pbtsdb",
-    "version": "2.1.4",
+    "version": "2.1.5",
     "description": "Type-safe PocketBase integration with TanStack DB",
     "keywords": [
         "pocketbase",
@@ -36,7 +36,12 @@
             "types": "./dist/core.d.ts"
         }
     },
-    "files": ["dist", "README.md", "llms.txt", "LICENSE"],
+    "files": [
+        "dist",
+        "README.md",
+        "llms.txt",
+        "LICENSE"
+    ],
     "scripts": {
         "build": "tsup",
         "prepublishOnly": "npm run build",
