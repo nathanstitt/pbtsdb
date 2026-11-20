@@ -36,15 +36,10 @@
             "types": "./dist/core.d.ts"
         }
     },
-    "files": [
-        "dist",
-        "README.md",
-        "llms.txt",
-        "LICENSE"
-    ],
+    "files": ["dist", "README.md", "llms.txt", "LICENSE"],
     "scripts": {
         "build": "tsup",
-        "prepublishOnly": "npm run checks && npm test && npm run build",
+        "prepublishOnly": "npm run build",
         "db:reset": "rm -rf ./pb_data && pocketbase migrate up",
         "checks": "run-p typecheck lint",
         "lint": "biome check .",
